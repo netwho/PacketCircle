@@ -33,7 +33,7 @@ Get up and running with PacketCircle in under 5 minutes.
 
 2. **Run the unified installer:**
    ```bash
-   cd installer/linux-x86_64-multi
+   cd installer/linux-x86_64
    chmod +x install.sh
    ./install.sh
    ```
@@ -58,15 +58,15 @@ cp installer/macos-universal/packetcircle.so ~/.local/lib/wireshark/plugins/4-6/
 ```bash
 # Wireshark 4.2.x
 mkdir -p ~/.local/lib/wireshark/plugins/4.2/epan/
-cp installer/linux-x86_64-multi/bin/packetcircle-ws42.so ~/.local/lib/wireshark/plugins/4.2/epan/packetcircle.so
+cp installer/linux-x86_64/bin/packetcircle-ws42.so ~/.local/lib/wireshark/plugins/4.2/epan/packetcircle.so
 
 # Wireshark 4.4.x (e.g. Debian 13)
 mkdir -p ~/.local/lib/wireshark/plugins/4.4/epan/
-cp installer/linux-x86_64-multi/bin/packetcircle-ws44.so ~/.local/lib/wireshark/plugins/4.4/epan/packetcircle.so
+cp installer/linux-x86_64/bin/packetcircle-ws44.so ~/.local/lib/wireshark/plugins/4.4/epan/packetcircle.so
 
 # Wireshark 4.6.x
 mkdir -p ~/.local/lib/wireshark/plugins/4.6/epan/
-cp installer/linux-x86_64-multi/bin/packetcircle-ws46.so ~/.local/lib/wireshark/plugins/4.6/epan/packetcircle.so
+cp installer/linux-x86_64/bin/packetcircle-ws46.so ~/.local/lib/wireshark/plugins/4.6/epan/packetcircle.so
 ```
 
 > **Tip**: Find your exact plugin directory in Wireshark under Help -> About Wireshark -> Folders -> Personal Plugins.

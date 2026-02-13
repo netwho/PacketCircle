@@ -10,7 +10,7 @@
 [![Wireshark](https://img.shields.io/badge/Wireshark-4.2.x%20%7C%204.4.x%20%7C%204.6.x-1679A7.svg)](https://www.wireshark.org/)
 [![C++/Qt6](https://img.shields.io/badge/C%2B%2B%2FQt6-Native-41CD52.svg)](https://www.qt.io/)
 [![macOS](https://img.shields.io/badge/macOS-Universal%20Binary-000000.svg?logo=apple)](installer/macos-universal/)
-[![Linux](https://img.shields.io/badge/Linux-x86__64-FCC624.svg?logo=linux&logoColor=black)](installer/linux-x86_64-multi/)
+[![Linux](https://img.shields.io/badge/Linux-x86__64-FCC624.svg?logo=linux&logoColor=black)](installer/linux-x86_64/)
 [![Windows](https://img.shields.io/badge/Windows-x86__64-0078D6.svg?logo=windows&logoColor=white)](installer/windows-x86_64/)
 
 A native Wireshark plugin that visualizes network communication pairs in an interactive circle diagram with protocol color coding, traffic volume indicators, and PDF report export.
@@ -87,7 +87,7 @@ cd PacketCircle\installer\windows-x86_64
 #### Linux (x86_64) — Wireshark 4.2.x / 4.4.x / 4.6.x
 ```bash
 git clone https://github.com/netwho/PacketCircle.git
-cd PacketCircle/installer/linux-x86_64-multi
+cd PacketCircle/installer/linux-x86_64
 chmod +x install.sh
 ./install.sh
 ```
@@ -108,7 +108,7 @@ cp installer/macos-universal/packetcircle.so ~/.local/lib/wireshark/plugins/4-6/
 # bin/packetcircle-ws44.so  → Wireshark 4.4.x
 # bin/packetcircle-ws46.so  → Wireshark 4.6.x
 mkdir -p ~/.local/lib/wireshark/plugins/4.4/epan/
-cp installer/linux-x86_64-multi/bin/packetcircle-ws44.so ~/.local/lib/wireshark/plugins/4.4/epan/packetcircle.so
+cp installer/linux-x86_64/bin/packetcircle-ws44.so ~/.local/lib/wireshark/plugins/4.4/epan/packetcircle.so
 ```
 
 ```powershell
@@ -220,7 +220,7 @@ See [BUILD.md](src/BUILD.md) for detailed instructions.
 
 **macOS and Windows** ship with Wireshark 4.6.x builds only. On these platforms, Wireshark is typically installed or updated directly from [wireshark.org](https://www.wireshark.org/download.html), so running the latest 4.6.x release is straightforward.
 
-**Linux** distributions often ship older Wireshark versions in their package repositories (e.g., Debian 13 Trixie ships 4.4.x, some distributions still carry 4.2.x). The unified Linux installer (`installer/linux-x86_64-multi/`) includes binaries for all three series and automatically selects the right one.
+**Linux** distributions often ship older Wireshark versions in their package repositories (e.g., Debian 13 Trixie ships 4.4.x, some distributions still carry 4.2.x). The unified Linux installer (`installer/linux-x86_64/`) includes binaries for all three series and automatically selects the right one.
 
 > **Why separate binaries?** Wireshark uses a versioned plugin ABI (`MAJOR.MINOR`). Each minor release series (4.0, 4.2, 4.4, 4.6) has its own ABI. Pre-built plugins only load in the matching series.
 
@@ -249,7 +249,7 @@ This is the most common error and means **your Wireshark version doesn't match t
 - `Library not loaded: @rpath/libwireshark.18.dylib` — you installed the 4.4.x binary but have Wireshark 4.6.x.
 - `Symbol not found: _some_function_name` — similar ABI mismatch between your Wireshark and the plugin.
 
-**Fix:** Use the unified Linux installer (`installer/linux-x86_64-multi/`) which auto-detects your version, or build from source (see [Building from Source](#building-from-source)).
+**Fix:** Use the unified Linux installer (`installer/linux-x86_64/`) which auto-detects your version, or build from source (see [Building from Source](#building-from-source)).
 
 ### Plugin Not Appearing in Tools Menu
 
