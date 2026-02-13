@@ -1,12 +1,17 @@
 # PacketCircle
 
+<p align="center">
+  <img src="PacketCircle.png" alt="PacketCircle Logo" width="128">
+</p>
+
 [![Version](https://img.shields.io/badge/version-0.2.2-blue.svg)](CHANGELOG.md)
 [![Status](https://img.shields.io/badge/status-public%20beta-orange.svg)](CHANGELOG.md)
 [![License: GPL v2](https://img.shields.io/badge/License-GPL%20v2-blue.svg)](LICENSE)
-[![Wireshark](https://img.shields.io/badge/Wireshark-4.4.x%20%7C%204.6.x-1679A7.svg)](https://www.wireshark.org/)
+[![Wireshark](https://img.shields.io/badge/Wireshark-4.2.x%20%7C%204.4.x%20%7C%204.6.x-1679A7.svg)](https://www.wireshark.org/)
 [![C++/Qt6](https://img.shields.io/badge/C%2B%2B%2FQt6-Native-41CD52.svg)](https://www.qt.io/)
 [![macOS](https://img.shields.io/badge/macOS-Universal%20Binary-000000.svg?logo=apple)](installer/macos-universal/)
-[![Linux](https://img.shields.io/badge/Linux-x86__64-FCC624.svg?logo=linux&logoColor=black)](installer/linux-x86_64/)
+[![Linux](https://img.shields.io/badge/Linux-x86__64-FCC624.svg?logo=linux&logoColor=black)](installer/linux-x86_64-multi/)
+[![Windows](https://img.shields.io/badge/Windows-x86__64-0078D6.svg?logo=windows&logoColor=white)](installer/windows-x86_64/)
 
 A native Wireshark plugin that visualizes network communication pairs in an interactive circle diagram with protocol color coding, traffic volume indicators, and PDF report export.
 
@@ -15,26 +20,23 @@ A native Wireshark plugin that visualizes network communication pairs in an inte
 ## Features
 
 - **Circle Visualization** - Interactive circular graph showing communication relationships between network endpoints
-- **Protocol Color Coding** - Lines colored by the highest protocol observed (HTTP, HTTPS, SMB, DNS, MSSQL, SSH, FTP, etc.)
+- **Protocol Color Coding** - Lines colored by transport protocol (TCP, UDP, ICMP, ARP, SCTP, etc.)
+- **Multicolor Lines** - Connections using both TCP and UDP are drawn as dotted lines with alternating colors, making mixed-protocol communication instantly visible
 - **Line Weight** - Proportional to packet/byte volume for at-a-glance traffic assessment
-- **Mixed Protocol Indicators** - Dotted lines with alternating colors for connections using both TCP and UDP
-- **Node Tooltips** - Hover over nodes to see destination ports, service names, and packet counts
+- **Rich Tooltips** - Hover over nodes to see IP address, packet counts, destination ports, and service names in a detailed popup
 - **Directional Filtering** - Select individual communication pairs to apply precise unidirectional Wireshark display filters
 - **Protocol Filtering** - Filter the visualization by specific protocols using interactive checkboxes
 - **PDF Report Export** - Generate a one-page PDF report with the circle visualization, IP pair table, and summary text
 - **Multiple Views** - Toggle between circle view and table view
 - **Conversation Limits** - Limit display to top 10, 25, or 50 conversations
 - **Live Capture Support** - Works with both loaded PCAP files and live captures
-- **Universal Binary** - Single binary runs natively on both Intel and Apple Silicon Macs
+- **Cross-Platform** - macOS Universal Binary (Intel + Apple Silicon), Linux x86_64, Windows x86_64
 
 ## Screenshots
 
 ### PacketCircle Visualization
 
-Access the plugin from the Wireshark menu:
-```
-Tools -> PacketCircle
-```
+Access the plugin from the Wireshark menu: **Tools -> PacketCircle**
 
 ![PacketCircle Screenshot](screenshots/packetcircle-main.png)
 
@@ -44,10 +46,26 @@ Tools -> PacketCircle
 
 *Setting a filter based on the visualization*
 
+### Multicolor Lines
+
+Connections that use both TCP and UDP are drawn as dotted lines with alternating colors, making mixed-protocol communication instantly visible.
+
+![Multicolor Lines](screenshots/packetcircle-multicolor.png)
+
+*Dotted multicolor lines indicate endpoints communicating over both TCP and UDP*
+
+### Rich Tooltips
+
+Hover over any node to see a detailed popup with IP address, total packet count, destination ports, and resolved service names.
+
+![Tooltip](screenshots/packetcircle-tooltip.png)
+
+*Node tooltip showing destination ports and service names*
+
 
 ## Quick Start
 
-> **Important**: Pre-built binaries are available for **Wireshark 4.4.x** and **4.6.x**. The installer will check your version and warn you if it's incompatible. See [Supported Wireshark Versions](#supported-wireshark-versions) for details.
+> **Important**: Pre-built binaries are available for all major platforms. macOS and Windows target **Wireshark 4.6.x**. The Linux unified installer supports **4.2.x, 4.4.x, and 4.6.x** and auto-detects your version. See [Supported Wireshark Versions](#supported-wireshark-versions).
 
 ### Installation
 
@@ -59,38 +77,43 @@ chmod +x install.sh
 ./install.sh
 ```
 
-#### Linux (x86_64) — Wireshark 4.6.x
+#### Windows (x86_64) — Wireshark 4.6.x
+```powershell
+git clone https://github.com/netwho/PacketCircle.git
+cd PacketCircle\installer\windows-x86_64
+.\install.ps1
+```
+
+#### Linux (x86_64) — Wireshark 4.2.x / 4.4.x / 4.6.x
 ```bash
 git clone https://github.com/netwho/PacketCircle.git
-cd PacketCircle/installer/linux-x86_64
+cd PacketCircle/installer/linux-x86_64-multi
 chmod +x install.sh
 ./install.sh
 ```
 
-#### Linux (x86_64) — Wireshark 4.4.x (e.g. Debian 13 Trixie)
-```bash
-git clone https://github.com/netwho/PacketCircle.git
-cd PacketCircle/installer/linux-x86_64-ws44
-chmod +x install.sh
-./install.sh
-```
+The unified Linux installer auto-detects your Wireshark version and installs the matching binary.
 
 #### Manual Install
 
-> **Important**: macOS uses **dashes** (`4-6`), Linux uses **dots** (`4.6` or `4.4`) in the plugin directory name.
+> **Note**: macOS uses **dashes** (`4-6`), Linux uses **dots** (`4.2`, `4.4`, `4.6`), Windows uses **dashes** (`4-6`) in the plugin directory name.
 
 ```bash
 # macOS (Wireshark 4.6.x)
 mkdir -p ~/.local/lib/wireshark/plugins/4-6/epan/
 cp installer/macos-universal/packetcircle.so ~/.local/lib/wireshark/plugins/4-6/epan/
 
-# Linux (Wireshark 4.6.x)
-mkdir -p ~/.local/lib/wireshark/plugins/4.6/epan/
-cp installer/linux-x86_64/packetcircle.so ~/.local/lib/wireshark/plugins/4.6/epan/
-
-# Linux (Wireshark 4.4.x)
+# Linux — pick the binary matching your Wireshark version:
+# bin/packetcircle-ws42.so  → Wireshark 4.2.x
+# bin/packetcircle-ws44.so  → Wireshark 4.4.x
+# bin/packetcircle-ws46.so  → Wireshark 4.6.x
 mkdir -p ~/.local/lib/wireshark/plugins/4.4/epan/
-cp installer/linux-x86_64-ws44/packetcircle.so ~/.local/lib/wireshark/plugins/4.4/epan/
+cp installer/linux-x86_64-multi/bin/packetcircle-ws44.so ~/.local/lib/wireshark/plugins/4.4/epan/packetcircle.so
+```
+
+```powershell
+# Windows (Wireshark 4.6.x) — run in PowerShell
+Copy-Item installer\windows-x86_64\packetcircle.dll "$env:APPDATA\Wireshark\plugins\4-6\epan\"
 ```
 
 > **Tip**: Check your exact plugin path in Wireshark under Help -> About Wireshark -> Folders -> Personal Plugins.
@@ -103,30 +126,6 @@ cp installer/linux-x86_64-ws44/packetcircle.so ~/.local/lib/wireshark/plugins/4.
 4. **Export**: Click "PDF" to generate a report
 
 See [QUICKSTART.md](QUICKSTART.md) for a detailed guide.
-
-## Protocol Color Mapping
-
-The plugin colors connections by their transport/network layer protocol:
-
-| Protocol | Color |
-|----------|-------|
-| TCP | Green |
-| UDP | Orange |
-| ARP | Sky Blue |
-| ICMP | Turquoise |
-| ICMPv6 | Pink |
-| OSPF, RIP, EIGRP | Peach/Moccasin |
-| BGP, IGMP | Light Pink |
-| PIM | Lavender |
-| VRRP | Khaki |
-| HSRP | Plum |
-| SCTP | Lemon |
-| DCCP | Pink |
-| IPv4/IPv6 | Light Gray |
-| Ethernet | Silver |
-| Unknown | Gray |
-
-Protocols not in the built-in palette are assigned a consistent auto-generated color based on their name.
 
 ## Controls
 
@@ -212,24 +211,25 @@ See [BUILD.md](src/BUILD.md) for detailed instructions.
 
 ## Supported Wireshark Versions
 
-Pre-built binaries are available for two Wireshark release series:
-
-| Wireshark Version | macOS (Universal) | Linux x86_64 | Installer Directory |
+| Wireshark Version | macOS (Universal) | Windows x86_64 | Linux x86_64 |
 |---|---|---|---|
-| **4.6.x** (4.6.0 – 4.6.x) | Supported | Supported | `installer/linux-x86_64/` |
-| **4.4.x** (4.4.0 – 4.4.x) | — | Supported | `installer/linux-x86_64-ws44/` |
-| 4.2.x | — | — | Build from source |
+| **4.6.x** (4.6.0 – 4.6.x) | Supported | Supported | Supported |
+| **4.4.x** (4.4.0 – 4.4.x) | — | — | Supported |
+| **4.2.x** (4.2.0 – 4.2.x) | — | — | Supported |
 | 4.0.x | — | — | Build from source |
 
-> **Why separate builds?** Wireshark uses a versioned plugin ABI (`MAJOR.MINOR`). Each minor release series (4.0, 4.2, 4.4, 4.6) has its own ABI. Pre-built plugins only load in the matching series. To use PacketCircle with a different Wireshark version, build from source against that version's source tree (see [Building from Source](#building-from-source)).
->
-> **Debian 13 (Trixie)** ships Wireshark 4.4.x — use the `linux-x86_64-ws44` installer.
+**macOS and Windows** ship with Wireshark 4.6.x builds only. On these platforms, Wireshark is typically installed or updated directly from [wireshark.org](https://www.wireshark.org/download.html), so running the latest 4.6.x release is straightforward.
+
+**Linux** distributions often ship older Wireshark versions in their package repositories (e.g., Debian 13 Trixie ships 4.4.x, some distributions still carry 4.2.x). The unified Linux installer (`installer/linux-x86_64-multi/`) includes binaries for all three series and automatically selects the right one.
+
+> **Why separate binaries?** Wireshark uses a versioned plugin ABI (`MAJOR.MINOR`). Each minor release series (4.0, 4.2, 4.4, 4.6) has its own ABI. Pre-built plugins only load in the matching series.
 
 ## Requirements
 
-- **Wireshark** 4.4.x or 4.6.x (pre-built binaries) or 4.x (build from source)
+- **Wireshark** 4.6.x (macOS/Windows) or 4.2.x–4.6.x (Linux), or any 4.x if building from source
 - **macOS** 13.0 or later (Ventura+) — Universal Binary (Intel + Apple Silicon)
-- **Linux** x86_64 — Ubuntu 24.04+, Debian 12+/13, Fedora 39+, or similar with Qt6
+- **Windows** 10/11 x86_64 — Wireshark 4.6.x with Qt6
+- **Linux** x86_64 — Ubuntu 22.04+, Debian 12+/13, Fedora 39+, or similar with Qt6
 - No additional runtime dependencies beyond what Wireshark provides
 
 ## Documentation
@@ -245,34 +245,30 @@ Pre-built binaries are available for two Wireshark release series:
 This is the most common error and means **your Wireshark version doesn't match the plugin binary**.
 
 **Example errors:**
-- `Library not loaded: @rpath/libwireshark.19.dylib` — you are using the 4.6.x plugin with Wireshark 4.4.x (which ships `libwireshark.18`). Use the `linux-x86_64-ws44` installer instead.
-- `Library not loaded: @rpath/libwireshark.18.dylib` — you are using the 4.4.x plugin with Wireshark 4.6.x. Use the `linux-x86_64` installer instead.
+- `Library not loaded: @rpath/libwireshark.19.dylib` — you installed the 4.6.x binary but have Wireshark 4.4.x or 4.2.x.
+- `Library not loaded: @rpath/libwireshark.18.dylib` — you installed the 4.4.x binary but have Wireshark 4.6.x.
 - `Symbol not found: _some_function_name` — similar ABI mismatch between your Wireshark and the plugin.
 
-**Fix:** Use the matching installer for your Wireshark version, or build from source (see [Building from Source](#building-from-source)).
+**Fix:** Use the unified Linux installer (`installer/linux-x86_64-multi/`) which auto-detects your version, or build from source (see [Building from Source](#building-from-source)).
 
 ### Plugin Not Appearing in Tools Menu
 
 **Check:**
 1. Your Wireshark version matches the plugin binary (Help -> About Wireshark)
-2. Plugin is in the correct directory (note: macOS uses dashes, Linux uses dots):
+2. Plugin is in the correct directory:
    - macOS (4.6.x): `~/.local/lib/wireshark/plugins/4-6/epan/`
-   - Linux (4.6.x): `~/.local/lib/wireshark/plugins/4.6/epan/`
+   - Windows (4.6.x): `%APPDATA%\Wireshark\plugins\4-6\epan\`
+   - Linux (4.2.x): `~/.local/lib/wireshark/plugins/4.2/epan/`
    - Linux (4.4.x): `~/.local/lib/wireshark/plugins/4.4/epan/`
+   - Linux (4.6.x): `~/.local/lib/wireshark/plugins/4.6/epan/`
 3. File has correct permissions: `chmod 644 packetcircle.so`
 4. Wireshark was restarted after installation
 5. Verify the exact path: Help -> About Wireshark -> Folders -> Personal Plugins
 
 **Fix:**
 ```bash
-# Verify location (macOS, Wireshark 4.6.x)
-ls -la ~/.local/lib/wireshark/plugins/4-6/epan/packetcircle.so
-
-# Verify location (Linux, Wireshark 4.6.x)
-ls -la ~/.local/lib/wireshark/plugins/4.6/epan/packetcircle.so
-
-# Verify location (Linux, Wireshark 4.4.x — e.g. Debian 13)
-ls -la ~/.local/lib/wireshark/plugins/4.4/epan/packetcircle.so
+# Find your plugin (check all possible locations)
+ls -la ~/.local/lib/wireshark/plugins/*/epan/packetcircle.so
 
 # Fix permissions
 chmod 644 packetcircle.so
@@ -284,9 +280,9 @@ chmod 644 packetcircle.so
 
 ### Plugin Loads but Crashes
 
-- Ensure you're using a compatible Wireshark version (4.4.x or 4.6.x for pre-built binaries)
+- Ensure you're using a compatible Wireshark version (4.6.x for macOS/Windows; 4.2.x, 4.4.x, or 4.6.x for Linux)
 - Check that the binary matches your architecture (`file packetcircle.so`)
-- Try reinstalling from the universal binary
+- Try reinstalling using the appropriate installer for your platform
 
 ### PDF Export Issues
 

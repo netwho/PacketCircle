@@ -6,8 +6,9 @@ All notable changes to PacketCircle will be documented in this file.
 
 ### Added
 - **Adaptive MAC Display** - MAC addresses in the pair list show abbreviated form when the panel is narrow and full address when the panel is wide enough
-- **Wireshark 4.4.x Support** - Pre-built Linux x86_64 binary for Wireshark 4.4.x (Debian 13 Trixie)
-- Source code now uses conditional compilation to support both Wireshark 4.4.x and 4.6.x APIs
+- **Multi-Version Linux Support** - Unified installer with pre-built binaries for Wireshark 4.2.x, 4.4.x, and 4.6.x
+- **Smart Installer** - Linux installer auto-detects Wireshark version and installs the correct binary
+- Source code uses conditional compilation to support Wireshark 4.2.x–4.6.x APIs
 
 ### Changed
 - Reduced font size on Windows for better cross-platform consistency
