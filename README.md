@@ -299,6 +299,7 @@ This program is free software; you can redistribute it and/or modify it under th
 
 - Wireshark development team for the plugin framework and Qt integration
 - Network analysis community for feedback and testing
+- AI-Assisted: yes (Claude) — used for build system automation, installer scripting, cross-platform compatibility, and documentation
 
 ## Support & Contact
 

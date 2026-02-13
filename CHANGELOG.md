@@ -9,6 +9,7 @@ All notable changes to PacketCircle will be documented in this file.
 - **Multi-Version Linux Support** - Unified installer with pre-built binaries for Wireshark 4.2.x, 4.4.x, and 4.6.x
 - **Smart Installer** - Linux installer auto-detects Wireshark version and installs the correct binary
 - Source code uses conditional compilation to support Wireshark 4.2.x–4.6.x APIs
+- AI-Assisted: yes (Claude) — build automation, installer scripting, cross-platform compatibility, documentation
 
 ### Changed
 - Reduced font size on Windows for better cross-platform consistency
