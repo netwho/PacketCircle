@@ -257,15 +257,15 @@ This is the most common error and means **your Wireshark version doesn't match t
 1. Your Wireshark version matches the plugin binary (Help -> About Wireshark)
 2. Plugin is in the correct directory:
    - macOS (4.6.x): `~/.local/lib/wireshark/plugins/4-6/epan/`
-   - Windows (4.6.x): `%APPDATA%\Wireshark\plugins\4-6\epan\`
+   - Windows (4.6.x): `%APPDATA%\Wireshark\plugins\4.6\epan\`
    - Linux (4.2.x): `~/.local/lib/wireshark/plugins/4.2/epan/`
    - Linux (4.4.x): `~/.local/lib/wireshark/plugins/4.4/epan/`
    - Linux (4.6.x): `~/.local/lib/wireshark/plugins/4.6/epan/`
-3. File has correct permissions: `chmod 644 packetcircle.so`
+3. File has correct permissions: `chmod 644 packetcircle.so` (Linux/macOS)
 4. Wireshark was restarted after installation
 5. Verify the exact path: Help -> About Wireshark -> Folders -> Personal Plugins
 
-**Fix:**
+**Fix (Linux/macOS):**
 ```bash
 # Find your plugin (check all possible locations)
 ls -la ~/.local/lib/wireshark/plugins/*/epan/packetcircle.so
@@ -277,6 +277,31 @@ chmod 644 packetcircle.so
 > **Common Linux issue**: If you installed to `4-6` (dashes) on Linux, move the file to `4.6` (dots). Linux Wireshark uses dots in the plugin version directory.
 
 > **DBus warnings**: Messages like "Session DBus not running" are harmless Qt warnings and do not prevent the plugin from loading.
+
+### Windows: Plugin Not Loading (especially Windows 10)
+
+The plugin has been verified on Windows 11 but may fail to load on Windows 10 due to differences in DLL search paths, VC++ runtime versions, or internet download blocking.
+
+**Quick checks:**
+1. **Unblock the DLL** - If you downloaded the plugin from GitHub, Windows may silently block it. Right-click `packetcircle.dll` -> Properties -> check **Unblock** -> Apply. Or in PowerShell:
+   ```powershell
+   Unblock-File "$env:APPDATA\Wireshark\plugins\4.6\epan\packetcircle.dll"
+   ```
+2. **Install the latest VC++ Redistributable** - Download and install [VC++ 2022 Redistributable (x64)](https://aka.ms/vs/17/release/vc_redist.x64.exe)
+3. **Verify the plugin directory** - Check Help -> About Wireshark -> Folders -> Personal Plugins for the exact path Wireshark expects, then confirm the DLL is in the `epan` subdirectory
+4. **Check Wireshark's debug log:**
+   ```cmd
+   "C:\Program Files\Wireshark\Wireshark.exe" -o log.level:debug 2> debug.txt
+   ```
+   Search `debug.txt` for `packetcircle` to find loading errors.
+
+**Automated diagnostics:** Run the troubleshooting script from the [`tools/`](tools/) directory:
+
+```powershell
+.\troubleshoot.ps1
+```
+
+This script checks all DLL dependencies, verifies the plugin directory, tests DLL loading, detects internet download blocks, and reports exactly what is wrong. No extra software needed - it runs natively on any Windows 10/11 machine. See [`tools/README.md`](tools/README.md) for details.
 
 ### Plugin Loads but Crashes
 
