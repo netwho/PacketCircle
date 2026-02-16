@@ -37,8 +37,56 @@
 #include <QStackedWidget>
 #include <QAbstractItemView>
 #include <QLineEdit>
+#include <QTimer>
+#include <QMenu>
+#include <QEnterEvent>
+#include <QSettings>
+#include <QDir>
+#include <QFile>
+#include <QCloseEvent>
+#include <QPointer>
 #include "circle_widget.h"
 #include "packet_analyzer.h"
+
+/* Connection popup - shown when clicking a line in the circle view */
+class ConnectionPopup : public QWidget
+{
+    Q_OBJECT
+
+public:
+    ConnectionPopup(comm_pair_t *pair, comm_pair_t *reversePair, gboolean useMAC, QWidget *parent = nullptr);
+    ~ConnectionPopup();
+
+protected:
+    void enterEvent(QEnterEvent *event) override;
+    void leaveEvent(QEvent *event) override;
+
+private:
+    void populateTable();
+    void showContextMenu(const QPoint &pos);
+    void applyFilterForRow(int row);
+    void followTCPStreamForRow(int row);
+    void openTcpStreamGraph(int row, const QString &graphName);
+    QString buildFilterForRow(int row);
+
+    comm_pair_t *m_pair;        /* Primary pair (clicked direction) */
+    comm_pair_t *m_reversePair; /* Reverse direction (may be NULL) */
+    gboolean m_useMAC;
+    QTableWidget *m_table;
+    QTimer *m_autoCloseTimer;
+    QLabel *m_headerLabel;
+    bool m_contextMenuActive;
+
+    /* Per-row data (with per-port protocol information) */
+    struct RowData {
+        QString protocol;  /* "TCP", "UDP", or "TCP+UDP" */
+        quint16 port;
+        quint64 packets;
+        bool isTcp;        /* TRUE if TCP was seen on this specific port */
+        bool isUdp;        /* TRUE if UDP was seen on this specific port */
+    };
+    QList<RowData> m_rowData;
+};
 
 class MainWindow : public QMainWindow
 {
@@ -63,6 +111,7 @@ public slots:
     void onMACToggled(bool checked);
     void onIPToggled(bool checked);
     void onSelectAllClicked();
+    void onSelectSearchResultsClicked();
     void onSelectNoneClicked();
     void onApplyFilterClicked();
     void onClearFilterClicked();
@@ -77,6 +126,12 @@ public slots:
     void syncTableCheckboxesFromPairList();
     void onHelpClicked();
     void onSavePDFClicked();
+    void onLineClicked(comm_pair_t *pair, const QPoint &globalPos);
+    void onPairListBlinkTimer();
+
+protected:
+    void resizeEvent(QResizeEvent *event) override;
+    void closeEvent(QCloseEvent *event) override;
 
 private:
     void setupUI();
@@ -86,6 +141,7 @@ private:
     void createLegend();
     void updateViews();
     void updateLegend();
+    void relayoutControls();
     QString createFilterString();
     QList<comm_pair_t*> getActivePairsForFilter() const;
     void applySearchFilter(const QString &query);
@@ -93,28 +149,42 @@ private:
     void updateSearchBarForMode();
     static QString truncateIPv6Address(const QString &address);
     static bool isMACAddress(const QString &address);
+    void savePreferences();
+    void loadPreferences();
+    QString preferencesFilePath() const;
 
     /* UI Components */
     QWidget *m_centralWidget;
     QVBoxLayout *m_mainLayout;
-    QHBoxLayout *m_controlsLayout;
+    QWidget *m_controlsWidget;          /* Controls container */
+    QVBoxLayout *m_controlsOuterLayout; /* Outer layout for controls rows */
+    QHBoxLayout *m_controlsRow1;        /* Row 1: view/data options */
+    QHBoxLayout *m_controlsRow2;        /* Row 2: actions + search */
+    QWidget *m_row1Widget;
+    QWidget *m_row2Widget;
     
     /* Control buttons */
     QPushButton *m_top10Btn;
     QPushButton *m_top25Btn;
     QPushButton *m_top50Btn;
-    QRadioButton *m_packetsRadio;
-    QRadioButton *m_bytesRadio;
-    QRadioButton *m_circleRadio;
-    QRadioButton *m_tableRadio;
-    QRadioButton *m_macRadio;
-    QRadioButton *m_ipRadio;
+    QPushButton *m_packetsBtn;
+    QPushButton *m_bytesBtn;
+    QPushButton *m_circleBtn;
+    QPushButton *m_tableBtn;
+    QPushButton *m_macBtn;
+    QPushButton *m_ipBtn;
     QPushButton *m_selectAllBtn;
+    QPushButton *m_selectSearchBtn;
     QPushButton *m_selectNoneBtn;
     QPushButton *m_applyFilterBtn;
     QPushButton *m_clearFilterBtn;
     QPushButton *m_reloadDataBtn;
     QPushButton *m_savePDFBtn;
+    /* Help is now a menu bar action, no button member needed */
+
+    /* Main splitter */
+    QSplitter *m_splitter;
+    bool m_splitterSizesRestored;  /* true if user had saved splitter sizes */
 
     /* Views */
     QStackedWidget *m_viewStack;
@@ -135,6 +205,14 @@ private:
     QHash<QString, QCheckBox*> m_protocolCheckboxes;  /* Protocol checkboxes for filtering */
     QCheckBox *m_lineThicknessCheckBox;
 
+    /* Search blinking */
+    QTimer *m_pairListBlinkTimer;
+    bool m_pairListBlinkState;
+    QList<int> m_highlightedPairItems;  /* Indices of highlighted items in pair list */
+
+    /* Connection popup */
+    QPointer<ConnectionPopup> m_connectionPopup;
+
     /* Data */
     analysis_result_t *m_analysisResult;
     GList *m_top_pairs;  /* Track top pairs list to free it properly */
@@ -142,6 +220,7 @@ private:
     guint m_topN;
     gboolean m_useBytes;
     gboolean m_useMAC;
+    bool m_darkTheme;
     QList<comm_pair_t*> m_selectedPairs;
 };
 

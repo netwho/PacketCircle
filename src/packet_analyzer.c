@@ -111,8 +111,8 @@ static void init_protocol_colors(void)
 
 /* Compare functions removed - now using inline comparison in packet_analyzer_get_top_pairs */
 
-/* Free communication pair */
-static void free_port_count(gpointer data)
+/* Free per-port stats entry */
+static void free_port_stats(gpointer data)
 {
     g_free(data);
 }
@@ -123,6 +123,8 @@ static void free_comm_pair(gpointer data)
     if (pair) {
         g_free(pair->src_addr);
         g_free(pair->dst_addr);
+        g_free(pair->resolved_src);
+        g_free(pair->resolved_dst);
         g_free(pair->src_mac);
         g_free(pair->dst_mac);
         g_free(pair->src_ip);
@@ -197,6 +199,8 @@ static comm_pair_t* get_or_create_pair(GHashTable *pairs_table, const gchar *src
         pair = g_new0(comm_pair_t, 1);
         pair->src_addr = g_strdup(src);
         pair->dst_addr = g_strdup(dst);
+        pair->resolved_src = NULL;  /* Will be set from address_to_display() */
+        pair->resolved_dst = NULL;  /* Will be set from address_to_display() */
         pair->src_mac = NULL;
         pair->dst_mac = NULL;
         pair->src_ip = NULL;
@@ -207,7 +211,7 @@ static comm_pair_t* get_or_create_pair(GHashTable *pairs_table, const gchar *src
         pair->packet_count = 0;
         pair->byte_count = 0;
         pair->top_protocol = NULL;  /* Will be set when first packet is processed */
-        pair->dst_ports = g_hash_table_new_full(g_direct_hash, g_direct_equal, NULL, free_port_count);
+        pair->dst_ports = g_hash_table_new_full(g_direct_hash, g_direct_equal, NULL, free_port_stats);
         g_hash_table_insert(pairs_table, key, pair);
     } else {
         g_free(key);
@@ -381,20 +385,13 @@ static tap_packet_status circle_vis_tap_packet_cb(void *tapdata, packet_info *pi
         }
     }
     
-    /* PRIORITY 3.5: Check for ICMP BEFORE transport-layer detection */
-    /* ICMP doesn't have a ptype or ports, so we infer it from address type and lack of ports */
-    /* This must happen BEFORE PRIORITY 3 to avoid being overridden by TCP/UDP */
-    if (!protocol_name && (pinfo->src.type == AT_IPv4 || pinfo->src.type == AT_IPv6) && 
-        (pinfo->srcport == 0 && pinfo->destport == 0)) {
-        /* Could be ICMP - check if it's IPv6 for ICMPv6 */
-        if (pinfo->src.type == AT_IPv6) {
-            protocol_name = g_strdup("ICMPv6");
-            ws_log(WS_LOG_DOMAIN, LOG_LEVEL_WARNING, "Packet %u: ✓ Detected ICMPv6 from IPv6 address and no ports", callback_count);
-        } else {
-            protocol_name = g_strdup("ICMP");
-            ws_log(WS_LOG_DOMAIN, LOG_LEVEL_WARNING, "Packet %u: ✓ Detected ICMP from IPv4 address and no ports", callback_count);
-        }
-    }
+    /* PRIORITY 3.5: IP packets with no ports — could be ICMP, IP fragments,
+     * GRE, ESP, etc.  Do NOT blindly assume ICMP.  ICMP is already caught
+     * above via pinfo->current_proto in PRIORITY 1.  If we reach here with
+     * no ports it is most likely an IP fragment (non-initial fragments have
+     * ptype=PT_NONE & ports=0) — classify as generic "IP" and let the
+     * fallback at the end handle address-type labeling.                     */
+    /* (Intentionally left empty — falls through to the generic fallback.) */
     
     /* PRIORITY 3: Check packet type (ptype) - for transport-layer protocols */
     /* Only use this if no application-layer protocol was found */
@@ -424,13 +421,17 @@ static tap_packet_status circle_vis_tap_packet_cb(void *tapdata, packet_info *pi
                        callback_count, pinfo->srcport, pinfo->destport);
             }
         }
-        /* If we have ports but ptype is not set or unknown, infer TCP (most common) */
+        /* If we have ports but ptype is not set or unknown, do NOT blindly
+         * infer TCP.  This catches IP fragments where the first fragment
+         * carries a UDP header (ports populated) but ptype might not be set
+         * correctly by lightweight dissection.  Let it fall through to the
+         * generic "IP" fallback instead.                                     */
         else if (!protocol_name && (pinfo->srcport != 0 || pinfo->destport != 0)) {
-            protocol_name = g_strdup("TCP");
             if (callback_count <= 10) {
-                ws_log(WS_LOG_DOMAIN, LOG_LEVEL_WARNING, "Packet %u: Inferred TCP from ports (ptype=%u, ports: %u->%u)", 
+                ws_log(WS_LOG_DOMAIN, LOG_LEVEL_WARNING, "Packet %u: Has ports but unknown ptype=%u (ports: %u->%u) - NOT assuming TCP", 
                        callback_count, pinfo->ptype, pinfo->srcport, pinfo->destport);
             }
+            /* Leave protocol_name NULL — generic fallback will classify as "IP" */
         }
     }
     
@@ -556,17 +557,23 @@ static tap_packet_status circle_vis_tap_packet_cb(void *tapdata, packet_info *pi
         pair->has_udp = TRUE;
     }
 
-    /* Track destination port for this pair */
-    if (pinfo->destport != 0 && pair->dst_ports) {
+    /* Track destination port for this pair — ONLY for TCP / UDP packets so
+     * that higher-layer protocols (OSPF, ICMP, …) don't pollute the port
+     * statistics with misleading port numbers. */
+    if (pinfo->destport != 0 && pair->dst_ports &&
+        (pinfo->ptype == PT_TCP || pinfo->ptype == PT_UDP)) {
         gpointer port_key = GUINT_TO_POINTER((guint)pinfo->destport);
-        guint64 *count = (guint64 *)g_hash_table_lookup(pair->dst_ports, port_key);
-        if (count) {
-            (*count)++;
+        port_stats_t *ps = (port_stats_t *)g_hash_table_lookup(pair->dst_ports, port_key);
+        if (ps) {
+            ps->count++;
         } else {
-            count = g_new(guint64, 1);
-            *count = 1;
-            g_hash_table_insert(pair->dst_ports, port_key, count);
+            ps = g_new0(port_stats_t, 1);
+            ps->count = 1;
+            g_hash_table_insert(pair->dst_ports, port_key, ps);
         }
+        /* Record which transport protocol(s) use this specific port */
+        if (pinfo->ptype == PT_TCP) ps->is_tcp = TRUE;
+        if (pinfo->ptype == PT_UDP) ps->is_udp = TRUE;
     }
 
     /* Populate MAC/IP mappings when available */
@@ -581,6 +588,28 @@ static tap_packet_status circle_vis_tap_packet_cb(void *tapdata, packet_info *pi
     }
     if (ip_dst && !pair->dst_ip) {
         pair->dst_ip = g_strdup(ip_dst);
+    }
+
+    /* Populate resolved display names using Wireshark's name resolution settings.
+     * address_to_display() returns hostnames when resolution is ON, raw addresses when OFF.
+     * We only set these once per pair (first packet). */
+    if (!pair->resolved_src) {
+        if (tap_data->use_mac) {
+            const gchar *resolved = address_to_display(wmem_epan_scope(), &(pinfo->dl_src));
+            pair->resolved_src = g_strdup(resolved ? resolved : src_addr);
+        } else {
+            const gchar *resolved = address_to_display(wmem_epan_scope(), &(pinfo->net_src));
+            pair->resolved_src = g_strdup(resolved ? resolved : src_addr);
+        }
+    }
+    if (!pair->resolved_dst) {
+        if (tap_data->use_mac) {
+            const gchar *resolved = address_to_display(wmem_epan_scope(), &(pinfo->dl_dst));
+            pair->resolved_dst = g_strdup(resolved ? resolved : dst_addr);
+        } else {
+            const gchar *resolved = address_to_display(wmem_epan_scope(), &(pinfo->net_dst));
+            pair->resolved_dst = g_strdup(resolved ? resolved : dst_addr);
+        }
     }
     
     if (callback_count <= 5) {

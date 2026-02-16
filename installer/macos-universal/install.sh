@@ -1,6 +1,6 @@
 #!/bin/bash
 # =============================================================================
-# PacketCircle Installer for macOS (Universal Binary - Intel & Apple Silicon)
+# PacketCircle Installer for macOS (Universal Binary)  -  v0.3.2
 # =============================================================================
 #
 # This script installs the PacketCircle Wireshark plugin on macOS.
@@ -49,8 +49,8 @@ NC='\033[0m'
 
 printf "\n"
 printf "${BLUE}╔══════════════════════════════════════════════════╗${NC}\n"
-printf "${BLUE}║      PacketCircle Installer for macOS            ║${NC}\n"
-printf "${BLUE}║      Universal Binary (Intel + Apple Silicon)    ║${NC}\n"
+printf "${BLUE}║   PacketCircle v0.3.2 - Installer for macOS      ║${NC}\n"
+printf "${BLUE}║   Universal Binary (Intel + Apple Silicon)        ║${NC}\n"
 printf "${BLUE}╚══════════════════════════════════════════════════╝${NC}\n"
 printf "\n"
 

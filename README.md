@@ -4,7 +4,7 @@
   <img src="PacketCircle.png" alt="PacketCircle Logo" width="128">
 </p>
 
-[![Version](https://img.shields.io/badge/version-0.2.2-blue.svg)](CHANGELOG.md)
+[![Version](https://img.shields.io/badge/version-0.3.2-blue.svg)](CHANGELOG.md)
 [![Status](https://img.shields.io/badge/status-public%20beta-orange.svg)](CHANGELOG.md)
 [![License: GPL v2](https://img.shields.io/badge/License-GPL%20v2-blue.svg)](LICENSE)
 [![Wireshark](https://img.shields.io/badge/Wireshark-4.2.x%20%7C%204.4.x%20%7C%204.6.x-1679A7.svg)](https://www.wireshark.org/)
@@ -15,7 +15,7 @@
 
 A native Wireshark plugin that visualizes network communication pairs in an interactive circle diagram with protocol color coding, traffic volume indicators, and PDF report export.
 
-> **Beta Status**: This is version 0.2.2, a public beta release. While fully functional, the software is under active development. Please report any issues you encounter.
+> **Beta Status**: This is version 0.3.2, a public beta release. While fully functional, the software is under active development. Please report any issues you encounter.
 
 ## Features
 
@@ -25,7 +25,12 @@ A native Wireshark plugin that visualizes network communication pairs in an inte
 - **Line Weight** - Proportional to packet/byte volume for at-a-glance traffic assessment
 - **Rich Tooltips** - Hover over nodes to see IP address, packet counts, destination ports, and service names in a detailed popup
 - **Directional Filtering** - Select individual communication pairs to apply precise unidirectional Wireshark display filters
+- **Connection Popup** - Click a line in the circle to see port-level connection details with protocol, service name, and packet counts
+- **Connection Context Menu** - Right-click a connection to apply a filter, follow a TCP stream, or open TCP throughput / round-trip time graphs
+- **Search** - Search by IP address, CIDR range, or port (e.g., `TCP 443`, `UDP 53`) with blinking red highlights
+- **Select Search Results** - After a search, select only the matching pairs with one click
 - **Protocol Filtering** - Filter the visualization by specific protocols using interactive checkboxes
+- **Theme-Aware UI** - Automatically adapts to light and dark themes
 - **PDF Report Export** - Generate a one-page PDF report with the circle visualization, IP pair table, and summary text
 - **Multiple Views** - Toggle between circle view and table view
 - **Conversation Limits** - Limit display to top 10, 25, or 50 conversations
@@ -54,6 +59,22 @@ Connections that use both TCP and UDP are drawn as dotted lines with alternating
 
 *Dotted multicolor lines indicate endpoints communicating over both TCP and UDP*
 
+### Connection Popup & TCP Stream Analysis
+
+Click any line in the circle to open a connection popup showing per-port details. Right-click a row to apply a Wireshark display filter, reassemble and follow a TCP stream, or launch Wireshark's TCP throughput and round-trip time statistics graphs -- all directly from within PacketCircle.
+
+![Connection Popup](screenshots/packetcircle-connection-popup.png)
+
+*Connection popup with port-level details and context menu*
+
+### Port Search
+
+The search bar supports not only IP addresses and CIDR ranges but also TCP and UDP port queries. Type `TCP 443` or `UDP 53` to instantly highlight all communication pairs using that port. Matching pairs blink red in both the circle and the node pair list. Use the **Select Results** button to isolate just those pairs.
+
+![Port Search](screenshots/packetcircle-port-search.png)
+
+*Searching for TCP port 443 highlights all HTTPS communication pairs*
+
 ### Rich Tooltips
 
 Hover over any node to see a detailed popup with IP address, total packet count, destination ports, and resolved service names.
@@ -78,11 +99,27 @@ chmod +x install.sh
 ```
 
 #### Windows (x86_64) — Wireshark 4.6.x
-```powershell
+
+**Recommended** — double-click or run the batch file (no execution policy changes needed):
+```cmd
 git clone https://github.com/netwho/PacketCircle.git
+cd PacketCircle\installer\windows-x86_64
+install.bat
+```
+
+The `.bat` wrapper launches the PowerShell installer with a temporary `-ExecutionPolicy Bypass` for the current process only — it does **not** change your system policy.
+
+<details>
+<summary>Alternative: run the PowerShell script directly</summary>
+
+```powershell
 cd PacketCircle\installer\windows-x86_64
 .\install.ps1
 ```
+
+> If you see an execution policy error, either use `install.bat` above, or run:
+> `Set-ExecutionPolicy -Scope CurrentUser -ExecutionPolicy RemoteSigned`
+</details>
 
 #### Linux (x86_64) — Wireshark 4.2.x / 4.4.x / 4.6.x
 ```bash
@@ -136,12 +173,13 @@ See [QUICKSTART.md](QUICKSTART.md) for a detailed guide.
 | **Circle / Table** | Toggle visualization mode |
 | **MAC / IP** | Switch between MAC and IP address pairs |
 | **Select All / None** | Bulk pair selection |
+| **Select Results** | Select only pairs matching the current search (enabled after search) |
 | **Filter** | Apply Wireshark display filter for selected pairs |
 | **Clear Filter** | Reset Wireshark display filter and show all connections |
 | **PDF** | Export a one-page PDF report |
 | **Protocol checkboxes** | Filter by specific protocols (TCP, UDP, HTTP, DNS, etc.) |
 | **Line Thickness** | Toggle proportional line weight on/off |
-| **Search** | Filter the IP pair list by address |
+| **Search** | Search by IP, CIDR, or port (e.g., `TCP 443`, `UDP 53`) |
 
 ## PDF Report
 
@@ -173,9 +211,11 @@ src/
 
 - Wireshark source code (matching your installed version, e.g., 4.6.3)
 - CMake 3.10+
-- Qt6 (Core, Widgets, Gui)
+- Qt6 (Core, Widgets, Gui) — **must be the exact same Qt version bundled by Wireshark** (see [BUILD.md](src/BUILD.md))
 - GLib 2.54+
 - C/C++ compiler (Clang recommended on macOS)
+
+> **Critical**: Do not use Homebrew's `qt@6` — it is typically newer than what Wireshark bundles, and even a minor version mismatch causes ABI errors at runtime (`Symbol not found: __ZN7QObject13doSetPropertyE...`). Use `aqtinstall` to install the exact matching Qt version. See [BUILD.md](src/BUILD.md) for details.
 
 ### Build Instructions
 
@@ -297,11 +337,20 @@ The plugin has been verified on Windows 11 but may fail to load on Windows 10 du
 
 **Automated diagnostics:** Run the troubleshooting script from the [`tools/`](tools/) directory:
 
+```cmd
+cd tools
+troubleshoot.bat
+```
+
+The `.bat` wrapper launches the PowerShell troubleshooter with a temporary execution policy bypass — no system policy changes required. You can also run the PowerShell script directly if you prefer:
+
 ```powershell
 .\troubleshoot.ps1
 ```
 
-This script checks all DLL dependencies, verifies the plugin directory, tests DLL loading, detects internet download blocks, and reports exactly what is wrong. No extra software needed - it runs natively on any Windows 10/11 machine. See [`tools/README.md`](tools/README.md) for details.
+A copy of the troubleshooter is also included in the Windows installer directory (`installer/windows-x86_64/troubleshoot.ps1`).
+
+This script checks all DLL dependencies, verifies the plugin directory, tests DLL loading, detects internet download blocks, and reports exactly what is wrong. No extra software needed — it runs natively on any Windows 10/11 machine. See [`tools/README.md`](tools/README.md) for details.
 
 ### Plugin Loads but Crashes
 

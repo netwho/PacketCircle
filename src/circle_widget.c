@@ -96,8 +96,9 @@ CircleWidget::CircleWidget(QWidget *parent)
     , m_blinkTimer(nullptr)
     , m_blinkState(false)
     , m_pdfMode(false)
+    , m_darkTheme(true)
 {
-    setMinimumSize(600, 600);
+    setMinimumSize(300, 300);
     setMouseTracking(true);
     
     /* Create timer for blinking selected lines - initially stopped */
@@ -164,6 +165,12 @@ void CircleWidget::setProtocolFilter(QSet<QString> enabled_protocols)
     update();
 }
 
+void CircleWidget::setDarkTheme(bool dark)
+{
+    m_darkTheme = dark;
+    update();
+}
+
 void CircleWidget::setHighlightedLabels(const QSet<QString> &labels)
 {
     m_highlighted_labels = labels;
@@ -201,19 +208,26 @@ void CircleWidget::calculateLayout()
     /* Use the pairs that were already passed to setPairs() */
     /* They are already filtered to top N pairs by the caller */
     
-    /* Create unique node list from pairs */
+    /* Create unique node list from pairs - use resolved names for display */
     QSet<QString> unique_addresses;
+    QHash<QString, QString> addr_to_display;  /* raw address -> display name */
     GList *iter;
     
     for (iter = m_pairs; iter; iter = iter->next) {
         comm_pair_t *pair = (comm_pair_t *)iter->data;
         if (!pair || !pair->src_addr || !pair->dst_addr)
             continue;
-        if (!unique_addresses.contains(pair->src_addr)) {
-            unique_addresses.insert(pair->src_addr);
+        QString srcRaw = QString::fromUtf8(pair->src_addr);
+        QString dstRaw = QString::fromUtf8(pair->dst_addr);
+        QString srcDisplay = pair->resolved_src ? QString::fromUtf8(pair->resolved_src) : srcRaw;
+        QString dstDisplay = pair->resolved_dst ? QString::fromUtf8(pair->resolved_dst) : dstRaw;
+        if (!unique_addresses.contains(srcRaw)) {
+            unique_addresses.insert(srcRaw);
+            addr_to_display[srcRaw] = srcDisplay;
         }
-        if (!unique_addresses.contains(pair->dst_addr)) {
-            unique_addresses.insert(pair->dst_addr);
+        if (!unique_addresses.contains(dstRaw)) {
+            unique_addresses.insert(dstRaw);
+            addr_to_display[dstRaw] = dstDisplay;
         }
     }
 
@@ -255,11 +269,15 @@ void CircleWidget::calculateLayout()
         /* Get color for dominant protocol */
         node_colors[addr] = getProtocolColor(dominant_proto.toUtf8().constData());
     }
-    m_radius = qMin(width(), height()) / 2.0 - 50.0;
+    int dim = qMin(width(), height());
+    m_radius = dim / 2.0 - 50.0;
+    /* Scale node radius proportionally: range ~6px (small) to ~14px (large) */
+    m_node_radius = qMax(6.0, dim / 80.0);
 
     for (const QString &addr : address_list) {
         NodePosition *node = new NodePosition;
         node->label = addr;
+        node->displayLabel = addr_to_display.value(addr, addr);  /* Resolved name or raw */
         node->position = getNodePosition(index++, total_nodes);
         node->is_selected = false;
         node->pair = NULL; /* Will be set per connection */
@@ -467,25 +485,38 @@ void CircleWidget::drawNode(QPainter &painter, NodePosition *node, QColor node_c
     painter.setBrush(QBrush(fill_color));  /* Semi-transparent fill */
     painter.drawPolygon(inner_hexagon);
 
-    /* Draw label */
+    /* Draw label - scale font based on widget dimensions */
     QFont font = painter.font();
-    font.setPointSize(m_pdfMode ? 18 : 10);
+    int fontSize;
+    if (m_pdfMode) {
+        fontSize = 18;
+    } else {
+        int dim = qMin(width(), height());
+        if (dim < 400)       fontSize = 7;
+        else if (dim < 600)  fontSize = 8;
+        else if (dim < 800)  fontSize = 9;
+        else if (dim < 1000) fontSize = 10;
+        else                 fontSize = 11;
+    }
+    font.setPointSize(fontSize);
     font.setBold(true);
     painter.setFont(font);
     
+    /* Use displayLabel (resolved name) for rendering, fall back to raw label */
+    QString displayText = node->displayLabel.isEmpty() ? node->label : node->displayLabel;
     QPainterPath textPath;
     QFontMetrics fm(font);
-    qreal text_x = node->position.x() - fm.horizontalAdvance(node->label) / 2.0;
+    qreal text_x = node->position.x() - fm.horizontalAdvance(displayText) / 2.0;
     qreal text_y = node->position.y() + m_node_radius + 18;
-    textPath.addText(text_x, text_y, font, node->label);
+    textPath.addText(text_x, text_y, font, displayText);
     
     if (m_pdfMode) {
-        /* PDF mode: larger black text on white background */
+        /* PDF mode: black text on white background */
         painter.setPen(Qt::NoPen);
         painter.setBrush(QBrush(QColor(0, 0, 0)));
         painter.drawPath(textPath);
     } else {
-        /* Screen mode: white text with black outline for dark background */
+        /* On-screen: white text with black outline (always black background) */
         painter.setPen(QPen(QColor(0, 0, 0), 4, Qt::SolidLine, Qt::RoundCap, Qt::RoundJoin));
         painter.drawPath(textPath);
         painter.setPen(Qt::NoPen);
@@ -529,8 +560,9 @@ void CircleWidget::paintEvent(QPaintEvent *event)
     QPainter painter(this);
     painter.setRenderHint(QPainter::Antialiasing);
 
-    /* Clear background */
-    painter.fillRect(rect(), m_pdfMode ? QColor(255, 255, 255) : QColor(0, 0, 0));
+    /* Clear background — always black for on-screen, white for PDF */
+    QColor bgColor = m_pdfMode ? QColor(255, 255, 255) : QColor(0, 0, 0);
+    painter.fillRect(rect(), bgColor);
 
     if (!m_pairs || m_nodes.size() == 0) {
         qDebug() << "CircleWidget::paintEvent: No pairs or nodes (pairs=" << (void*)m_pairs << ", nodes=" << m_nodes.size() << ")";
@@ -675,6 +707,13 @@ void CircleWidget::mousePressEvent(QMouseEvent *event)
 
         update();
         showTooltipForNode(node, event->globalPosition().toPoint());
+        return;
+    }
+
+    /* No node clicked - check for line click */
+    comm_pair_t *line_pair = findLineAt(event->pos());
+    if (line_pair) {
+        emit lineClicked(line_pair, event->globalPosition().toPoint());
     }
 }
 
@@ -708,6 +747,70 @@ CircleWidget::NodePosition* CircleWidget::findNodeAt(const QPointF &point)
         }
     }
     return NULL;
+}
+
+comm_pair_t* CircleWidget::findLineAt(const QPointF &point)
+{
+    if (!m_pairs)
+        return NULL;
+
+    comm_pair_t *best_pair = NULL;
+    qreal best_dist = 1e9;
+
+    for (GList *iter = m_pairs; iter; iter = iter->next) {
+        comm_pair_t *pair = (comm_pair_t *)iter->data;
+        if (!pair || !pair->src_addr || !pair->dst_addr)
+            continue;
+
+        /* Must be visible */
+        if (!m_visible_pairs.contains(pair))
+            continue;
+
+        /* Find the two node positions */
+        QPointF srcPos, dstPos;
+        bool found_src = false, found_dst = false;
+        for (NodePosition *node : m_nodes) {
+            if (node->label == pair->src_addr) { srcPos = node->position; found_src = true; }
+            if (node->label == pair->dst_addr) { dstPos = node->position; found_dst = true; }
+            if (found_src && found_dst) break;
+        }
+        if (!found_src || !found_dst)
+            continue;
+
+        /* Calculate distance from point to line segment (srcPos -> dstPos) */
+        QPointF d = dstPos - srcPos;
+        qreal len2 = d.x() * d.x() + d.y() * d.y();
+        if (len2 < 1.0)
+            continue;  /* Degenerate line */
+
+        /* Project point onto line, clamped to [0, 1] */
+        QPointF p = point - srcPos;
+        qreal t = qBound(0.0, (p.x() * d.x() + p.y() * d.y()) / len2, 1.0);
+        QPointF closest = srcPos + t * d;
+        QPointF diff = point - closest;
+        qreal dist = qSqrt(diff.x() * diff.x() + diff.y() * diff.y());
+
+        /* Determine line thickness for hit test */
+        guint64 volume = getPairVolume(pair);
+        guint64 max_volume = 1;
+        for (GList *mi = m_pairs; mi; mi = mi->next) {
+            comm_pair_t *mp = (comm_pair_t *)mi->data;
+            if (mp) {
+                guint64 v = getPairVolume(mp);
+                if (v > max_volume) max_volume = v;
+            }
+        }
+        qreal lineThickness = m_show_line_thickness ? 
+            qBound(1.0, 1.0 + (10.0 * volume / max_volume), 10.0) : 2.0;
+        qreal threshold = qMax(4.0, lineThickness + 3.0);
+
+        if (dist < threshold && dist < best_dist) {
+            best_dist = dist;
+            best_pair = pair;
+        }
+    }
+
+    return best_pair;
 }
 
 void CircleWidget::updateSelection()
@@ -864,9 +967,9 @@ void CircleWidget::rebuildNodeCaches()
             g_hash_table_iter_init(&port_iter, pair->dst_ports);
             while (g_hash_table_iter_next(&port_iter, &port_key, &port_value)) {
                 quint16 port = (quint16)GPOINTER_TO_UINT(port_key);
-                guint64 *pcount = (guint64 *)port_value;
-                if (port > 0 && pcount) {
-                    dst_stats.dst_ports[port] += *pcount;
+                port_stats_t *ps = (port_stats_t *)port_value;
+                if (port > 0 && ps) {
+                    dst_stats.dst_ports[port] += ps->count;
                 }
             }
         }

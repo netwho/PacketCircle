@@ -20,6 +20,7 @@
 
 #include "ui_main_window.h"
 #include "ui_bridge.h"
+#include "packet_analyzer.h"
 #include <QHeaderView>
 #include <QMessageBox>
 #include <QStackedWidget>
@@ -43,8 +44,26 @@
 #include <QDateTime>
 #include <QPixmap>
 #include <QDebug>
+#include <QTimer>
+#include <QMenu>
+#include <QMenuBar>
+#include <QResizeEvent>
+#include <QRegularExpression>
+#include <QApplication>
+#include <QScreen>
 #include <algorithm>
 #include <epan/plugin_if.h>
+
+/* ------------------------------------------------------------------ */
+/* Theme detection: uses the same logic as Wireshark's ColorUtils::   */
+/* themeIsDark() — compare palette text lightness vs window lightness. */
+/* This respects OS dark mode AND Wireshark's own colour-scheme pref. */
+/* ------------------------------------------------------------------ */
+static bool isDarkTheme()
+{
+    return qApp->palette().windowText().color().lightness() >
+           qApp->palette().window().color().lightness();
+}
 
 static bool parse_ipv4(const QString &ip, quint32 *out)
 {
@@ -99,21 +118,30 @@ MainWindow::MainWindow(QWidget *parent)
     : QMainWindow(parent)
     , m_centralWidget(nullptr)
     , m_mainLayout(nullptr)
-    , m_controlsLayout(nullptr)
+    , m_controlsWidget(nullptr)
+    , m_controlsOuterLayout(nullptr)
+    , m_controlsRow1(nullptr)
+    , m_controlsRow2(nullptr)
+    , m_row1Widget(nullptr)
+    , m_row2Widget(nullptr)
     , m_top10Btn(nullptr)
     , m_top25Btn(nullptr)
     , m_top50Btn(nullptr)
-    , m_packetsRadio(nullptr)
-    , m_bytesRadio(nullptr)
-    , m_circleRadio(nullptr)
-    , m_tableRadio(nullptr)
-    , m_macRadio(nullptr)
-    , m_ipRadio(nullptr)
+    , m_packetsBtn(nullptr)
+    , m_bytesBtn(nullptr)
+    , m_circleBtn(nullptr)
+    , m_tableBtn(nullptr)
+    , m_macBtn(nullptr)
+    , m_ipBtn(nullptr)
     , m_selectAllBtn(nullptr)
+    , m_selectSearchBtn(nullptr)
     , m_selectNoneBtn(nullptr)
     , m_applyFilterBtn(nullptr)
     , m_clearFilterBtn(nullptr)
+    , m_reloadDataBtn(nullptr)
     , m_savePDFBtn(nullptr)
+    , m_splitter(nullptr)
+    , m_splitterSizesRestored(false)
     , m_viewStack(nullptr)
     , m_circleWidget(nullptr)
     , m_circleContainer(nullptr)
@@ -126,12 +154,16 @@ MainWindow::MainWindow(QWidget *parent)
     , m_legendLayout(nullptr)
     , m_legendRow2Layout(nullptr)
     , m_lineThicknessCheckBox(nullptr)
+    , m_pairListBlinkTimer(nullptr)
+    , m_pairListBlinkState(false)
+    , m_connectionPopup(nullptr)
     , m_analysisResult(NULL)
     , m_top_pairs(NULL)
     , m_circle_pairs(NULL)
     , m_topN(10)
     , m_useBytes(FALSE)
     , m_useMAC(FALSE)
+    , m_darkTheme(isDarkTheme())
 {
     setupUI();
 }
@@ -158,6 +190,137 @@ MainWindow::~MainWindow()
     }
 }
 
+/* --- Preferences persistence (stored in ~/.PacketCircle/settings.ini) --- */
+
+QString MainWindow::preferencesFilePath() const
+{
+    QString dir = QDir::homePath() + QDir::separator() + ".PacketCircle";
+    return dir + QDir::separator() + "settings.ini";
+}
+
+void MainWindow::savePreferences()
+{
+    /* Ensure the .PacketCircle directory exists */
+    QString dir = QDir::homePath() + QDir::separator() + ".PacketCircle";
+    QDir().mkpath(dir);
+
+    QSettings settings(preferencesFilePath(), QSettings::IniFormat);
+
+    /* Window geometry */
+    settings.beginGroup("Window");
+    settings.setValue("geometry", saveGeometry());
+    settings.setValue("pos", pos());
+    settings.setValue("size", size());
+    if (m_splitter) {
+        settings.setValue("splitterSizes", QVariant::fromValue(m_splitter->sizes()));
+    }
+    settings.endGroup();
+
+    /* Display preferences */
+    settings.beginGroup("Display");
+    settings.setValue("topN", (int)m_topN);
+    settings.setValue("useBytes", (bool)m_useBytes);
+    settings.setValue("useMAC", (bool)m_useMAC);
+    settings.setValue("view", m_viewStack ? m_viewStack->currentIndex() : 0);
+    if (m_lineThicknessCheckBox) {
+        settings.setValue("lineThickness", m_lineThicknessCheckBox->isChecked());
+    }
+    settings.endGroup();
+
+    settings.sync();
+}
+
+void MainWindow::loadPreferences()
+{
+    QString path = preferencesFilePath();
+    if (!QFile::exists(path))
+        return;  /* First launch - use defaults */
+
+    QSettings settings(path, QSettings::IniFormat);
+
+    /* Window geometry */
+    settings.beginGroup("Window");
+    QByteArray geom = settings.value("geometry").toByteArray();
+    if (!geom.isEmpty()) {
+        restoreGeometry(geom);
+    } else {
+        /* Fallback: use explicit pos/size if geometry blob is missing */
+        QPoint savedPos = settings.value("pos", QPoint()).toPoint();
+        QSize savedSize = settings.value("size", QSize()).toSize();
+        if (savedSize.isValid() && !savedSize.isNull()) {
+            resize(savedSize);
+        }
+        if (!savedPos.isNull()) {
+            move(savedPos);
+        }
+    }
+    QList<QVariant> splitterVar = settings.value("splitterSizes").toList();
+    if (!splitterVar.isEmpty() && m_splitter) {
+        QList<int> sizes;
+        for (const QVariant &v : splitterVar)
+            sizes.append(v.toInt());
+        if (sizes.size() == 2 && sizes[0] > 0 && sizes[1] > 0) {
+            m_splitter->setSizes(sizes);
+            m_splitterSizesRestored = true;
+        }
+    }
+    settings.endGroup();
+
+    /* Display preferences */
+    settings.beginGroup("Display");
+
+    int topN = settings.value("topN", 10).toInt();
+    if (topN == 25) {
+        m_topN = 25;
+        if (m_top10Btn) m_top10Btn->setChecked(false);
+        if (m_top25Btn) m_top25Btn->setChecked(true);
+        if (m_top50Btn) m_top50Btn->setChecked(false);
+    } else if (topN == 50) {
+        m_topN = 50;
+        if (m_top10Btn) m_top10Btn->setChecked(false);
+        if (m_top25Btn) m_top25Btn->setChecked(false);
+        if (m_top50Btn) m_top50Btn->setChecked(true);
+    } else {
+        m_topN = 10;
+        if (m_top10Btn) m_top10Btn->setChecked(true);
+        if (m_top25Btn) m_top25Btn->setChecked(false);
+        if (m_top50Btn) m_top50Btn->setChecked(false);
+    }
+
+    bool useBytes = settings.value("useBytes", false).toBool();
+    m_useBytes = useBytes ? TRUE : FALSE;
+    if (m_packetsBtn) m_packetsBtn->setChecked(!useBytes);
+    if (m_bytesBtn) m_bytesBtn->setChecked(useBytes);
+
+    bool useMAC = settings.value("useMAC", false).toBool();
+    m_useMAC = useMAC ? TRUE : FALSE;
+    if (m_ipBtn) m_ipBtn->setChecked(!useMAC);
+    if (m_macBtn) m_macBtn->setChecked(useMAC);
+    updateSearchBarForMode();
+
+    int viewIdx = settings.value("view", 0).toInt();
+    if (m_viewStack && (viewIdx == 0 || viewIdx == 1)) {
+        m_viewStack->setCurrentIndex(viewIdx);
+        if (m_circleBtn) m_circleBtn->setChecked(viewIdx == 0);
+        if (m_tableBtn) m_tableBtn->setChecked(viewIdx == 1);
+    }
+
+    bool lineThickness = settings.value("lineThickness", false).toBool();
+    if (m_lineThicknessCheckBox) {
+        m_lineThicknessCheckBox->setChecked(lineThickness);
+    }
+
+    settings.endGroup();
+}
+
+void MainWindow::closeEvent(QCloseEvent *event)
+{
+    savePreferences();
+    QMainWindow::closeEvent(event);
+}
+
+/* --- End preferences --- */
+
 void MainWindow::setupUI()
 {
     m_centralWidget = new QWidget(this);
@@ -176,190 +339,399 @@ void MainWindow::setupUI()
     m_viewStack->setSizePolicy(QSizePolicy::Expanding, QSizePolicy::Expanding);
     
     /* Create splitter for main content */
-    QSplitter *splitter = new QSplitter(Qt::Horizontal, this);
-    splitter->addWidget(m_viewStack);
-    splitter->addWidget(m_pairListContainer);
+    m_splitter = new QSplitter(Qt::Horizontal, this);
+    m_splitter->addWidget(m_viewStack);
+    m_splitter->addWidget(m_pairListContainer);
     
     /* Set stretch factors - circle area stretches more, pair list less */
-    splitter->setStretchFactor(0, 1);  /* Circle container - takes extra space */
-    splitter->setStretchFactor(1, 0);  /* Pair list container - stays near its size */
+    m_splitter->setStretchFactor(0, 1);  /* Circle container - takes extra space */
+    m_splitter->setStretchFactor(1, 0);  /* Pair list container - stays near its size */
     
     /* Make splitter handle visible and easy to grab on all platforms */
 #ifdef Q_OS_WIN
-    splitter->setHandleWidth(8);
-    splitter->setStyleSheet(
-        "QSplitter::handle { background-color: #ccc; }"
-        "QSplitter::handle:hover { background-color: #aaa; }"
-    );
+    m_splitter->setHandleWidth(8);
 #else
-    splitter->setHandleWidth(5);
+    m_splitter->setHandleWidth(5);
 #endif
-    splitter->setChildrenCollapsible(false);
+    if (m_darkTheme) {
+        m_splitter->setStyleSheet(
+            "QSplitter::handle { background-color: #555; }"
+            "QSplitter::handle:hover { background-color: #777; }"
+        );
+    } else {
+        m_splitter->setStyleSheet(
+            "QSplitter::handle { background-color: #ccc; }"
+            "QSplitter::handle:hover { background-color: #aaa; }"
+        );
+    }
+    m_splitter->setChildrenCollapsible(false);
     
-    /* Set initial sizes: give pair list 450px, rest to circle */
-    splitter->setSizes(QList<int>() << 950 << 450);
+    /* Set initial sizes: 68/32 split - circle gets majority of space */
+    m_splitter->setSizes(QList<int>() << 680 << 320);
 
     /* Refresh MAC address display when the pair list panel is resized */
-    connect(splitter, &QSplitter::splitterMoved, this, &MainWindow::refreshPairListText);
+    connect(m_splitter, &QSplitter::splitterMoved, this, &MainWindow::refreshPairListText);
 
-    m_mainLayout->addWidget(splitter);
+    m_mainLayout->addWidget(m_splitter);
     
     /* Set initial view */
-    m_circleRadio->setChecked(true);
+    m_circleBtn->setChecked(true);
     m_viewStack->setCurrentIndex(0);
     
-    /* Make window resizable with a reasonable minimum size */
-    setMinimumSize(1500, 800);
-    resize(1600, 900);
+    /* Make window resizable with a reasonable minimum size
+     * 640x480 fits older laptops; 1280x780 is comfortable on 1080p */
+    setMinimumSize(640, 480);
+    resize(1280, 780);
     
     /* Set window title and flags */
-    setWindowTitle("PacketCircle");
-    setWindowFlags(windowFlags() | Qt::WindowContextHelpButtonHint);
+    setWindowTitle("PacketCircle v.0.3.2");
     
-    /* Note: Qt::WindowContextHelpButtonHint adds a help button to the title bar on some platforms */
-    /* If not available, the Help button in controls will be used */
+    /* Create pair list blink timer for synchronized search highlighting */
+    m_pairListBlinkTimer = new QTimer(this);
+    m_pairListBlinkTimer->setInterval(500);
+    connect(m_pairListBlinkTimer, &QTimer::timeout, this, &MainWindow::onPairListBlinkTimer);
+
+    /* Restore user preferences from ~/.PacketCircle/settings.ini */
+    loadPreferences();
 }
 
 void MainWindow::createControls()
 {
-    QGroupBox *controlsGroup = new QGroupBox("Controls", this);
-    m_controlsLayout = new QHBoxLayout(controlsGroup);
-    m_controlsLayout->setSpacing(4);
-    m_controlsLayout->setContentsMargins(6, 2, 6, 2);
+    m_controlsWidget = new QWidget(this);
+    m_controlsWidget->setObjectName("controlsToolbar");
 
-    /* Top N buttons */
-    m_top10Btn = new QPushButton("Top 10", this);
-    m_top25Btn = new QPushButton("Top 25", this);
-    m_top50Btn = new QPushButton("Top 50", this);
-    m_top10Btn->setCheckable(true);
-    m_top25Btn->setCheckable(true);
-    m_top50Btn->setCheckable(true);
+    /* ---- Segment shape rules (shared by both themes) ---- */
+    static const char *segmentShapeRules =
+        /* Left segment */
+        "#controlsToolbar QPushButton[seg_pos=\"left\"] {"
+        "  border-top-left-radius: 4px;"
+        "  border-bottom-left-radius: 4px;"
+        "  border-top-right-radius: 0;"
+        "  border-bottom-right-radius: 0;"
+        "}"
+        /* Middle segment */
+        "#controlsToolbar QPushButton[seg_pos=\"mid\"] {"
+        "  border-radius: 0;"
+        "  border-left: none;"
+        "}"
+        /* Right segment */
+        "#controlsToolbar QPushButton[seg_pos=\"right\"] {"
+        "  border-top-left-radius: 0;"
+        "  border-bottom-left-radius: 0;"
+        "  border-top-right-radius: 4px;"
+        "  border-bottom-right-radius: 4px;"
+        "  border-left: none;"
+        "}";
+
+    /* ---- Dark theme toolbar ---- */
+    static const char *darkToolbarStyle =
+        "#controlsToolbar {"
+        "  background: qlineargradient(x1:0, y1:0, x2:0, y2:1, stop:0 #3a3a3a, stop:1 #2b2b2b);"
+        "  border: 1px solid #222;"
+        "  border-radius: 4px;"
+        "  padding: 4px;"
+        "}"
+        "#controlsToolbar QPushButton[segmented=\"true\"] {"
+        "  background: #4a4a4a;"
+        "  color: #d0d0d0;"
+        "  border: 1px solid #555;"
+        "  padding: 4px 10px;"
+        "  font-size: 11px;"
+        "  font-weight: bold;"
+        "  min-height: 22px;"
+        "}"
+        "#controlsToolbar QPushButton[segmented=\"true\"]:checked {"
+        "  background: #0078d4;"
+        "  color: white;"
+        "  border-color: #005a9e;"
+        "}"
+        "#controlsToolbar QPushButton[segmented=\"true\"]:hover {"
+        "  background: #5a5a5a;"
+        "}"
+        "#controlsToolbar QPushButton[segmented=\"true\"]:checked:hover {"
+        "  background: #1a8ae8;"
+        "}"
+        "#controlsToolbar QPushButton[action=\"true\"] {"
+        "  background: transparent;"
+        "  color: #c0c0c0;"
+        "  border: 1px solid transparent;"
+        "  border-radius: 3px;"
+        "  padding: 4px 10px;"
+        "  font-size: 11px;"
+        "  min-height: 22px;"
+        "}"
+        "#controlsToolbar QPushButton[action=\"true\"]:hover {"
+        "  background: #4a4a4a;"
+        "  border-color: #666;"
+        "  color: #ffffff;"
+        "}"
+        "#controlsToolbar QPushButton[action=\"true\"]:pressed {"
+        "  background: #333;"
+        "}"
+        "#controlsToolbar QCheckBox {"
+        "  color: #d0d0d0;"
+        "  font-size: 11px;"
+        "  spacing: 4px;"
+        "}"
+        "#controlsToolbar QLineEdit {"
+        "  background: #444;"
+        "  color: #e0e0e0;"
+        "  border: 1px solid #666;"
+        "  border-radius: 3px;"
+        "  padding: 3px 6px;"
+        "  font-size: 11px;"
+        "  min-height: 22px;"
+        "  selection-background-color: #0078d4;"
+        "}"
+        "#controlsToolbar QLineEdit:focus {"
+        "  border-color: #0078d4;"
+        "}"
+        "#controlsToolbar QLabel {"
+        "  color: #a0a0a0;"
+        "  font-size: 10px;"
+        "}";
+
+    /* ---- Light theme toolbar ---- */
+    static const char *lightToolbarStyle =
+        "#controlsToolbar {"
+        "  background: qlineargradient(x1:0, y1:0, x2:0, y2:1, stop:0 #f0f0f0, stop:1 #dcdcdc);"
+        "  border: 1px solid #b0b0b0;"
+        "  border-radius: 4px;"
+        "  padding: 4px;"
+        "}"
+        "#controlsToolbar QPushButton[segmented=\"true\"] {"
+        "  background: #e0e0e0;"
+        "  color: #333;"
+        "  border: 1px solid #aaa;"
+        "  padding: 4px 10px;"
+        "  font-size: 11px;"
+        "  font-weight: bold;"
+        "  min-height: 22px;"
+        "}"
+        "#controlsToolbar QPushButton[segmented=\"true\"]:checked {"
+        "  background: #0078d4;"
+        "  color: white;"
+        "  border-color: #005a9e;"
+        "}"
+        "#controlsToolbar QPushButton[segmented=\"true\"]:hover {"
+        "  background: #d0d0d0;"
+        "}"
+        "#controlsToolbar QPushButton[segmented=\"true\"]:checked:hover {"
+        "  background: #1a8ae8;"
+        "}"
+        "#controlsToolbar QPushButton[action=\"true\"] {"
+        "  background: transparent;"
+        "  color: #444;"
+        "  border: 1px solid transparent;"
+        "  border-radius: 3px;"
+        "  padding: 4px 10px;"
+        "  font-size: 11px;"
+        "  min-height: 22px;"
+        "}"
+        "#controlsToolbar QPushButton[action=\"true\"]:hover {"
+        "  background: #d0d0d0;"
+        "  border-color: #aaa;"
+        "  color: #111;"
+        "}"
+        "#controlsToolbar QPushButton[action=\"true\"]:pressed {"
+        "  background: #c0c0c0;"
+        "}"
+        "#controlsToolbar QCheckBox {"
+        "  color: #333;"
+        "  font-size: 11px;"
+        "  spacing: 4px;"
+        "}"
+        "#controlsToolbar QLineEdit {"
+        "  background: #fff;"
+        "  color: #222;"
+        "  border: 1px solid #aaa;"
+        "  border-radius: 3px;"
+        "  padding: 3px 6px;"
+        "  font-size: 11px;"
+        "  min-height: 22px;"
+        "  selection-background-color: #0078d4;"
+        "}"
+        "#controlsToolbar QLineEdit:focus {"
+        "  border-color: #0078d4;"
+        "}"
+        "#controlsToolbar QLabel {"
+        "  color: #666;"
+        "  font-size: 10px;"
+        "}";
+
+    QString style = QString(m_darkTheme ? darkToolbarStyle : lightToolbarStyle) + segmentShapeRules;
+    m_controlsWidget->setStyleSheet(style);
+
+    m_controlsOuterLayout = new QVBoxLayout(m_controlsWidget);
+    m_controlsOuterLayout->setSpacing(4);
+    m_controlsOuterLayout->setContentsMargins(6, 4, 6, 4);
+
+    /* === Row 1: View/Data option groups === */
+    m_row1Widget = new QWidget(m_controlsWidget);
+    m_controlsRow1 = new QHBoxLayout(m_row1Widget);
+    m_controlsRow1->setSpacing(12);
+    m_controlsRow1->setContentsMargins(0, 0, 0, 0);
+
+    /* Helper lambda to create a segmented button */
+    auto makeSegBtn = [this](const QString &text, const QString &pos) -> QPushButton* {
+        QPushButton *btn = new QPushButton(text, m_controlsWidget);
+        btn->setCheckable(true);
+        btn->setProperty("segmented", true);
+        btn->setProperty("seg_pos", pos);
+        return btn;
+    };
+
+    /* Helper lambda to create an action button */
+    auto makeActionBtn = [this](const QString &text) -> QPushButton* {
+        QPushButton *btn = new QPushButton(text, m_controlsWidget);
+        btn->setProperty("action", true);
+        return btn;
+    };
+
+    /* -- Top N segment group -- */
+    QLabel *topLabel = new QLabel("Top:", m_controlsWidget);
+    m_top10Btn = makeSegBtn("10", "left");
+    m_top25Btn = makeSegBtn("25", "mid");
+    m_top50Btn = makeSegBtn("50", "right");
     m_top10Btn->setChecked(true);
+
+    QButtonGroup *topGroup = new QButtonGroup(this);
+    topGroup->setExclusive(true);
+    topGroup->addButton(m_top10Btn);
+    topGroup->addButton(m_top25Btn);
+    topGroup->addButton(m_top50Btn);
 
     connect(m_top10Btn, &QPushButton::clicked, this, &MainWindow::onTop10Clicked);
     connect(m_top25Btn, &QPushButton::clicked, this, &MainWindow::onTop25Clicked);
     connect(m_top50Btn, &QPushButton::clicked, this, &MainWindow::onTop50Clicked);
 
-    /* Packets/Bytes radio */
-    QButtonGroup *volumeGroup = new QButtonGroup(this);
-    m_packetsRadio = new QRadioButton("Packets", this);
-    m_bytesRadio = new QRadioButton("Bytes", this);
-    m_packetsRadio->setChecked(true);
-    volumeGroup->addButton(m_packetsRadio);
-    volumeGroup->addButton(m_bytesRadio);
+    /* -- Metric segment group -- */
+    QLabel *metricLabel = new QLabel("Metric:", m_controlsWidget);
+    m_packetsBtn = makeSegBtn("Pkts", "left");
+    m_bytesBtn = makeSegBtn("Bytes", "right");
+    m_packetsBtn->setChecked(true);
 
-    connect(m_packetsRadio, &QRadioButton::toggled, this, &MainWindow::onPacketsToggled);
-    connect(m_bytesRadio, &QRadioButton::toggled, this, &MainWindow::onBytesToggled);
+    QButtonGroup *metricGroup = new QButtonGroup(this);
+    metricGroup->setExclusive(true);
+    metricGroup->addButton(m_packetsBtn);
+    metricGroup->addButton(m_bytesBtn);
 
-    /* View type radio */
+    connect(m_packetsBtn, &QPushButton::clicked, this, [this]() { onPacketsToggled(true); });
+    connect(m_bytesBtn, &QPushButton::clicked, this, [this]() { onBytesToggled(true); });
+
+    /* -- View segment group -- */
+    QLabel *viewLabel = new QLabel("View:", m_controlsWidget);
+    m_circleBtn = makeSegBtn("Circle", "left");
+    m_tableBtn = makeSegBtn("Table", "right");
+    m_circleBtn->setChecked(true);
+
     QButtonGroup *viewGroup = new QButtonGroup(this);
-    m_circleRadio = new QRadioButton("Circle", this);
-    m_tableRadio = new QRadioButton("Table", this);
-    m_circleRadio->setChecked(true);
-    viewGroup->addButton(m_circleRadio);
-    viewGroup->addButton(m_tableRadio);
+    viewGroup->setExclusive(true);
+    viewGroup->addButton(m_circleBtn);
+    viewGroup->addButton(m_tableBtn);
 
-    connect(m_circleRadio, &QRadioButton::toggled, this, &MainWindow::onCircleViewToggled);
-    connect(m_tableRadio, &QRadioButton::toggled, this, &MainWindow::onTableViewToggled);
+    connect(m_circleBtn, &QPushButton::clicked, this, [this]() { onCircleViewToggled(true); });
+    connect(m_tableBtn, &QPushButton::clicked, this, [this]() { onTableViewToggled(true); });
 
-    /* MAC/IP radio */
-    QButtonGroup *addrGroup = new QButtonGroup(this);
-    m_macRadio = new QRadioButton("MAC", this);
-    m_ipRadio = new QRadioButton("IP", this);
-    m_ipRadio->setChecked(true);
-    addrGroup->addButton(m_macRadio);
-    addrGroup->addButton(m_ipRadio);
+    /* -- Mode segment group -- */
+    QLabel *modeLabel = new QLabel("Mode:", m_controlsWidget);
+    m_ipBtn = makeSegBtn("IP", "left");
+    m_macBtn = makeSegBtn("MAC", "right");
+    m_ipBtn->setChecked(true);
 
-    connect(m_macRadio, &QRadioButton::toggled, this, &MainWindow::onMACToggled);
-    connect(m_ipRadio, &QRadioButton::toggled, this, &MainWindow::onIPToggled);
+    QButtonGroup *modeGroup = new QButtonGroup(this);
+    modeGroup->setExclusive(true);
+    modeGroup->addButton(m_ipBtn);
+    modeGroup->addButton(m_macBtn);
 
-    /* Selection buttons */
-    m_selectAllBtn = new QPushButton("Select All", this);
-    m_selectNoneBtn = new QPushButton("Select None", this);
-    m_applyFilterBtn = new QPushButton("Filter", this);
-    m_clearFilterBtn = new QPushButton("Clear Filter", this);
-    m_clearFilterBtn->setToolTip("Clear Wireshark display filter and show all connections");
-    m_reloadDataBtn = new QPushButton("Reload Data", this);
-    m_savePDFBtn = new QPushButton("PDF", this);
-    m_savePDFBtn->setToolTip("Save report as PDF with circle visualization and IP pair list");
-    
-    /* Help button - styled like other control buttons */
-    QPushButton *helpBtn = new QPushButton("Help", this);
-    helpBtn->setToolTip("Show help and controls description");
-    connect(helpBtn, &QPushButton::clicked, this, &MainWindow::onHelpClicked);
-    
-    /* Line weight toggle */
-    m_lineThicknessCheckBox = new QCheckBox("Weight", this);
-    m_lineThicknessCheckBox->setChecked(false);  /* Disabled by default */
+    connect(m_ipBtn, &QPushButton::clicked, this, [this]() { onIPToggled(true); });
+    connect(m_macBtn, &QPushButton::clicked, this, [this]() { onMACToggled(true); });
+
+    /* -- Weight checkbox -- */
+    m_lineThicknessCheckBox = new QCheckBox("Weight", m_controlsWidget);
+    m_lineThicknessCheckBox->setChecked(false);
     connect(m_lineThicknessCheckBox, &QCheckBox::toggled, this, &MainWindow::onLineThicknessToggled);
 
+    /* -- Help button (created here so it exists before being added to layout) -- */
+    QPushButton *helpBtn = new QPushButton("?", m_row1Widget);
+    helpBtn->setToolTip("Show help and controls description");
+    helpBtn->setFixedSize(26, 26);
+    helpBtn->setStyleSheet(
+        QString("QPushButton {"
+        "  background: %1;"
+        "  color: %2;"
+        "  border: 1px solid %3;"
+        "  border-radius: 13px;"
+        "  font-weight: bold;"
+        "  font-size: 15px;"
+        "}"
+        "QPushButton:hover {"
+        "  background: %4;"
+        "}")
+        .arg(m_darkTheme ? "#4a4a4a" : "#d8d8d8")
+        .arg(m_darkTheme ? "#e0e0e0" : "#333")
+        .arg(m_darkTheme ? "#666" : "#aaa")
+        .arg(m_darkTheme ? "#5a5a5a" : "#c0c0c0")
+    );
+    connect(helpBtn, &QPushButton::clicked, this, &MainWindow::onHelpClicked);
+
+    /* Layout Row 1 */
+    m_controlsRow1->addWidget(topLabel);
+    m_controlsRow1->addWidget(m_top10Btn);
+    m_controlsRow1->addWidget(m_top25Btn);
+    m_controlsRow1->addWidget(m_top50Btn);
+    m_controlsRow1->addSpacing(8);
+    m_controlsRow1->addWidget(metricLabel);
+    m_controlsRow1->addWidget(m_packetsBtn);
+    m_controlsRow1->addWidget(m_bytesBtn);
+    m_controlsRow1->addSpacing(8);
+    m_controlsRow1->addWidget(viewLabel);
+    m_controlsRow1->addWidget(m_circleBtn);
+    m_controlsRow1->addWidget(m_tableBtn);
+    m_controlsRow1->addSpacing(8);
+    m_controlsRow1->addWidget(modeLabel);
+    m_controlsRow1->addWidget(m_ipBtn);
+    m_controlsRow1->addWidget(m_macBtn);
+    m_controlsRow1->addSpacing(8);
+    m_controlsRow1->addWidget(m_lineThicknessCheckBox);
+    m_controlsRow1->addStretch();
+    m_controlsRow1->addWidget(helpBtn);
+
+    /* === Row 2: Actions + Search === */
+    m_row2Widget = new QWidget(m_controlsWidget);
+    m_controlsRow2 = new QHBoxLayout(m_row2Widget);
+    m_controlsRow2->setSpacing(6);
+    m_controlsRow2->setContentsMargins(0, 0, 0, 0);
+
+    m_selectAllBtn = makeActionBtn("Select All");
+    m_selectNoneBtn = makeActionBtn("Select None");
+    m_applyFilterBtn = makeActionBtn("Filter");
+    m_applyFilterBtn->setStyleSheet(
+        m_applyFilterBtn->styleSheet() +
+        "QPushButton { font-weight: bold; }"
+    );
+    m_clearFilterBtn = makeActionBtn("Clear");
+    m_clearFilterBtn->setToolTip("Clear Wireshark display filter and show all connections");
+    m_reloadDataBtn = makeActionBtn("Reload");
+    m_savePDFBtn = makeActionBtn("PDF");
+    m_savePDFBtn->setToolTip("Save report as PDF with circle visualization and IP pair list");
+    m_selectSearchBtn = makeActionBtn("Select Results");
+    m_selectSearchBtn->setToolTip("Select only the communication pairs matching the current search");
+    m_selectSearchBtn->setEnabled(false);
+
     connect(m_selectAllBtn, &QPushButton::clicked, this, &MainWindow::onSelectAllClicked);
+    connect(m_selectSearchBtn, &QPushButton::clicked, this, &MainWindow::onSelectSearchResultsClicked);
     connect(m_selectNoneBtn, &QPushButton::clicked, this, &MainWindow::onSelectNoneClicked);
     connect(m_applyFilterBtn, &QPushButton::clicked, this, &MainWindow::onApplyFilterClicked);
     connect(m_clearFilterBtn, &QPushButton::clicked, this, &MainWindow::onClearFilterClicked);
     connect(m_reloadDataBtn, &QPushButton::clicked, this, &MainWindow::onReloadDataClicked);
     connect(m_savePDFBtn, &QPushButton::clicked, this, &MainWindow::onSavePDFClicked);
 
-    /* Add to layout */
-    m_controlsLayout->addWidget(m_top10Btn);
-    m_controlsLayout->addWidget(m_top25Btn);
-    m_controlsLayout->addWidget(m_top50Btn);
-    m_controlsLayout->addWidget(m_lineThicknessCheckBox);
-    m_controlsLayout->addWidget(new QLabel("|", this));
-    m_controlsLayout->addWidget(m_packetsRadio);
-    m_controlsLayout->addWidget(m_bytesRadio);
-    m_controlsLayout->addWidget(new QLabel("|", this));
-    m_controlsLayout->addWidget(m_circleRadio);
-    m_controlsLayout->addWidget(m_tableRadio);
-    m_controlsLayout->addWidget(new QLabel("|", this));
-    m_controlsLayout->addWidget(m_macRadio);
-    m_controlsLayout->addWidget(m_ipRadio);
-    m_controlsLayout->addWidget(new QLabel("|", this));
-    m_controlsLayout->addWidget(m_selectAllBtn);
-    m_controlsLayout->addWidget(m_selectNoneBtn);
-    m_controlsLayout->addWidget(m_applyFilterBtn);
-    m_controlsLayout->addWidget(m_clearFilterBtn);
-    m_controlsLayout->addWidget(new QLabel("|", this));
-    m_controlsLayout->addWidget(m_reloadDataBtn);
-    m_controlsLayout->addWidget(m_savePDFBtn);
-    m_controlsLayout->addWidget(helpBtn);
-    m_controlsLayout->addStretch();
-
-    /* Set fixed minimum height for controls - width expands as needed */
-    controlsGroup->setMinimumHeight(80);
-    controlsGroup->setMaximumHeight(80);  /* Fixed height */
-    controlsGroup->setSizePolicy(QSizePolicy::Expanding, QSizePolicy::Fixed);
-
-    m_mainLayout->addWidget(controlsGroup);
-}
-
-void MainWindow::createCircleView()
-{
-    m_circleWidget = new CircleWidget(this);
-    connect(m_circleWidget, &CircleWidget::pairSelectionChanged, 
-            this, &MainWindow::onPairSelectionChanged);
-    connect(m_circleWidget, &CircleWidget::nodeVisibilityToggle,
-            this, &MainWindow::onNodeVisibilityToggle);
-
-    m_circleContainer = new QWidget(this);
-    QVBoxLayout *circleLayout = new QVBoxLayout(m_circleContainer);
-    circleLayout->setContentsMargins(0, 0, 0, 0);
-    circleLayout->setSpacing(6);
-
-    circleLayout->addWidget(m_circleWidget, 1);
-
-    QHBoxLayout *searchLayout = new QHBoxLayout();
-    searchLayout->setContentsMargins(2, 0, 2, 2);
-    m_searchLabel = new QLabel("Search IP", m_circleContainer);
-    m_searchLineEdit = new QLineEdit(m_circleContainer);
+    /* Search bar (moved from circle container) */
+    m_searchLabel = new QLabel("Search IP", m_controlsWidget);
+    m_searchLineEdit = new QLineEdit(m_controlsWidget);
     m_searchLineEdit->setPlaceholderText("Partial IP or CIDR (e.g., 192.168.1 or 10.0.0.0/24)");
-
-    /* Explicit styling so the search bar is visible on all platforms/themes */
-    m_searchLineEdit->setStyleSheet(
-        "QLineEdit { background-color: white; color: black; border: 1px solid #999; "
-        "padding: 2px 4px; }"
-    );
-    m_searchLabel->setStyleSheet("QLabel { color: palette(text); padding: 0 4px; }");
+    m_searchLineEdit->setMinimumWidth(160);
 
     connect(m_searchLineEdit, &QLineEdit::returnPressed, this, [this]() {
         applySearchFilter(m_searchLineEdit->text());
@@ -370,9 +742,44 @@ void MainWindow::createCircleView()
         }
     });
 
-    searchLayout->addWidget(m_searchLabel);
-    searchLayout->addWidget(m_searchLineEdit, 1);
-    circleLayout->addLayout(searchLayout);
+    /* Layout Row 2 */
+    m_controlsRow2->addWidget(m_selectAllBtn);
+    m_controlsRow2->addWidget(m_selectSearchBtn);
+    m_controlsRow2->addWidget(m_selectNoneBtn);
+    m_controlsRow2->addWidget(m_applyFilterBtn);
+    m_controlsRow2->addWidget(m_clearFilterBtn);
+    m_controlsRow2->addSpacing(6);
+    m_controlsRow2->addWidget(m_reloadDataBtn);
+    m_controlsRow2->addWidget(m_savePDFBtn);
+    m_controlsRow2->addSpacing(12);
+    m_controlsRow2->addWidget(m_searchLabel);
+    m_controlsRow2->addWidget(m_searchLineEdit, 1);
+
+    m_controlsOuterLayout->addWidget(m_row1Widget);
+    m_controlsOuterLayout->addWidget(m_row2Widget);
+
+    m_controlsWidget->setSizePolicy(QSizePolicy::Expanding, QSizePolicy::Fixed);
+    m_mainLayout->addWidget(m_controlsWidget);
+}
+
+void MainWindow::createCircleView()
+{
+    m_circleWidget = new CircleWidget(this);
+    m_circleWidget->setDarkTheme(m_darkTheme);
+    connect(m_circleWidget, &CircleWidget::pairSelectionChanged, 
+            this, &MainWindow::onPairSelectionChanged);
+    connect(m_circleWidget, &CircleWidget::nodeVisibilityToggle,
+            this, &MainWindow::onNodeVisibilityToggle);
+    connect(m_circleWidget, &CircleWidget::lineClicked,
+            this, &MainWindow::onLineClicked);
+
+    m_circleContainer = new QWidget(this);
+    QVBoxLayout *circleLayout = new QVBoxLayout(m_circleContainer);
+    circleLayout->setContentsMargins(0, 0, 0, 0);
+    circleLayout->setSpacing(0);
+
+    circleLayout->addWidget(m_circleWidget, 1);
+    /* Search bar is now in the controls toolbar */
 }
 
 void MainWindow::createTableView()
@@ -404,28 +811,23 @@ void MainWindow::createTableView()
     
     m_pairListWidget = new QListWidget(m_pairListContainer);
     /* Set minimum width to hold IP address pairs, but allow resizing via splitter */
-    m_pairListWidget->setMinimumWidth(250);
+    m_pairListWidget->setMinimumWidth(180);
     m_pairListWidget->setSizePolicy(QSizePolicy::Expanding, QSizePolicy::Expanding);
     
     /* Remove left padding/margins to minimize empty space - use stylesheet */
+    /* NOTE: ANY QListWidget::item rule in a stylesheet — even one that does
+     * NOT set background-color — causes Qt's stylesheet renderer to take over
+     * ALL item painting, silently preventing setBackground() / setForeground()
+     * calls from having any visible effect.  This breaks the search-result
+     * red-blink animation.  Therefore we ONLY style the container (padding,
+     * border) and handle per-item sizing via setSizeHint() when items are
+     * created.                                                                */
     m_pairListWidget->setStyleSheet(
         "QListWidget { "
         "    padding: 0px; "
         "    margin: 0px; "
         "    border: none; "
         "} "
-        "QListWidget::item { "
-        "    padding-left: 8px; "
-        "    margin: 0px; "
-        "    border: none; "
-        "    height: 30px; "
-        "} "
-        "QListWidget::item:selected { "
-        "    background-color: #3daee9; "
-        "} "
-        "QListWidget::item:hover { "
-        "    background-color: #e0e0e0; "
-        "}"
     );
     
     /* Set fixed-width font for IP list - use platform-appropriate size */
@@ -453,7 +855,7 @@ void MainWindow::createTableView()
     pairListContainerLayout->addWidget(m_legendWidget, 0);  /* Stretch factor 0 = fixed size */
     
     /* Set container size policy - allow resizing via splitter, with reasonable minimum */
-    m_pairListContainer->setMinimumWidth(250);
+    m_pairListContainer->setMinimumWidth(180);
     m_pairListContainer->setSizePolicy(QSizePolicy::Preferred, QSizePolicy::Expanding);
 }
 
@@ -608,8 +1010,11 @@ void MainWindow::updateViews()
             onTableCheckboxToggled(pair, checked);
         });
 
-        m_tableWidget->setItem(row, 1, new QTableWidgetItem(pair->src_addr));
-        m_tableWidget->setItem(row, 2, new QTableWidgetItem(pair->dst_addr));
+        /* Use resolved names for display if available, raw addresses otherwise */
+        QString displaySrc = pair->resolved_src ? QString::fromUtf8(pair->resolved_src) : QString::fromUtf8(pair->src_addr);
+        QString displayDst = pair->resolved_dst ? QString::fromUtf8(pair->resolved_dst) : QString::fromUtf8(pair->dst_addr);
+        m_tableWidget->setItem(row, 1, new QTableWidgetItem(displaySrc));
+        m_tableWidget->setItem(row, 2, new QTableWidgetItem(displayDst));
         
         /* Right-align numeric columns */
         QTableWidgetItem *pktItem = new QTableWidgetItem(QString::number(pair->packet_count));
@@ -645,7 +1050,8 @@ void MainWindow::updateViews()
             g_hash_table_iter_init(&port_iter, pair->dst_ports);
             while (g_hash_table_iter_next(&port_iter, &port_key, &port_value)) {
                 guint16 port = GPOINTER_TO_UINT(port_key);
-                guint64 count = port_value ? *((guint64*)port_value) : 0;
+                port_stats_t *ps = (port_stats_t *)port_value;
+                guint64 count = ps ? ps->count : 0;
                 port_list.append(qMakePair(port, count));
             }
             /* Sort descending by count */
@@ -720,15 +1126,17 @@ void MainWindow::updateViews()
         pair_groups[key].append(pair);
     }
     
-    /* Find maximum source address length for alignment */
+    /* Find maximum display address length for alignment (use resolved names if available) */
     guint max_src_len = 0;
     guint max_dst_len = 0;
     for (iter = m_top_pairs; iter; iter = iter->next) {
         comm_pair_t *pair = (comm_pair_t *)iter->data;
         if (!pair || !pair->src_addr || !pair->dst_addr)
             continue;
-        guint src_len = (guint)strlen(pair->src_addr);
-        guint dst_len = (guint)strlen(pair->dst_addr);
+        QString dSrc = pair->resolved_src ? QString::fromUtf8(pair->resolved_src) : QString::fromUtf8(pair->src_addr);
+        QString dDst = pair->resolved_dst ? QString::fromUtf8(pair->resolved_dst) : QString::fromUtf8(pair->dst_addr);
+        guint src_len = (guint)dSrc.length();
+        guint dst_len = (guint)dDst.length();
         if (src_len > max_src_len)
             max_src_len = src_len;
         if (dst_len > max_dst_len)
@@ -767,10 +1175,11 @@ void MainWindow::updateViews()
             if (list_entry_count >= m_topN)
                 break;
             
-            QString src_addr = QString::fromUtf8(pair->src_addr);
-            QString dst_addr = QString::fromUtf8(pair->dst_addr);
+            /* Use resolved names for display, raw addresses for internal use */
+            QString src_addr = pair->resolved_src ? QString::fromUtf8(pair->resolved_src) : QString::fromUtf8(pair->src_addr);
+            QString dst_addr = pair->resolved_dst ? QString::fromUtf8(pair->resolved_dst) : QString::fromUtf8(pair->dst_addr);
             
-            /* Truncate IPv6 addresses to save space (first 4 hex digits ... last 4 hex digits) */
+            /* Truncate long addresses/names — will be refined by refreshPairListText() */
             src_addr = truncateIPv6Address(src_addr);
             dst_addr = truncateIPv6Address(dst_addr);
             
@@ -809,6 +1218,34 @@ void MainWindow::updateViews()
     
     /* Initialize visible pairs after creating list items */
     updateVisiblePairsFromWidgets();
+
+    /* Adapt display names to available width (truncate long hostnames etc.) */
+    refreshPairListText();
+
+    /* Auto-fit pair list width to content on first data load (when no saved
+     * splitter position exists).  Measures the widest item text plus checkbox
+     * and scrollbar overhead, then sizes the splitter so the pair list is
+     * just wide enough to show everything without wasted space.             */
+    if (!m_splitterSizesRestored && m_splitter && m_pairListWidget->count() > 0) {
+        QFontMetrics fm(m_pairListWidget->font());
+        int maxTextWidth = 0;
+        for (int i = 0; i < m_pairListWidget->count(); i++) {
+            QListWidgetItem *item = m_pairListWidget->item(i);
+            if (!item) continue;
+            int w = fm.horizontalAdvance(item->text());
+            if (w > maxTextWidth) maxTextWidth = w;
+        }
+        /* Add space for: checkbox (~28px) + left padding + scrollbar (~18px) + margin */
+        int idealWidth = maxTextWidth + 60;
+        int minWidth = 180;
+        int maxWidth = m_splitter->width() / 2;  /* never more than half */
+        idealWidth = qBound(minWidth, idealWidth, maxWidth);
+
+        int totalWidth = m_splitter->width();
+        if (totalWidth > 0) {
+            m_splitter->setSizes(QList<int>() << (totalWidth - idealWidth) << idealWidth);
+        }
+    }
 
     /* Re-apply search highlights if query is present */
     if (m_searchLineEdit && !m_searchLineEdit->text().trimmed().isEmpty()) {
@@ -895,8 +1332,9 @@ void MainWindow::updateLegend()
         
         /* Create color box */
         QLabel *color_label = new QLabel(m_legendWidget);
-        color_label->setStyleSheet(QString("background-color: rgb(%1,%2,%3); min-width: 12px; min-height: 12px; max-width: 12px; max-height: 12px; border: 1px solid #666;")
-                                   .arg(color.red()).arg(color.green()).arg(color.blue()));
+        QString borderColor = m_darkTheme ? "#666" : "#aaa";
+        color_label->setStyleSheet(QString("background-color: rgb(%1,%2,%3); min-width: 12px; min-height: 12px; max-width: 12px; max-height: 12px; border: 1px solid %4;")
+                                   .arg(color.red()).arg(color.green()).arg(color.blue()).arg(borderColor));
         color_label->setSizePolicy(QSizePolicy::Fixed, QSizePolicy::Fixed);
         
         /* Create checkbox for category */
@@ -913,7 +1351,10 @@ void MainWindow::updateLegend()
             category_checkbox->setEnabled(false);   /* Disable if category not found */
         }
         
-        category_checkbox->setStyleSheet("QCheckBox { font-size: 9pt; } QCheckBox:disabled { color: #888; }");
+        if (m_darkTheme)
+            category_checkbox->setStyleSheet("QCheckBox { font-size: 9pt; } QCheckBox:disabled { color: #888; }");
+        else
+            category_checkbox->setStyleSheet("QCheckBox { font-size: 9pt; } QCheckBox:disabled { color: #aaa; }");
         category_checkbox->setSizePolicy(QSizePolicy::Minimum, QSizePolicy::Fixed);
         
         /* Connect checkbox to filter function */
@@ -1048,21 +1489,88 @@ void MainWindow::onPacketsToggled(bool checked) { if (checked) { m_useBytes = FA
 void MainWindow::onBytesToggled(bool checked) { if (checked) { m_useBytes = TRUE; updateViews(); } }
 void MainWindow::onCircleViewToggled(bool checked) { if (checked) m_viewStack->setCurrentIndex(0); }
 void MainWindow::onTableViewToggled(bool checked) { if (checked) m_viewStack->setCurrentIndex(1); }
-void MainWindow::onMACToggled(bool checked) { 
-    if (checked) { 
-        m_useMAC = TRUE; 
+void MainWindow::onMACToggled(bool checked) {
+    if (checked) {
+        m_useMAC = TRUE;
         updateSearchBarForMode();
         /* Trigger re-analysis when switching to MAC */
         circle_vis_reload_data();
-    } 
+    }
 }
-void MainWindow::onIPToggled(bool checked) { 
-    if (checked) { 
-        m_useMAC = FALSE; 
+void MainWindow::onIPToggled(bool checked) {
+    if (checked) {
+        m_useMAC = FALSE;
         updateSearchBarForMode();
         /* Trigger re-analysis when switching to IP */
         circle_vis_reload_data();
-    } 
+    }
+}
+
+void MainWindow::resizeEvent(QResizeEvent *event)
+{
+    QMainWindow::resizeEvent(event);
+    relayoutControls();
+}
+
+void MainWindow::relayoutControls()
+{
+    /* Responsive: merge row1 + row2 into single row if window is wide enough */
+    /* For now, the two-row layout always shows both rows */
+    /* Both rows are visible - they will wrap content naturally via QHBoxLayout */
+}
+
+void MainWindow::onLineClicked(comm_pair_t *pair, const QPoint &globalPos)
+{
+    if (!pair || !pair->src_addr || !pair->dst_addr)
+        return;
+
+    /* Close existing popup if any.
+     * m_connectionPopup is a QPointer: it auto-nulls when the widget is
+     * destroyed (via deleteLater from the auto-close timer).               */
+    if (m_connectionPopup) {
+        m_connectionPopup->hide();
+        m_connectionPopup->deleteLater();
+        m_connectionPopup = nullptr;
+    }
+
+    /* Find the reverse pair (B→A) so the popup can merge port data from
+     * both directions for a complete view.  Search through the same pair
+     * list that the circle widget uses.                                     */
+    comm_pair_t *reversePair = nullptr;
+    if (m_circle_pairs) {
+        for (GList *iter = m_circle_pairs; iter; iter = iter->next) {
+            comm_pair_t *p = (comm_pair_t *)iter->data;
+            if (!p || !p->src_addr || !p->dst_addr) continue;
+            if (p == pair) continue;  /* skip self */
+            if (g_strcmp0(p->src_addr, pair->dst_addr) == 0 &&
+                g_strcmp0(p->dst_addr, pair->src_addr) == 0) {
+                reversePair = p;
+                break;
+            }
+        }
+    }
+
+    /* Create new connection popup with both directions */
+    m_connectionPopup = new ConnectionPopup(pair, reversePair, m_useMAC, this);
+    
+    /* Position near the click point, offset slightly so cursor isn't on the popup */
+    QPoint popupPos = globalPos + QPoint(10, 10);
+    
+    /* Ensure popup stays on screen */
+    QScreen *screen = QApplication::screenAt(globalPos);
+    if (screen) {
+        QRect screenGeom = screen->availableGeometry();
+        QSize popupSize = m_connectionPopup->sizeHint();
+        if (popupPos.x() + popupSize.width() > screenGeom.right()) {
+            popupPos.setX(globalPos.x() - popupSize.width() - 10);
+        }
+        if (popupPos.y() + popupSize.height() > screenGeom.bottom()) {
+            popupPos.setY(globalPos.y() - popupSize.height() - 10);
+        }
+    }
+    
+    m_connectionPopup->move(popupPos);
+    m_connectionPopup->show();
 }
 
 void MainWindow::onSelectAllClicked()
@@ -1092,6 +1600,46 @@ void MainWindow::onSelectAllClicked()
     /* Reconnect signal */
     connect(m_pairListWidget, &QListWidget::itemChanged, this, &MainWindow::onPairListItemChanged);
     
+    /* Sync table checkboxes and refresh */
+    syncTableCheckboxesFromPairList();
+    updateVisiblePairsFromWidgets();
+    if (m_circleWidget) {
+        m_circleWidget->update();
+    }
+}
+
+void MainWindow::onSelectSearchResultsClicked()
+{
+    if (m_highlightedPairItems.isEmpty())
+        return;
+
+    /* Temporarily disconnect signal to avoid multiple update calls */
+    disconnect(m_pairListWidget, &QListWidget::itemChanged, this, &MainWindow::onPairListItemChanged);
+
+    QSet<int> highlighted(m_highlightedPairItems.begin(), m_highlightedPairItems.end());
+    QSet<QListWidgetItem*> processed;
+
+    for (int i = 0; i < m_pairListWidget->count(); i++) {
+        QListWidgetItem *item = m_pairListWidget->item(i);
+        if (!item || processed.contains(item))
+            continue;
+
+        bool isMatch = highlighted.contains(i);
+        Qt::CheckState state = isMatch ? Qt::Checked : Qt::Unchecked;
+        item->setCheckState(state);
+        processed.insert(item);
+
+        /* Also set linked pair to the same state */
+        if (m_linkedPairs.contains(item)) {
+            QListWidgetItem *linked = m_linkedPairs[item];
+            linked->setCheckState(state);
+            processed.insert(linked);
+        }
+    }
+
+    /* Reconnect signal */
+    connect(m_pairListWidget, &QListWidget::itemChanged, this, &MainWindow::onPairListItemChanged);
+
     /* Sync table checkboxes and refresh */
     syncTableCheckboxesFromPairList();
     updateVisiblePairsFromWidgets();
@@ -1139,9 +1687,9 @@ void MainWindow::onHelpClicked()
 {
     /* Use custom QDialog instead of QMessageBox for full size control */
     QDialog *helpDialog = new QDialog(this);
-    helpDialog->setWindowTitle("Help - PacketCircle");
-    helpDialog->setMinimumSize(1000, 600);
-    helpDialog->resize(1000, 700);
+    helpDialog->setWindowTitle("Help - PacketCircle v.0.3.2");
+    helpDialog->setMinimumSize(600, 400);
+    helpDialog->resize(900, 650);
     /* Make dialog resizable */
     helpDialog->setSizeGripEnabled(true);
     
@@ -1150,8 +1698,8 @@ void MainWindow::onHelpClicked()
     /* Create QTextEdit for rich text display with proper sizing */
     QTextEdit *textEdit = new QTextEdit(helpDialog);
     textEdit->setReadOnly(true);
-    textEdit->setMinimumWidth(950);
-    textEdit->setMinimumHeight(600);
+    textEdit->setMinimumWidth(500);
+    textEdit->setMinimumHeight(300);
     
     /* Use plain text formatting - no bold for descriptions, only titles */
     textEdit->setHtml(
@@ -1163,52 +1711,90 @@ void MainWindow::onHelpClicked()
         "</style>"
         "<h2>PacketCircle Help</h2>"
 
-        "<h3>Controls:</h3>"
+        "<h3>Toolbar Controls:</h3>"
         "<p style='margin-left: 0; padding-left: 0; font-weight: normal;'>"
-        "• Top 10/25/50: Limit display to top N communication pairs<br/>"
-        "• Weight: Enable/disable line weight variation based on traffic volume<br/>"
-        "• Packets/Bytes: Sort pairs by packet count or byte count<br/>"
-        "• Circle/Table: Switch between circular visualization and table view<br/>"
-        "• MAC/IP: Display MAC address pairs or IP address pairs<br/>"
-        "• Select All/None: Show or hide all communication pairs<br/>"
-        "• Filter: Apply selected pairs as a Wireshark display filter (directional — filters by exact source→destination)<br/>"
-        "• Clear Filter: Select all pairs, clear the Wireshark display filter, and show all packets<br/>"
-        "• Reload Data: Re-analyze current capture file<br/>"
-        "• PDF: Export a one-page PDF report containing the circle visualization and IP pair table<br/>"
-        "• Search: Highlight nodes and pairs by partial IP address, CIDR notation (e.g. 10.0.0.0/8), or partial MAC address. "
-        "The label switches between 'Search IP' and 'Search MAC' depending on the active mode."
+        "• <b>Top 10/25/50</b>: Limit display to top N communication pairs<br/>"
+        "• <b>Weight</b>: Enable/disable line weight variation based on traffic volume<br/>"
+        "• <b>Packets/Bytes</b>: Sort pairs by packet count or byte count<br/>"
+        "• <b>Circle/Table</b>: Switch between circular visualization and table view<br/>"
+        "• <b>MAC/IP</b>: Display MAC address pairs or IP address pairs<br/>"
+        "• <b>?</b> (top right): Open this help window"
         "</p>"
+
+        "<h3>Action Buttons:</h3>"
+        "<p style='margin-left: 0; padding-left: 0; font-weight: normal;'>"
+        "• <b>Select All / Select None</b>: Show or hide all communication pairs<br/>"
+        "• <b>Select Results</b>: Select only the communication pairs matching the current search (enabled after a search produces results)<br/>"
+        "• <b>Filter</b>: Apply selected pairs as a Wireshark display filter (directional — filters by exact source→destination)<br/>"
+        "• <b>Clear</b>: Select all pairs, clear the Wireshark display filter, and show all packets<br/>"
+        "• <b>Reload</b>: Re-analyze current capture file (respects active Wireshark display filter)<br/>"
+        "• <b>PDF</b>: Export a one-page PDF report containing the circle visualization and IP pair table"
+        "</p>"
+
+        "<h3>Search & Highlighting:</h3>"
+        "<p style='font-weight: normal;'>The search bar supports several query types. "
+        "Press <b>Enter</b> to search; matching nodes flash red in the circle and the pair list blinks in sync.</p>"
+        "<p style='margin-left: 0; padding-left: 0; font-weight: normal;'>"
+        "• <b>IP address</b> (partial): e.g. <code>192.168</code> or <code>10.0.0.1</code><br/>"
+        "• <b>CIDR range</b>: e.g. <code>10.0.0.0/8</code> or <code>172.16.0.0/12</code><br/>"
+        "• <b>MAC address</b> (partial, in MAC mode): e.g. <code>aa:bb</code> or <code>00:1a:2b</code><br/>"
+        "• <b>TCP port</b>: e.g. <code>TCP 443</code> or <code>tcp 23</code> — highlights all pairs that use the specified TCP port<br/>"
+        "• <b>UDP port</b>: e.g. <code>UDP 53</code> or <code>udp 5060</code> — highlights all pairs that use the specified UDP port"
+        "</p>"
+        "<p style='font-weight: normal;'>Port search works by inspecting the per-pair connection table (same data shown when clicking a line). "
+        "It checks both directions of a communication pair. Clear the search box to remove all highlights.</p>"
+
+        "<h3>Connection Details (Line Click):</h3>"
+        "<p style='font-weight: normal;'>Click any communication line in the circle to open a "
+        "<b>Connection Details</b> popup showing the port/socket breakdown for that pair. "
+        "Data is aggregated from both directions (A→B and B→A).</p>"
+        "<p style='margin-left: 0; padding-left: 0; font-weight: normal;'>"
+        "• <b>Protocol</b>: Transport protocol for each port (TCP, UDP, or TCP+UDP), detected per-port<br/>"
+        "• <b>Port</b>: Destination port number<br/>"
+        "• <b>Service</b>: Well-known service name (HTTP, HTTPS, SSH, Telnet, DNS, SMB, etc.)<br/>"
+        "• <b>Packets</b>: Number of packets observed on that port<br/>"
+        "• <b>% of Total</b>: Share of total traffic for the pair"
+        "</p>"
+        "<p style='font-weight: normal;'><b>Right-click</b> a row in the popup to access:</p>"
+        "<p style='margin-left: 0; padding-left: 0; font-weight: normal;'>"
+        "• <b>Apply Filter in Wireshark</b>: Sets a bidirectional display filter matching both addresses "
+        "and the selected port. Uses <code>ip.addr</code> / <code>eth.addr</code> for addresses "
+        "and <code>tcp.port</code> or <code>udp.port</code> for the port.<br/>"
+        "• <b>Follow TCP Stream</b>: Opens Wireshark's TCP stream reassembly dialog for that connection (TCP only).<br/>"
+        "• <b>TCP Throughput Graph</b>: Opens Wireshark's TCP throughput time-series graph for the selected stream (TCP only).<br/>"
+        "• <b>TCP Round-Trip Time Graph</b>: Opens Wireshark's TCP RTT graph for the selected stream (TCP only)."
+        "</p>"
+        "<p style='font-weight: normal;'>The popup auto-closes when the mouse leaves it. "
+        "It remains open while a right-click context menu is active.</p>"
 
         "<h3>Filtering:</h3>"
         "<p style='font-weight: normal;'>The <b>Filter</b> button applies a Wireshark display filter for the currently checked pairs. "
-        "Each pair is filtered by its exact direction — selecting only \"A → B\" will filter to packets where A is the source "
+        "Each pair is filtered by its exact direction — selecting only \"A → B\" filters to packets where A is the source "
         "and B is the destination. To see both directions, check both \"A → B\" and \"B → A\".</p>"
-        "<p style='font-weight: normal;'>The <b>Clear Filter</b> button resets everything: it selects all pairs in the list "
+        "<p style='font-weight: normal;'>The <b>Clear</b> button resets everything: selects all pairs "
         "and sends an empty display filter to Wireshark so all packets are visible again.</p>"
+        "<p style='font-weight: normal;'>Filters applied from the connection popup use <b>bidirectional</b> address matching "
+        "so traffic in both directions is always included.</p>"
 
-        "<h3>Protocol Filter:</h3>"
+        "<h3>Protocol Legend:</h3>"
         "<p style='font-weight: normal;'>The protocol legend at the bottom shows protocol categories with checkboxes:</p>"
         "<p style='margin-left: 0; padding-left: 0; font-weight: normal;'>"
-        "• ARP: Address Resolution Protocol (ARP, RARP)<br/>"
-        "• ICMP: Internet Control Message Protocol (ICMP, ICMPv6)<br/>"
-        "• TCP: Transmission Control Protocol<br/>"
-        "• UDP: User Datagram Protocol<br/>"
-        "• Infrastructure: Routing and infrastructure protocols (OSPF, BGP, RIP, EIGRP, ISIS, IGMP, PIM, VRRP, HSRP, SCTP, DCCP)<br/>"
-        "• Unknown: Unidentified or generic protocols (IP, IPv4, IPv6, Ethernet)"
+        "• <b>ARP</b>: Address Resolution Protocol (ARP, RARP)<br/>"
+        "• <b>ICMP</b>: Internet Control Message Protocol (ICMP, ICMPv6)<br/>"
+        "• <b>TCP</b>: Transmission Control Protocol<br/>"
+        "• <b>UDP</b>: User Datagram Protocol<br/>"
+        "• <b>Infra</b>: Routing and infrastructure protocols (OSPF, BGP, RIP, EIGRP, ISIS, IGMP, PIM, VRRP, HSRP, SCTP, DCCP)<br/>"
+        "• <b>Unknown</b>: Unidentified or generic protocols (IP, IPv4, IPv6, Ethernet)"
         "</p>"
         "<p style='font-weight: normal;'>Uncheck a protocol category to hide its connections in the circle view. "
-        "Protocols not found in the current capture show a dash (N/A) in the checkbox.</p>"
-        "<p style='font-weight: normal;'>When a pair carries both TCP and UDP traffic, it is shown as an alternating "
-        "dotted line with TCP and UDP colors. If you filter to only one protocol (e.g. uncheck UDP), the mixed pair "
-        "will appear as a solid line in the selected protocol's color.</p>"
+        "Protocols not found in the current capture show a dash (N/A). "
+        "Mixed TCP+UDP pairs display as alternating dotted lines.</p>"
 
-        "<h3>IP Pair List:</h3>"
+        "<h3>Node Pair List:</h3>"
         "<p style='font-weight: normal;'>Checkboxes control visibility of communication lines in the circle. "
-        "Only checked pairs are drawn — unchecked pairs are completely hidden. "
-        "Pairs with traffic in both directions (A→B and B→A) are shown adjacent to each other with linked checkboxes — "
-        "deselecting one automatically deselects the other.</p>"
-        "<p style='font-weight: normal;'>The splitter between the circle and the pair list can be dragged "
-        "to resize the two panels.</p>"
+        "Pairs with traffic in both directions (A→B and B→A) are grouped with linked checkboxes. "
+        "Long hostnames and addresses are automatically truncated with \"...\" to fit the available panel width — "
+        "drag the splitter between the circle and the list to resize.</p>"
 
         "<h3>Node Tooltips:</h3>"
         "<p style='font-weight: normal;'>Hover over a node in the circle to see detailed information:</p>"
@@ -1228,6 +1814,19 @@ void MainWindow::onHelpClicked()
         "• The circle visualization (rendered with a white background and darkened colors for print)<br/>"
         "• A table of all IP pairs with source, destination, packet count, and byte count"
         "</p>"
+
+        "<h3>Preferences:</h3>"
+        "<p style='font-weight: normal;'>PacketCircle automatically saves your preferences to "
+        "<code>~/.PacketCircle/settings.ini</code>. The following settings are remembered between sessions:</p>"
+        "<p style='margin-left: 0; padding-left: 0; font-weight: normal;'>"
+        "• Window position and size<br/>"
+        "• Splitter position (circle vs. pair list width)<br/>"
+        "• Top N selection (10/25/50)<br/>"
+        "• Packets vs. Bytes mode<br/>"
+        "• MAC vs. IP mode<br/>"
+        "• Circle vs. Table view<br/>"
+        "• Line weight checkbox state"
+        "</p>"
     );
     
     /* Footer row: "Built with..." label + OK button side by side */
@@ -1240,7 +1839,7 @@ void MainWindow::onHelpClicked()
         "<a href=\"https://github.com/netwho/PacketCircle\">https://github.com/netwho/PacketCircle</a>")
     );
     footerLabel->setOpenExternalLinks(true);
-    footerLabel->setStyleSheet("color: #888; font-size: 11px;");
+    footerLabel->setStyleSheet(m_darkTheme ? "color: #888; font-size: 11px;" : "color: #999; font-size: 11px;");
 
     QPushButton *okButton = new QPushButton("OK", helpDialog);
     connect(okButton, &QPushButton::clicked, helpDialog, &QDialog::accept);
@@ -1438,8 +2037,9 @@ void MainWindow::onSavePDFClicked()
 
         painter.setPen(Qt::black);
         tx = listX + mm(1);
-        QString src = QString::fromUtf8(pair->src_addr);
-        QString dst = QString::fromUtf8(pair->dst_addr);
+        /* Use resolved names in the PDF table for display */
+        QString src = pair->resolved_src ? QString::fromUtf8(pair->resolved_src) : QString::fromUtf8(pair->src_addr);
+        QString dst = pair->resolved_dst ? QString::fromUtf8(pair->resolved_dst) : QString::fromUtf8(pair->dst_addr);
         painter.drawText(tx, tableY, colSrc, rowH, Qt::AlignVCenter, src);
         tx += colSrc;
         painter.drawText(tx, tableY, colDst, rowH, Qt::AlignVCenter, dst);
@@ -1466,7 +2066,7 @@ void MainWindow::onSavePDFClicked()
     QFontMetrics ffm(footerFont, &writer);
     int footerTextH = ffm.height();
     painter.drawText(0, pageH - footerTextH - mm(1), pageW, footerTextH, Qt::AlignCenter,
-                     QString("Generated by PacketCircle v0.2.2 — %1")
+                     QString("Generated by PacketCircle v.0.3.2 — %1")
                          .arg(QDateTime::currentDateTime().toString("yyyy-MM-dd HH:mm:ss")));
 
     painter.end();
@@ -1489,8 +2089,8 @@ void MainWindow::updateSearchBarForMode()
         m_searchLabel->setText("Search MAC");
         m_searchLineEdit->setPlaceholderText("Partial MAC (e.g., aa:bb or 00:1a:2b)");
     } else {
-        m_searchLabel->setText("Search IP");
-        m_searchLineEdit->setPlaceholderText("Partial IP or CIDR (e.g., 192.168.1 or 10.0.0.0/24)");
+        m_searchLabel->setText("Search");
+        m_searchLineEdit->setPlaceholderText("IP, CIDR, or port (e.g., 10.0.0.0/24, TCP 443, UDP 53)");
     }
     /* Clear current search when switching modes */
     m_searchLineEdit->clear();
@@ -1506,59 +2106,76 @@ bool MainWindow::isMACAddress(const QString &address)
     return true;
 }
 
+/* Truncate a display string to a maximum character count, keeping
+ * the beginning and end visible with "..." in between.
+ * E.g. "very-long-hostname.example.com" → "very-l...le.com" */
+static QString truncateDisplayName(const QString &name, int maxChars)
+{
+    if (name.length() <= maxChars || maxChars < 8)
+        return name;
+    int keepEnd = qMax(4, maxChars / 3);
+    int keepStart = maxChars - keepEnd - 3;  /* 3 for "..." */
+    if (keepStart < 3) keepStart = 3;
+    return name.left(keepStart) + "..." + name.right(keepEnd);
+}
+
 void MainWindow::refreshPairListText()
 {
     if (!m_pairListWidget || m_pairListWidget->count() == 0)
         return;
 
-    /* Check if any item is a MAC address */
-    bool has_mac = false;
-    for (int i = 0; i < m_pairListWidget->count(); i++) {
-        QListWidgetItem *item = m_pairListWidget->item(i);
-        comm_pair_t *pair = static_cast<comm_pair_t*>(item->data(Qt::UserRole).value<void*>());
-        if (pair && pair->src_addr && isMACAddress(QString::fromUtf8(pair->src_addr))) {
-            has_mac = true;
-            break;
-        }
-    }
-    if (!has_mac) return;  /* Only relevant in MAC mode */
-
     /* Determine available width for text */
     int listWidth = m_pairListWidget->viewport()->width();
     QFontMetrics fm(m_pairListWidget->font());
-    /* A full MAC pair line: "aa:bb:cc:dd:ee:ff → aa:bb:cc:dd:ee:ff" + checkbox space */
-    int fullMacWidth = fm.horizontalAdvance("aa:bb:cc:dd:ee:ff \xE2\x86\x92 aa:bb:cc:dd:ee:ff") + 50;
-    bool showFull = (listWidth >= fullMacWidth);
 
-    /* Find max address lengths for alignment */
+    /* Reserve space for checkbox (~30px) + arrow " → " + safety margin */
+    int reservedPx = fm.horizontalAdvance(" \xE2\x86\x92 ") + 50;
+    int availablePx = listWidth - reservedPx;
+    if (availablePx < 100) availablePx = 100;
+
+    /* Calculate max characters that fit for each address column (half each) */
+    int charWidth = fm.horizontalAdvance('W');  /* use a wide char for safety */
+    if (charWidth < 1) charWidth = 8;
+    int maxCharsPerAddr = (availablePx / 2) / charWidth;
+    if (maxCharsPerAddr < 8) maxCharsPerAddr = 8;
+
+    /* Build display strings for each item — apply truncation and measure for alignment */
+    struct DisplayEntry {
+        QString src;
+        QString dst;
+    };
+    QVector<DisplayEntry> entries(m_pairListWidget->count());
     guint max_src_len = 0, max_dst_len = 0;
+
     for (int i = 0; i < m_pairListWidget->count(); i++) {
         QListWidgetItem *item = m_pairListWidget->item(i);
         comm_pair_t *pair = static_cast<comm_pair_t*>(item->data(Qt::UserRole).value<void*>());
         if (!pair || !pair->src_addr || !pair->dst_addr) continue;
-        QString src = QString::fromUtf8(pair->src_addr);
-        QString dst = QString::fromUtf8(pair->dst_addr);
-        if (!showFull) {
-            src = truncateIPv6Address(src);
-            dst = truncateIPv6Address(dst);
-        }
+
+        /* Use resolved names for display */
+        QString src = pair->resolved_src ? QString::fromUtf8(pair->resolved_src) : QString::fromUtf8(pair->src_addr);
+        QString dst = pair->resolved_dst ? QString::fromUtf8(pair->resolved_dst) : QString::fromUtf8(pair->dst_addr);
+
+        /* Apply IPv6/MAC truncation first */
+        src = truncateIPv6Address(src);
+        dst = truncateIPv6Address(dst);
+
+        /* Then truncate long names (hostnames, etc.) to fit the available width */
+        src = truncateDisplayName(src, maxCharsPerAddr);
+        dst = truncateDisplayName(dst, maxCharsPerAddr);
+
+        entries[i].src = src;
+        entries[i].dst = dst;
         if ((guint)src.length() > max_src_len) max_src_len = (guint)src.length();
         if ((guint)dst.length() > max_dst_len) max_dst_len = (guint)dst.length();
     }
 
-    /* Update each item's text */
+    /* Update each item's text with aligned columns */
     for (int i = 0; i < m_pairListWidget->count(); i++) {
         QListWidgetItem *item = m_pairListWidget->item(i);
-        comm_pair_t *pair = static_cast<comm_pair_t*>(item->data(Qt::UserRole).value<void*>());
-        if (!pair || !pair->src_addr || !pair->dst_addr) continue;
-        QString src = QString::fromUtf8(pair->src_addr);
-        QString dst = QString::fromUtf8(pair->dst_addr);
-        if (!showFull) {
-            src = truncateIPv6Address(src);
-            dst = truncateIPv6Address(dst);
-        }
-        src = src.leftJustified(max_src_len, ' ');
-        dst = dst.leftJustified(max_dst_len, ' ');
+        if (entries[i].src.isEmpty() && entries[i].dst.isEmpty()) continue;
+        QString src = entries[i].src.leftJustified(max_src_len, ' ');
+        QString dst = entries[i].dst.leftJustified(max_dst_len, ' ');
         item->setText(QString("%1 \xE2\x86\x92 %2").arg(src).arg(dst));
     }
 }
@@ -1668,10 +2285,47 @@ QList<comm_pair_t*> MainWindow::getActivePairsForFilter() const
     return active_pairs;
 }
 
+void MainWindow::onPairListBlinkTimer()
+{
+    m_pairListBlinkState = !m_pairListBlinkState;
+    if (m_highlightedPairItems.isEmpty()) {
+        m_pairListBlinkTimer->stop();
+        return;
+    }
+
+    for (int idx : m_highlightedPairItems) {
+        QListWidgetItem *item = m_pairListWidget->item(idx);
+        if (!item) continue;
+
+        if (m_pairListBlinkState) {
+            /* Blink ON: bright red background + white text (matches circle) */
+            item->setBackground(QBrush(QColor(255, 0, 0)));
+            item->setForeground(QBrush(QColor(255, 255, 255)));
+            QFont f = item->font();
+            f.setBold(true);
+            item->setFont(f);
+        } else {
+            /* Blink OFF: restore normal appearance */
+            item->setBackground(QBrush());
+            item->setForeground(QBrush());
+            QFont f = item->font();
+            f.setBold(false);
+            item->setFont(f);
+        }
+    }
+}
+
 void MainWindow::applySearchFilter(const QString &query)
 {
     QString trimmed = query.trimmed();
     QSet<QString> highlighted_labels;
+
+    /* Clear old highlights and stop blink timer */
+    m_highlightedPairItems.clear();
+    if (m_pairListBlinkTimer->isActive()) {
+        m_pairListBlinkTimer->stop();
+    }
+    m_pairListBlinkState = false;
 
     if (trimmed.isEmpty()) {
         if (m_circleWidget) {
@@ -1680,14 +2334,42 @@ void MainWindow::applySearchFilter(const QString &query)
         if (m_pairListWidget) {
             for (int i = 0; i < m_pairListWidget->count(); i++) {
                 QListWidgetItem *list_item = m_pairListWidget->item(i);
-                if (list_item)
+                if (list_item) {
                     list_item->setBackground(QBrush());
+                    list_item->setForeground(QBrush());
+                    QFont f = list_item->font();
+                    f.setBold(false);
+                    list_item->setFont(f);
+                }
             }
         }
         return;
     }
 
-    bool is_cidr = trimmed.contains('/') && parse_cidr(trimmed, nullptr, nullptr);
+    /* --- Detect port search: "TCP <port>" or "UDP <port>" --- */
+    bool is_port_search = false;
+    bool port_search_tcp = false;
+    bool port_search_udp = false;
+    guint16 port_search_num = 0;
+
+    {
+        /* Accept e.g. "TCP 443", "udp 53", "tcp23", "UDP53" */
+        QRegularExpression portRx("^(tcp|udp)\\s*(\\d+)$", QRegularExpression::CaseInsensitiveOption);
+        QRegularExpressionMatch portMatch = portRx.match(trimmed);
+        if (portMatch.hasMatch()) {
+            QString proto = portMatch.captured(1).toUpper();
+            bool ok = false;
+            int portVal = portMatch.captured(2).toInt(&ok);
+            if (ok && portVal > 0 && portVal <= 65535) {
+                is_port_search = true;
+                port_search_num = (guint16)portVal;
+                port_search_tcp = (proto == "TCP");
+                port_search_udp = (proto == "UDP");
+            }
+        }
+    }
+
+    bool is_cidr = !is_port_search && trimmed.contains('/') && parse_cidr(trimmed, nullptr, nullptr);
 
     if (m_pairListWidget) {
         for (int i = 0; i < m_pairListWidget->count(); i++) {
@@ -1700,23 +2382,71 @@ void MainWindow::applySearchFilter(const QString &query)
                 continue;
             }
 
-            QString src = QString::fromUtf8(pair->src_addr);
-            QString dst = QString::fromUtf8(pair->dst_addr);
+            bool match = false;
 
-            bool src_match = is_cidr ? ipv4_in_cidr(src, trimmed) : src.contains(trimmed, Qt::CaseInsensitive);
-            bool dst_match = is_cidr ? ipv4_in_cidr(dst, trimmed) : dst.contains(trimmed, Qt::CaseInsensitive);
-            bool match = src_match || dst_match;
+            if (is_port_search) {
+                /* Port search: check this pair's dst_ports (and reverse pair's) */
+                auto checkPorts = [&](comm_pair_t *p) -> bool {
+                    if (!p || !p->dst_ports) return false;
+                    gpointer port_key = GUINT_TO_POINTER((guint)port_search_num);
+                    port_stats_t *ps = (port_stats_t *)g_hash_table_lookup(p->dst_ports, port_key);
+                    if (!ps) return false;
+                    if (port_search_tcp && ps->is_tcp) return true;
+                    if (port_search_udp && ps->is_udp) return true;
+                    return false;
+                };
+
+                match = checkPorts(pair);
+
+                /* Also check the reverse pair (B→A for the same port) */
+                if (!match && m_analysisResult && m_analysisResult->pairs) {
+                    for (GList *gl = m_analysisResult->pairs; gl; gl = gl->next) {
+                        comm_pair_t *rp = (comm_pair_t *)gl->data;
+                        if (rp && rp != pair &&
+                            g_strcmp0(rp->src_addr, pair->dst_addr) == 0 &&
+                            g_strcmp0(rp->dst_addr, pair->src_addr) == 0) {
+                            match = checkPorts(rp);
+                            break;
+                        }
+                    }
+                }
+
+                if (match) {
+                    QString src = QString::fromUtf8(pair->src_addr);
+                    QString dst = QString::fromUtf8(pair->dst_addr);
+                    highlighted_labels.insert(src);
+                    highlighted_labels.insert(dst);
+                }
+            } else {
+                /* Address search (IP, MAC, CIDR) */
+                QString src = QString::fromUtf8(pair->src_addr);
+                QString dst = QString::fromUtf8(pair->dst_addr);
+
+                bool src_match = is_cidr ? ipv4_in_cidr(src, trimmed) : src.contains(trimmed, Qt::CaseInsensitive);
+                bool dst_match = is_cidr ? ipv4_in_cidr(dst, trimmed) : dst.contains(trimmed, Qt::CaseInsensitive);
+                match = src_match || dst_match;
+
+                if (match) {
+                    if (src_match) highlighted_labels.insert(src);
+                    if (dst_match) highlighted_labels.insert(dst);
+                }
+            }
 
             if (match) {
-                list_item->setBackground(QBrush(QColor(255, 248, 200)));
-                if (src_match)
-                    highlighted_labels.insert(src);
-                if (dst_match)
-                    highlighted_labels.insert(dst);
+                list_item->setBackground(QBrush(m_darkTheme ? QColor(120, 100, 30) : QColor(255, 248, 200)));
+                m_highlightedPairItems.append(i);
             } else {
                 list_item->setBackground(QBrush());
             }
         }
+    }
+
+    /* Start blink timer if we have matches; enable/disable Select Results */
+    if (!m_highlightedPairItems.isEmpty()) {
+        m_pairListBlinkTimer->start(500);
+        m_selectSearchBtn->setEnabled(true);
+    } else {
+        m_selectSearchBtn->setEnabled(false);
     }
 
     if (m_circleWidget) {
@@ -1998,4 +2728,578 @@ void MainWindow::onProtocolCategoryToggled(const QString &category, const QStrin
     if (m_circleWidget) {
         m_circleWidget->setProtocolFilter(enabled_protocols);
     }
+}
+
+/* =====================================================
+ * ConnectionPopup implementation
+ * =====================================================
+ */
+
+static QString portServiceName(quint16 port)
+{
+    switch (port) {
+        case 20:   return "FTP-Data";
+        case 21:   return "FTP";
+        case 22:   return "SSH";
+        case 23:   return "Telnet";
+        case 25:   return "SMTP";
+        case 53:   return "DNS";
+        case 67: case 68: return "DHCP";
+        case 80:   return "HTTP";
+        case 88:   return "Kerberos";
+        case 110:  return "POP3";
+        case 123:  return "NTP";
+        case 135:  return "MS-RPC";
+        case 143:  return "IMAP";
+        case 161:  return "SNMP";
+        case 389:  return "LDAP";
+        case 443:  return "HTTPS";
+        case 445:  return "SMB";
+        case 993:  return "IMAPS";
+        case 995:  return "POP3S";
+        case 1433: return "MSSQL";
+        case 3306: return "MySQL";
+        case 3389: return "RDP";
+        case 5060: return "SIP";
+        case 5432: return "PostgreSQL";
+        case 5900: return "VNC";
+        case 8080: return "HTTP-Proxy";
+        case 8443: return "HTTPS-Alt";
+        default:   return QString::number(port);
+    }
+}
+
+ConnectionPopup::ConnectionPopup(comm_pair_t *pair, comm_pair_t *reversePair, gboolean useMAC, QWidget *parent)
+    : QWidget(parent, Qt::Popup | Qt::FramelessWindowHint)
+    , m_pair(pair)
+    , m_reversePair(reversePair)
+    , m_useMAC(useMAC)
+    , m_table(nullptr)
+    , m_autoCloseTimer(nullptr)
+    , m_headerLabel(nullptr)
+    , m_contextMenuActive(false)
+{
+    /* NOTE: Do NOT use WA_DeleteOnClose here.  QMenu::exec() runs a nested
+     * event loop; if the auto-close timer fires during that loop and triggers
+     * deletion, the destructor runs while showContextMenu() is still on the
+     * call stack → use-after-free / SIGABRT.  Instead we use hide()+deleteLater()
+     * for safe deferred destruction.                                             */
+    setMouseTracking(true);
+
+    /* Styling — theme-aware */
+    bool dark = isDarkTheme();
+    if (dark) {
+        setStyleSheet(
+            "ConnectionPopup {"
+            "  background: #2b2b2b;"
+            "  border: 1px solid #555;"
+            "  border-radius: 6px;"
+            "}"
+        );
+    } else {
+        setStyleSheet(
+            "ConnectionPopup {"
+            "  background: #f8f8f8;"
+            "  border: 1px solid #b0b0b0;"
+            "  border-radius: 6px;"
+            "}"
+        );
+    }
+
+    QVBoxLayout *layout = new QVBoxLayout(this);
+    layout->setContentsMargins(8, 8, 8, 8);
+    layout->setSpacing(6);
+
+    /* Header: Source <-> Destination */
+    QString srcDisplay = pair->resolved_src ? QString::fromUtf8(pair->resolved_src) : QString::fromUtf8(pair->src_addr);
+    QString dstDisplay = pair->resolved_dst ? QString::fromUtf8(pair->resolved_dst) : QString::fromUtf8(pair->dst_addr);
+    if (dark) {
+        m_headerLabel = new QLabel(
+            QString("<b style='color:#e0e0e0;'>%1</b>"
+                    " <span style='color:#888;'>&harr;</span> "
+                    "<b style='color:#e0e0e0;'>%2</b>")
+                .arg(srcDisplay.toHtmlEscaped())
+                .arg(dstDisplay.toHtmlEscaped()),
+            this
+        );
+        m_headerLabel->setStyleSheet("QLabel { color: #e0e0e0; font-size: 12px; padding: 2px 0; }");
+    } else {
+        m_headerLabel = new QLabel(
+            QString("<b style='color:#222;'>%1</b>"
+                    " <span style='color:#888;'>&harr;</span> "
+                    "<b style='color:#222;'>%2</b>")
+                .arg(srcDisplay.toHtmlEscaped())
+                .arg(dstDisplay.toHtmlEscaped()),
+            this
+        );
+        m_headerLabel->setStyleSheet("QLabel { color: #222; font-size: 12px; padding: 2px 0; }");
+    }
+    m_headerLabel->setTextFormat(Qt::RichText);
+    layout->addWidget(m_headerLabel);
+
+    /* Table */
+    m_table = new QTableWidget(this);
+    m_table->setColumnCount(5);
+    m_table->setHorizontalHeaderLabels(QStringList() << "Protocol" << "Port" << "Service" << "Packets" << "% of Total");
+    m_table->setSelectionBehavior(QAbstractItemView::SelectRows);
+    m_table->setEditTriggers(QAbstractItemView::NoEditTriggers);
+    m_table->setContextMenuPolicy(Qt::CustomContextMenu);
+    m_table->horizontalHeader()->setStretchLastSection(true);
+    m_table->verticalHeader()->setVisible(false);
+    m_table->setAlternatingRowColors(true);
+    m_table->setMouseTracking(true);
+
+    /* Theme-aware table styling */
+    if (dark) {
+        m_table->setStyleSheet(
+            "QTableWidget {"
+            "  background: #333;"
+            "  color: #e0e0e0;"
+            "  gridline-color: #555;"
+            "  border: none;"
+            "  font-size: 11px;"
+            "}"
+            "QTableWidget::item {"
+            "  padding: 4px 8px;"
+            "}"
+            "QTableWidget::item:hover {"
+            "  background: #e3f2fd;"
+            "  color: #111;"
+            "}"
+            "QTableWidget::item:selected {"
+            "  background: #0078d4;"
+            "  color: white;"
+            "}"
+            "QHeaderView::section {"
+            "  background: #3a3a3a;"
+            "  color: #ccc;"
+            "  border: 1px solid #555;"
+            "  padding: 4px;"
+            "  font-weight: bold;"
+            "  font-size: 10px;"
+            "}"
+            "QTableWidget::item:alternate {"
+            "  background: #383838;"
+            "}"
+        );
+    } else {
+        m_table->setStyleSheet(
+            "QTableWidget {"
+            "  background: #fff;"
+            "  color: #222;"
+            "  gridline-color: #d0d0d0;"
+            "  border: none;"
+            "  font-size: 11px;"
+            "}"
+            "QTableWidget::item {"
+            "  padding: 4px 8px;"
+            "}"
+            "QTableWidget::item:hover {"
+            "  background: #e3f2fd;"
+            "  color: #111;"
+            "}"
+            "QTableWidget::item:selected {"
+            "  background: #0078d4;"
+            "  color: white;"
+            "}"
+            "QHeaderView::section {"
+            "  background: #e8e8e8;"
+            "  color: #333;"
+            "  border: 1px solid #c0c0c0;"
+            "  padding: 4px;"
+            "  font-weight: bold;"
+            "  font-size: 10px;"
+            "}"
+            "QTableWidget::item:alternate {"
+            "  background: #f5f5f5;"
+            "}"
+        );
+    }
+
+    connect(m_table, &QTableWidget::customContextMenuRequested, this, &ConnectionPopup::showContextMenu);
+
+    layout->addWidget(m_table);
+
+    /* Populate table with port summary data */
+    populateTable();
+
+    /* Auto-close timer: starts on leaveEvent, cancelled on enterEvent */
+    m_autoCloseTimer = new QTimer(this);
+    m_autoCloseTimer->setSingleShot(true);
+    m_autoCloseTimer->setInterval(1000);  /* 1 second grace period */
+    connect(m_autoCloseTimer, &QTimer::timeout, this, [this]() {
+        if (m_contextMenuActive) return;   /* Don't destroy while menu is open */
+        hide();
+        deleteLater();
+    });
+
+    /* Size based on content */
+    int rows = m_table->rowCount();
+    int tableHeight = qMin(rows * 30 + 40, 300);
+    resize(480, tableHeight + 60);
+}
+
+ConnectionPopup::~ConnectionPopup()
+{
+}
+
+void ConnectionPopup::enterEvent(QEnterEvent *event)
+{
+    Q_UNUSED(event);
+    /* Cancel auto-close when mouse enters */
+    if (m_autoCloseTimer->isActive()) {
+        m_autoCloseTimer->stop();
+    }
+}
+
+void ConnectionPopup::leaveEvent(QEvent *event)
+{
+    Q_UNUSED(event);
+    /* Don't start auto-close when mouse moves to the context menu */
+    if (m_contextMenuActive) return;
+    m_autoCloseTimer->start();
+}
+
+void ConnectionPopup::populateTable()
+{
+    if (!m_pair)
+        return;
+
+    /* Merge port data from BOTH directions (A→B and B→A) so the popup
+     * shows a complete picture regardless of which directional pair was
+     * picked by the click-hit-test.  We use a QMap keyed by port number
+     * so that identical ports from both directions are combined.          */
+    struct MergedPort {
+        quint64 packets = 0;
+        bool isTcp = false;
+        bool isUdp = false;
+    };
+    QMap<quint16, MergedPort> merged;
+    guint64 totalPackets = m_pair->packet_count;
+    if (m_reversePair)
+        totalPackets += m_reversePair->packet_count;
+
+    /* Helper lambda: iterate one pair's dst_ports into 'merged' */
+    auto mergePorts = [&](comm_pair_t *p) {
+        if (!p || !p->dst_ports) return;
+        GHashTableIter port_iter;
+        gpointer port_key, port_value;
+        g_hash_table_iter_init(&port_iter, p->dst_ports);
+        while (g_hash_table_iter_next(&port_iter, &port_key, &port_value)) {
+            quint16 port = (quint16)GPOINTER_TO_UINT(port_key);
+            port_stats_t *ps = (port_stats_t *)port_value;
+            if (!ps || port == 0 || ps->count == 0) continue;
+
+            MergedPort &mp = merged[port];
+            mp.packets += ps->count;
+            if (ps->is_tcp) mp.isTcp = true;
+            if (ps->is_udp) mp.isUdp = true;
+        }
+    };
+
+    mergePorts(m_pair);
+    mergePorts(m_reversePair);
+
+    /* Build PortEntry list from merged map */
+    struct PortEntry {
+        QString protocol;
+        quint16 port;
+        quint64 packets;
+        bool isTcp;
+        bool isUdp;
+    };
+    QList<PortEntry> entries;
+
+    for (auto it = merged.constBegin(); it != merged.constEnd(); ++it) {
+        const MergedPort &mp = it.value();
+        QString proto;
+        if (mp.isTcp && mp.isUdp) {
+            proto = "TCP+UDP";
+        } else if (mp.isTcp) {
+            proto = "TCP";
+        } else if (mp.isUdp) {
+            proto = "UDP";
+        } else {
+            proto = "-";
+        }
+
+        PortEntry entry;
+        entry.protocol = proto;
+        entry.port = it.key();
+        entry.packets = mp.packets;
+        entry.isTcp = mp.isTcp;
+        entry.isUdp = mp.isUdp;
+        entries.append(entry);
+    }
+
+    /* Sort by packet count descending */
+    std::sort(entries.begin(), entries.end(), [](const PortEntry &a, const PortEntry &b) {
+        return a.packets > b.packets;
+    });
+
+    /* Populate table */
+    m_table->setRowCount(static_cast<int>(entries.size()));
+    m_rowData.clear();
+
+    for (int i = 0; i < entries.size(); i++) {
+        const PortEntry &e = entries[i];
+
+        /* Store row data for context menu (includes per-port protocol) */
+        RowData rd;
+        rd.protocol = e.protocol;
+        rd.port = e.port;
+        rd.packets = e.packets;
+        rd.isTcp = e.isTcp;
+        rd.isUdp = e.isUdp;
+        m_rowData.append(rd);
+
+        m_table->setItem(i, 0, new QTableWidgetItem(e.protocol));
+        m_table->setItem(i, 1, new QTableWidgetItem(QString::number(e.port)));
+        m_table->setItem(i, 2, new QTableWidgetItem(portServiceName(e.port)));
+
+        QTableWidgetItem *pktItem = new QTableWidgetItem(QString::number(e.packets));
+        pktItem->setTextAlignment(Qt::AlignRight | Qt::AlignVCenter);
+        m_table->setItem(i, 3, pktItem);
+
+        double pct = totalPackets > 0 ? (100.0 * e.packets / totalPackets) : 0;
+        QTableWidgetItem *pctItem = new QTableWidgetItem(QString::number(pct, 'f', 1) + "%");
+        pctItem->setTextAlignment(Qt::AlignRight | Qt::AlignVCenter);
+        m_table->setItem(i, 4, pctItem);
+    }
+
+    /* Adjust column widths */
+    m_table->setColumnWidth(0, 70);
+    m_table->setColumnWidth(1, 70);
+    m_table->setColumnWidth(2, 100);
+    m_table->setColumnWidth(3, 70);
+}
+
+void ConnectionPopup::showContextMenu(const QPoint &pos)
+{
+    int row = m_table->rowAt(pos.y());
+    if (row < 0 || row >= m_rowData.size())
+        return;
+
+    m_table->selectRow(row);
+
+    QMenu menu(this);
+    if (isDarkTheme()) {
+        menu.setStyleSheet(
+            "QMenu {"
+            "  background: #2b2b2b;"
+            "  color: #e0e0e0;"
+            "  border: 1px solid #555;"
+            "  padding: 4px;"
+            "}"
+            "QMenu::item {"
+            "  padding: 6px 20px;"
+            "}"
+            "QMenu::item:selected {"
+            "  background: #0078d4;"
+            "  color: white;"
+            "}"
+            "QMenu::item:disabled {"
+            "  color: #666;"
+            "}"
+        );
+    }
+    /* Light theme: no custom stylesheet — use native platform menu */
+
+    QAction *filterAction = menu.addAction("Apply Filter in Wireshark");
+    QAction *followAction = menu.addAction("Follow TCP Stream");
+    menu.addSeparator();
+    QAction *throughputAction = menu.addAction("TCP Throughput Graph");
+    QAction *rttAction = menu.addAction("TCP Round-Trip Time Graph");
+
+    /* Disable TCP-only actions for non-TCP rows */
+    const RowData &rd = m_rowData[row];
+    bool isTCP = rd.isTcp;
+    followAction->setEnabled(isTCP);
+    throughputAction->setEnabled(isTCP);
+    rttAction->setEnabled(isTCP);
+    if (!isTCP) {
+        followAction->setText("Follow TCP Stream (TCP only)");
+        throughputAction->setText("TCP Throughput Graph (TCP only)");
+        rttAction->setText("TCP Round-Trip Time Graph (TCP only)");
+    }
+
+    /* Guard: prevent auto-close timer and leaveEvent from destroying us
+     * while QMenu::exec()'s nested event loop is running.                  */
+    m_contextMenuActive = true;
+    m_autoCloseTimer->stop();
+
+    QAction *selected = menu.exec(m_table->viewport()->mapToGlobal(pos));
+
+    m_contextMenuActive = false;
+
+    if (selected == filterAction) {
+        applyFilterForRow(row);
+    } else if (selected == followAction) {
+        followTCPStreamForRow(row);
+    } else if (selected == throughputAction) {
+        openTcpStreamGraph(row, "Throughput");
+    } else if (selected == rttAction) {
+        openTcpStreamGraph(row, "Round Trip Time");
+    } else {
+        /* User dismissed without selecting; restart auto-close */
+        m_autoCloseTimer->start();
+    }
+}
+
+QString ConnectionPopup::buildFilterForRow(int row)
+{
+    if (row < 0 || row >= m_rowData.size() || !m_pair)
+        return QString();
+
+    const RowData &rd = m_rowData[row];
+    
+    /* Always use raw addresses for filter construction */
+    QString src = QString::fromUtf8(m_pair->src_addr);
+    QString dst = QString::fromUtf8(m_pair->dst_addr);
+
+    /* Detect address type from format rather than trusting m_useMAC flag.
+     * MAC addresses look like xx:xx:xx:xx:xx:xx (6 colon-separated groups).
+     * This prevents using eth.addr with IP addresses or vice versa.        */
+    bool looksLikeMAC = (src.count(':') == 5 && dst.count(':') == 5);
+
+    /* Build address clause using bidirectional matching */
+    QString addrFilter;
+    if (looksLikeMAC) {
+        addrFilter = QString("eth.addr == %1 && eth.addr == %2").arg(src).arg(dst);
+    } else {
+        addrFilter = QString("ip.addr == %1 && ip.addr == %2").arg(src).arg(dst);
+    }
+
+    /* Build port clause using per-port protocol info for accuracy.
+     * When both TCP and UDP were observed on the same port, include both. */
+    QString portFilter;
+    if (rd.isTcp && rd.isUdp) {
+        portFilter = QString("(tcp.port == %1 || udp.port == %1)").arg(rd.port);
+    } else if (rd.isTcp) {
+        portFilter = QString("tcp.port == %1").arg(rd.port);
+    } else if (rd.isUdp) {
+        portFilter = QString("udp.port == %1").arg(rd.port);
+    } else {
+        /* Unknown transport — just filter by addresses */
+        return QString("(%1)").arg(addrFilter);
+    }
+
+    return QString("(%1 && %2)").arg(addrFilter).arg(portFilter);
+}
+
+void ConnectionPopup::applyFilterForRow(int row)
+{
+    QString filter = buildFilterForRow(row);
+    if (filter.isEmpty())
+        return;
+
+    QByteArray filterBytes = filter.toUtf8();
+    plugin_if_apply_filter(filterBytes.constData(), true);
+    hide();
+    deleteLater();
+}
+
+void ConnectionPopup::followTCPStreamForRow(int row)
+{
+    if (row < 0 || row >= m_rowData.size() || !m_pair)
+        return;
+
+    const RowData &rd = m_rowData[row];
+    if (!rd.isTcp)
+        return;
+
+    /* Step 1: Apply a narrowing filter so Wireshark selects the right TCP
+     * conversation.  This ensures the "current packet" belongs to the
+     * desired stream when we subsequently trigger Follow TCP Stream.       */
+    QString filter = buildFilterForRow(row);
+    if (filter.isEmpty()) return;
+    QByteArray filterBytes = filter.toUtf8();
+    plugin_if_apply_filter(filterBytes.constData(), true);
+
+    /* Step 2: After a brief delay (letting the filter take effect and
+     * Wireshark select the first matching packet), programmatically trigger
+     * the "Follow TCP Stream" menu action inside Wireshark's main window.  */
+    QTimer::singleShot(400, qApp, []() {
+        for (QWidget *w : QApplication::topLevelWidgets()) {
+            QMainWindow *mainWin = qobject_cast<QMainWindow *>(w);
+            if (!mainWin || !mainWin->menuBar()) continue;
+
+            /* Walk the menu bar: look for a "Follow" submenu (under Analyze) */
+            for (QAction *topAction : mainWin->menuBar()->actions()) {
+                QMenu *topMenu = topAction->menu();
+                if (!topMenu) continue;
+
+                for (QAction *midAction : topMenu->actions()) {
+                    QMenu *subMenu = midAction->menu();
+                    if (!subMenu) continue;
+                    if (!subMenu->title().contains("Follow", Qt::CaseInsensitive))
+                        continue;
+
+                    /* Found the "Follow" submenu — look for TCP Stream */
+                    for (QAction *followAction : subMenu->actions()) {
+                        if (followAction->text().contains("TCP Stream", Qt::CaseInsensitive) &&
+                            followAction->isEnabled()) {
+                            followAction->trigger();
+                            return;
+                        }
+                    }
+                }
+            }
+        }
+    });
+
+    hide();
+    deleteLater();
+}
+
+void ConnectionPopup::openTcpStreamGraph(int row, const QString &graphName)
+{
+    if (row < 0 || row >= m_rowData.size() || !m_pair)
+        return;
+
+    const RowData &rd = m_rowData[row];
+    if (!rd.isTcp)
+        return;
+
+    /* Step 1: Apply a narrowing filter so Wireshark selects a packet from
+     * the desired TCP stream.                                              */
+    QString filter = buildFilterForRow(row);
+    if (filter.isEmpty()) return;
+    QByteArray filterBytes = filter.toUtf8();
+    plugin_if_apply_filter(filterBytes.constData(), true);
+
+    /* Step 2: After a brief delay, walk Wireshark's menu bar to find
+     * Statistics → TCP Stream Graphs → <graphName> and trigger it.         */
+    QString target = graphName;
+    QTimer::singleShot(400, qApp, [target]() {
+        for (QWidget *w : QApplication::topLevelWidgets()) {
+            QMainWindow *mainWin = qobject_cast<QMainWindow *>(w);
+            if (!mainWin || !mainWin->menuBar()) continue;
+
+            for (QAction *topAction : mainWin->menuBar()->actions()) {
+                QMenu *topMenu = topAction->menu();
+                if (!topMenu) continue;
+
+                /* Look for the "TCP Stream Graphs" submenu */
+                for (QAction *midAction : topMenu->actions()) {
+                    QMenu *subMenu = midAction->menu();
+                    if (!subMenu) continue;
+                    if (!subMenu->title().contains("TCP Stream Graphs", Qt::CaseInsensitive))
+                        continue;
+
+                    /* Found — look for the specific graph action */
+                    for (QAction *graphAction : subMenu->actions()) {
+                        if (graphAction->text().contains(target, Qt::CaseInsensitive) &&
+                            graphAction->isEnabled()) {
+                            graphAction->trigger();
+                            return;
+                        }
+                    }
+                }
+            }
+        }
+    });
+
+    hide();
+    deleteLater();
 }

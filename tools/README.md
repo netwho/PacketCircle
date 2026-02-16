@@ -2,6 +2,16 @@
 
 Diagnostic and troubleshooting utilities for the PacketCircle Wireshark plugin.
 
+## troubleshoot.bat — Quick Launch (Recommended)
+
+Double-click or run from a command prompt — no execution policy changes needed:
+
+```cmd
+troubleshoot.bat
+```
+
+The `.bat` wrapper launches `troubleshoot.ps1` with a temporary `-ExecutionPolicy Bypass` for the current process only. It does **not** modify your system execution policy.
+
 ## troubleshoot.ps1 — Windows Dependency Checker (PowerShell)
 
 Diagnoses DLL dependency and installation issues when the plugin fails to load on Windows 10/11. No extra software required — runs natively on any Windows 10/11 machine.
@@ -10,13 +20,19 @@ Diagnoses DLL dependency and installation issues when the plugin fails to load o
 
 ### Usage
 
+**Preferred** — use the batch wrapper (avoids execution policy issues):
+```cmd
+troubleshoot.bat
+```
+
+**Alternative** — run the PowerShell script directly:
 ```powershell
 .\troubleshoot.ps1
 .\troubleshoot.ps1 -DllPath "C:\path\to\packetcircle.dll"
 .\troubleshoot.ps1 | Tee-Object -FilePath report.txt
 ```
 
-> If you see an execution policy error, run:
+> If you run `troubleshoot.ps1` directly and see an execution policy error, either use `troubleshoot.bat` or run:
 > `Set-ExecutionPolicy -Scope CurrentUser -ExecutionPolicy RemoteSigned`
 
 ### What it checks

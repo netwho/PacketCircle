@@ -2,6 +2,45 @@
 
 All notable changes to PacketCircle will be documented in this file.
 
+## [0.3.2] - 2026-02-16
+
+### Added
+- **TCP Stream Statistics** - Connection popup context menu now includes TCP Throughput Graph and TCP Round-Trip Time Graph, launching Wireshark's built-in TCP stream analysis tools
+- **Select Search Results** - New "Select Results" button that selects only the communication pairs matching the current search, deselecting all others
+- **Theme-Aware UI** - Plugin automatically adapts to light and dark themes based on Wireshark/OS settings
+- **Port Search** - Search bar supports TCP/UDP port queries (e.g., `TCP 443`, `UDP 53`) to highlight matching communication pairs
+- **Name Truncation** - Long resolved hostnames in the pair list are truncated with "..." when space is limited
+
+### Changed
+- Help button enlarged (30x30) and right-aligned in the toolbar for better visibility
+- Help dialog version corrected and updated with all new features
+- Version bumped to 0.3.2
+
+### Fixed
+- IP fragment protocol classification no longer misidentifies fragments as ICMP or TCP
+- Bidirectional filter generation uses `ip.addr` / `eth.addr` for correct two-way matching
+
+## [0.3.1] - 2026-02-15
+
+### Added
+- **User Preferences Persistence** - Window size, position, splitter layout, display mode (IP/MAC), metric (Packets/Bytes), Top N, view (Circle/Table), and line thickness are saved to `~/.PacketCircle/settings.ini` and restored on next launch
+- **Connection Popup** - Click a line in the circle to see a port-level connection summary with protocol, destination port, service name, and packet counts
+- **Context Menu Filtering** - Right-click a row in the connection popup to apply a Wireshark display filter or follow a TCP stream
+- **Search Blinking in Pair List** - Search results blink red/yellow in both the circle and the pair list simultaneously
+- **Name Resolution** - Circle nodes and pair list display resolved names matching Wireshark's global name resolution settings
+- **Modern Controls UI** - Redesigned toolbar with segmented button groups and icon-style action buttons
+- **Responsive Layout** - Window scales from 640x480 to Full HD+; circle and node fonts resize proportionally
+- **Version in Title Bar** - Plugin window title now shows the current version
+- **Windows 10 Guidance** - Windows installer detects Windows 10 and provides targeted advice for common VC++ runtime and DLL loading issues
+
+### Changed
+- Minimum window size reduced to 640x480 for older displays
+- Default window size set to 1280x780
+
+### Fixed
+- Search bar visibility on Windows (text was black on black background)
+- Splitter handle now easier to grab on Windows
+
 ## [0.2.2] - 2026-02-13
 
 ### Added

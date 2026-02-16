@@ -1,6 +1,6 @@
 #!/bin/bash
 # =============================================================================
-# PacketCircle Unified Installer for Linux (x86_64)
+# PacketCircle Unified Installer for Linux (x86_64)  -  v0.3.2
 # =============================================================================
 #
 # This script installs the PacketCircle Wireshark plugin on Linux.
@@ -48,7 +48,7 @@ NC='\033[0m'
 
 printf "\n"
 printf "${BLUE}╔══════════════════════════════════════════════════╗${NC}\n"
-printf "${BLUE}║   PacketCircle Unified Installer for Linux       ║${NC}\n"
+printf "${BLUE}║   PacketCircle v0.3.2 - Installer for Linux      ║${NC}\n"
 printf "${BLUE}║   x86_64 (64-bit Intel/AMD)                      ║${NC}\n"
 printf "${BLUE}║                                                   ║${NC}\n"
 printf "${BLUE}║   Supports Wireshark 4.2.x, 4.4.x, 4.6.x        ║${NC}\n"

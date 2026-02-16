@@ -37,8 +37,10 @@ extern "C" {
 
 /* Communication pair structure */
 typedef struct _comm_pair {
-    gchar *src_addr;      /* Source address (MAC or IP) */
-    gchar *dst_addr;      /* Destination address (MAC or IP) */
+    gchar *src_addr;      /* Source address (MAC or IP) - raw, for filter construction */
+    gchar *dst_addr;      /* Destination address (MAC or IP) - raw, for filter construction */
+    gchar *resolved_src;  /* Resolved display name (hostname or raw addr) - for UI display */
+    gchar *resolved_dst;  /* Resolved display name (hostname or raw addr) - for UI display */
     gchar *src_mac;       /* Source MAC address (if known) */
     gchar *dst_mac;       /* Destination MAC address (if known) */
     gchar *src_ip;        /* Source IP address (if known) */
@@ -49,8 +51,15 @@ typedef struct _comm_pair {
     guint64 byte_count;   /* Number of bytes */
     gchar *top_protocol;  /* Highest protocol observed */
     gboolean is_mac;      /* TRUE if MAC addresses, FALSE if IP */
-    GHashTable *dst_ports; /* Destination port -> packet count (guint16 -> guint64*) */
+    GHashTable *dst_ports; /* Destination port -> port_stats_t* (per-port protocol + count) */
 } comm_pair_t;
+
+/* Per-port statistics: tracks packet count and which transport protocols use this port */
+typedef struct _port_stats {
+    guint64 count;     /* Number of packets on this port */
+    gboolean is_tcp;   /* TRUE if TCP packets seen on this port */
+    gboolean is_udp;   /* TRUE if UDP packets seen on this port */
+} port_stats_t;
 
 /* Protocol statistics */
 typedef struct _protocol_stats {

@@ -31,7 +31,7 @@
 
 /* Plugin version */
 #define PLUGIN_VERSION_MAJOR 0
-#define PLUGIN_VERSION_MINOR 2
+#define PLUGIN_VERSION_MINOR 3
 #define PLUGIN_VERSION_MICRO 2
 
 /* Plugin registration */

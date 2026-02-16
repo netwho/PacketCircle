@@ -50,12 +50,14 @@ public:
     void setShowLineThickness(gboolean show_thickness);
     void setProtocolFilter(QSet<QString> enabled_protocols);
     void setHighlightedLabels(const QSet<QString> &labels);
+    void setDarkTheme(bool dark);
     QPixmap renderForPDF(int width, int height);
 
 signals:
     void pairClicked(comm_pair_t *pair);
     void pairSelectionChanged(QList<comm_pair_t*> selected);
     void nodeVisibilityToggle(QList<comm_pair_t*> pairs, bool enable);
+    void lineClicked(comm_pair_t *pair, const QPoint &globalPos);
 
 private slots:
     void onBlinkTimer();
@@ -70,7 +72,8 @@ private:
     struct NodePosition {
         comm_pair_t *pair;
         QPointF position;
-        QString label;
+        QString label;         /* Raw address - used for matching */
+        QString displayLabel;  /* Resolved name for display (may be same as label) */
         gboolean is_selected;
         QColor protocol_color;  /* Color based on dominant protocol */
     };
@@ -94,6 +97,7 @@ private:
     QColor getProtocolColor(const gchar *protocol_name);
     guint64 getPairVolume(comm_pair_t *pair);
     struct NodePosition* findNodeAt(const QPointF &point);
+    comm_pair_t* findLineAt(const QPointF &point);
     void updateSelection();
     QString buildTooltipText(NodePosition *node) const;
     void showTooltipForNode(NodePosition *node, const QPoint &global_pos);
@@ -118,6 +122,7 @@ private:
     QTimer *m_blinkTimer;
     bool m_blinkState;
     bool m_pdfMode;
+    bool m_darkTheme;
     QString m_last_hovered_label;
 };
 

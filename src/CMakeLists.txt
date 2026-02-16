@@ -4,7 +4,7 @@
 include(WiresharkPlugin)
 
 # Plugin name and version info (major minor micro extra)
-set_module_info(packetcircle 0 2 2 0)
+set_module_info(packetcircle 0 3 2 0)
 
 # Enable Qt MOC and resource compilation
 SET(CMAKE_AUTOMOC ON)
@@ -72,7 +72,7 @@ set(CMAKE_CXX_STANDARD_REQUIRED ON)
 # (Wireshark.app bundles its own Qt which may differ from the build-time Qt)
 add_definitions(-DQT_NO_VERSION_TAGGING)
 
-# Version is set by set_module_info(packetcircle 0 2 2 0) above
+# Version is set by set_module_info(packetcircle 0 3 2 0) above
 
 # Set source file properties for plugin.c
 set_source_files_properties(
