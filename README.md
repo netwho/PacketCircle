@@ -73,7 +73,7 @@ The search bar supports not only IP addresses and CIDR ranges but also TCP and U
 
 ![Port Search](screenshots/packetcircle-port-search.png)
 
-*Searching for TCP port 443 highlights all HTTPS communication pairs*
+*Searching for TCP port 23 highlights all Telnet communication pairs*
 
 ### Rich Tooltips
 
