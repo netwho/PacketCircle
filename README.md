@@ -17,6 +17,10 @@ A native Wireshark plugin that visualizes network communication pairs in an inte
 
 > **Beta Status**: This is version 0.3.2, a public beta release. While fully functional, the software is under active development. Please report any issues you encounter.
 
+## Demo
+
+▶️ **[Watch the intro video on YouTube](https://youtu.be/jg4O9rdUp_0)** — see PacketCircle in action in under 4 minutes.
+
 ## Features
 
 - **Circle Visualization** - Interactive circular graph showing communication relationships between network endpoints
@@ -73,7 +77,7 @@ The search bar supports not only IP addresses and CIDR ranges but also TCP and U
 
 ![Port Search](screenshots/packetcircle-port-search.png)
 
-*Searching for TCP port 23 highlights all Telnet communication pairs*
+*Searching for TCP port 443 highlights all HTTPS communication pairs*
 
 ### Rich Tooltips
 
