@@ -1,5 +1,5 @@
 # =============================================================================
-# PacketCircle Installer for Windows (x86_64)  -  v0.3.1
+# PacketCircle Installer for Windows (x86_64)  -  v0.3.2
 # =============================================================================
 #
 # This script installs the PacketCircle Wireshark plugin on Windows.
@@ -111,39 +111,9 @@ if (-not $WsVersion) {
 Write-Host "[OK] " -ForegroundColor Green -NoNewline
 Write-Host "Wireshark version: $WsVersion"
 
-# Determine plugin path version from Wireshark version
-$WsMajor = $WsVersion.Split('.')[0]
-$WsMinor = $WsVersion.Split('.')[1]
-$PluginPathId = "$WsMajor.$WsMinor"
-
-# Look for existing plugin version directories
-$foundPathId = $null
-
-# Check system plugin directory
-if ($WiresharkPath) {
-    $systemPluginBase = "$WiresharkPath\plugins"
-    if (Test-Path $systemPluginBase) {
-        Get-ChildItem $systemPluginBase -Directory | ForEach-Object {
-            if ($_.Name -match '^\d+\.\d+$') {
-                $foundPathId = $_.Name
-            }
-        }
-    }
-}
-
-# Check personal plugin directory
-$personalPluginBase = "$env:APPDATA\Wireshark\plugins"
-if (Test-Path $personalPluginBase) {
-    Get-ChildItem $personalPluginBase -Directory -ErrorAction SilentlyContinue | ForEach-Object {
-        if ($_.Name -match '^\d+\.\d+$') {
-            $foundPathId = $_.Name
-        }
-    }
-}
-
-if ($foundPathId) {
-    $PluginPathId = $foundPathId
-}
+# PacketCircle 0.3.x is built for Wireshark plugin API 4.6.x.
+# Keep install target fixed to 4.6 to avoid 4.7/4.8 path mismatches.
+$PluginPathId = "4.6"
 
 Write-Host "[OK] " -ForegroundColor Green -NoNewline
 Write-Host "Plugin API version: $PluginPathId"
