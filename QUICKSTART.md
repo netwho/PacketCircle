@@ -133,3 +133,7 @@ rm ~/.local/lib/wireshark/plugins/*/epan/packetcircle.so
 ```
 
 Then restart Wireshark.
+
+---
+
+*AI-Assisted: yes (Claude) — documentation*

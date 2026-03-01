@@ -2,6 +2,24 @@
 
 All notable changes to PacketCircle will be documented in this file.
 
+## [0.4.0] - 2026-02-25
+
+### Added
+- **Protocol Category Search** - Type a category name in the search field (`TCP`, `UDP`, `ARP`, `ICMP`, `Infrastructure`, `Unknown`) to highlight all pairs belonging to that category, then use "Select Results" to isolate them
+- **Protocol Category → Pair List Sync** - Toggling protocol category checkboxes (e.g. TCP, UDP, Infrastructure) now also checks/unchecks the corresponding pairs in the pair list, enabling "Select Results" to work with protocol filtering
+- **IGMP Multicast Detection** - IPv4 packets with multicast destinations (224.0.0.0/4) are now correctly classified as IGMP / Infrastructure instead of "Unknown"
+- **Protocol Information Dialogs** - Right-click a connection in the Connection Details popup to access deep protocol inspection for seven protocol families:
+  - **TLS/SSL Information** - Certificate details (subject, issuer, validity, SANs), negotiated cipher suites, TLS version, ALPN, SNI, JA3/JA4 fingerprints
+  - **HTTP Information** - Request/response details including methods, status codes, URIs, content types, server headers, cookies, and user agents
+  - **SMB/CIFS & DCE/RPC Information** - Share names, file operations, tree operations, named pipe access, DCE/RPC interface UUIDs, and operation names
+  - **Kerberos Information** - Ticket details (TGT/TGS), client and server principals, realms, encryption types, pre-authentication data, and service principal names
+  - **Email Information (SMTP/IMAP/POP3)** - Senders, recipients, subjects, server responses, authentication methods, IMAP mailbox operations, and POP3 commands
+  - **SQL Database Information (MSSQL/MySQL/PostgreSQL)** - Queries, database/schema names, authentication details, server version, application name, command/response statistics, and error messages
+  - **VoIP/SIP Information** - SIP Call-IDs, method/status code counts, From/To addresses, user agents, RTP payload types and SSRCs, RTP setup methods, and H.223 mux entries
+- **Protocol-Aware Context Menu** - Connection popup context menu dynamically shows relevant protocol info options based on the destination port (e.g., TLS Info for port 443, SQL Info for ports 1433/3306/5432, VoIP Info for ports 5060/5061)
+- **Reusable Dialog Helpers** - Extracted common UI helpers (`createInfoDialog`, `addHtmlTextEdit`, `renderHashCountTable`, `addCloseButton`, `addSorryPlaceholder`) for consistent protocol information dialog presentation
+- AI-Assisted: yes (Claude) — protocol info dialogs, installer redesign (version selection, downgrade, uninstall), Linux build automation, documentation
+
 ## [0.3.2] - 2026-02-16
 
 ### Added
@@ -19,6 +37,7 @@ All notable changes to PacketCircle will be documented in this file.
 ### Fixed
 - IP fragment protocol classification no longer misidentifies fragments as ICMP or TCP
 - Bidirectional filter generation uses `ip.addr` / `eth.addr` for correct two-way matching
+- AI-Assisted: yes (Claude) — TCP stream statistics integration, theme-aware UI, installer improvements, documentation
 
 ## [0.3.1] - 2026-02-15
 
@@ -40,6 +59,7 @@ All notable changes to PacketCircle will be documented in this file.
 ### Fixed
 - Search bar visibility on Windows (text was black on black background)
 - Splitter handle now easier to grab on Windows
+- AI-Assisted: yes (Claude) — UI development, preference persistence, connection popup, Windows compatibility, documentation
 
 ## [0.2.2] - 2026-02-13
 
