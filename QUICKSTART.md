@@ -6,6 +6,10 @@ Get up and running with PacketCircle in under 5 minutes.
 
 ## Installation
 
+> **v.0.4.0 or v.0.3.2?**
+> The installer lets you choose between **v.0.4.0** (latest — Wi-Fi Monitoring Mode, Protocol Information Dialogs) and **v.0.3.2** (stable).
+> v.0.4.x is the first release in the new series and has not yet gone through full QA on all platforms and Wireshark versions. If you need a proven stable install, select **v.0.3.2** during setup. You can switch versions at any time by re-running the installer.
+
 ### macOS (Intel & Apple Silicon) — Wireshark 4.6.x
 
 1. **Download or clone the repository:**
@@ -16,7 +20,7 @@ Get up and running with PacketCircle in under 5 minutes.
 
 2. **Run the installer:**
    ```bash
-   cd installer/macos-universal
+   cd installer-v.0.4.x/macos-universal
    chmod +x install.sh
    ./install.sh
    ```
@@ -33,7 +37,7 @@ Get up and running with PacketCircle in under 5 minutes.
 
 2. **Run the unified installer:**
    ```bash
-   cd installer/linux-x86_64
+   cd installer-v.0.4.x/linux-x86_64
    chmod +x install.sh
    ./install.sh
    ```
@@ -44,32 +48,35 @@ Get up and running with PacketCircle in under 5 minutes.
 
 ### Manual Installation
 
-First verify your Wireshark version: Help -> About Wireshark.
+Copy the plugin file directly into your Wireshark personal plugins folder — no installer needed. To find the exact path on your system open Wireshark → **Help → About Wireshark → Folders → Personal Plugins**.
 
-Copy the plugin binary to your personal Wireshark plugin directory:
+Replace `v.0.4.0` with `v.0.3.2` in any path below to install the stable version instead.
 
 **macOS** (Wireshark 4.6.x, uses dashes: `4-6`):
 ```bash
 mkdir -p ~/.local/lib/wireshark/plugins/4-6/epan/
-cp installer/macos-universal/packetcircle.so ~/.local/lib/wireshark/plugins/4-6/epan/
+cp installer-v.0.4.x/macos-universal/v.0.4.0/packetcircle.so ~/.local/lib/wireshark/plugins/4-6/epan/
 ```
 
-**Linux** (uses dots — pick the binary matching your version):
+**Linux** (uses dots — pick the binary matching your Wireshark version):
 ```bash
 # Wireshark 4.2.x
 mkdir -p ~/.local/lib/wireshark/plugins/4.2/epan/
-cp installer/linux-x86_64/bin/packetcircle-ws42.so ~/.local/lib/wireshark/plugins/4.2/epan/packetcircle.so
+cp installer-v.0.4.x/linux-x86_64/bin/v.0.4.0/packetcircle-ws42.so ~/.local/lib/wireshark/plugins/4.2/epan/packetcircle.so
 
 # Wireshark 4.4.x (e.g. Debian 13)
 mkdir -p ~/.local/lib/wireshark/plugins/4.4/epan/
-cp installer/linux-x86_64/bin/packetcircle-ws44.so ~/.local/lib/wireshark/plugins/4.4/epan/packetcircle.so
+cp installer-v.0.4.x/linux-x86_64/bin/v.0.4.0/packetcircle-ws44.so ~/.local/lib/wireshark/plugins/4.4/epan/packetcircle.so
 
 # Wireshark 4.6.x
 mkdir -p ~/.local/lib/wireshark/plugins/4.6/epan/
-cp installer/linux-x86_64/bin/packetcircle-ws46.so ~/.local/lib/wireshark/plugins/4.6/epan/packetcircle.so
+cp installer-v.0.4.x/linux-x86_64/bin/v.0.4.0/packetcircle-ws46.so ~/.local/lib/wireshark/plugins/4.6/epan/packetcircle.so
 ```
 
-> **Tip**: Find your exact plugin directory in Wireshark under Help -> About Wireshark -> Folders -> Personal Plugins.
+**Windows** (PowerShell):
+```powershell
+Copy-Item installer-v.0.4.x\windows-x86_64\v.0.4.0\packetcircle.dll "$env:APPDATA\Wireshark\plugins\4.6\epan\"
+```
 
 ## First Use
 
