@@ -1,0 +1,6343 @@
+/*
+ * PacketCircle - Wireshark Network Communication Visualization Plugin
+ *
+ * Copyright (C) 2026 Walter Hofstetter
+ * https://github.com/netwho/PacketCircle
+ *
+ * This program is free software; you can redistribute it and/or modify
+ * it under the terms of the GNU General Public License as published by
+ * the Free Software Foundation; either version 2 of the License, or
+ * (at your option) any later version.
+ *
+ * This program is distributed in the hope that it will be useful,
+ * but WITHOUT ANY WARRANTY; without even the implied warranty of
+ * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+ * GNU General Public License for more details.
+ *
+ * You should have received a copy of the GNU General Public License
+ * along with this program; if not, see <https://www.gnu.org/licenses/>.
+ */
+
+#include "ui_main_window.h"
+#include "ui_bridge.h"
+#include "packet_analyzer.h"
+#include <QHeaderView>
+#include <QMessageBox>
+#include <QStackedWidget>
+#include <QGroupBox>
+#include <QButtonGroup>
+#include <QSplitter>
+#include <QListWidget>
+#include <QTableWidget>
+#include <QAbstractItemView>
+#include <QCheckBox>
+#include <QPainterPath>
+#include <QMap>
+#include <QHBoxLayout>
+#include <QLabel>
+#include <QDialog>
+#include <QVBoxLayout>
+#include <QPushButton>
+#include <QTextEdit>
+#include <QPdfWriter>
+#include <QFileDialog>
+#include <QDateTime>
+#include <QPixmap>
+#include <QDebug>
+#include <QTimer>
+#include <QMenu>
+#include <QMenuBar>
+#include <QResizeEvent>
+#include <QRegularExpression>
+#include <QApplication>
+#include <QScreen>
+#include <algorithm>
+#include <QPainter>
+#include <epan/plugin_if.h>
+#include <cfile.h>
+
+extern "C" void* extract_capture_file(capture_file *cf, void *user_data);
+
+/* ------------------------------------------------------------------ */
+/* Theme detection: uses the same logic as Wireshark's ColorUtils::   */
+/* themeIsDark() — compare palette text lightness vs window lightness. */
+/* This respects OS dark mode AND Wireshark's own colour-scheme pref. */
+/* ------------------------------------------------------------------ */
+static bool isDarkTheme()
+{
+    return qApp->palette().windowText().color().lightness() >
+           qApp->palette().window().color().lightness();
+}
+
+static bool parse_ipv4(const QString &ip, quint32 *out)
+{
+    QStringList parts = ip.split('.', Qt::SkipEmptyParts);
+    if (parts.size() != 4)
+        return false;
+    quint32 value = 0;
+    for (const QString &part : parts) {
+        bool ok = false;
+        int octet = part.toInt(&ok);
+        if (!ok || octet < 0 || octet > 255)
+            return false;
+        value = (value << 8) | (quint32)octet;
+    }
+    *out = value;
+    return true;
+}
+
+static bool parse_cidr(const QString &cidr, quint32 *base, int *prefix_len)
+{
+    QStringList parts = cidr.split('/', Qt::SkipEmptyParts);
+    if (parts.size() != 2)
+        return false;
+    bool ok = false;
+    int prefix = parts[1].toInt(&ok);
+    if (!ok || prefix < 0 || prefix > 32)
+        return false;
+    quint32 ip_value = 0;
+    if (!parse_ipv4(parts[0], &ip_value))
+        return false;
+    if (base)
+        *base = ip_value;
+    if (prefix_len)
+        *prefix_len = prefix;
+    return true;
+}
+
+static bool ipv4_in_cidr(const QString &ip, const QString &cidr)
+{
+    quint32 ip_value = 0;
+    if (!parse_ipv4(ip, &ip_value))
+        return false;
+    quint32 base = 0;
+    int prefix = 0;
+    if (!parse_cidr(cidr, &base, &prefix))
+        return false;
+    quint32 mask = prefix == 0 ? 0 : 0xFFFFFFFFu << (32 - prefix);
+    return (ip_value & mask) == (base & mask);
+}
+
+MainWindow::MainWindow(QWidget *parent)
+    : QMainWindow(parent)
+    , m_centralWidget(nullptr)
+    , m_mainLayout(nullptr)
+    , m_controlsWidget(nullptr)
+    , m_controlsOuterLayout(nullptr)
+    , m_controlsRow1(nullptr)
+    , m_controlsRow2(nullptr)
+    , m_row1Widget(nullptr)
+    , m_row2Widget(nullptr)
+    , m_top10Btn(nullptr)
+    , m_top25Btn(nullptr)
+    , m_top50Btn(nullptr)
+    , m_packetsBtn(nullptr)
+    , m_bytesBtn(nullptr)
+    , m_circleBtn(nullptr)
+    , m_tableBtn(nullptr)
+    , m_macBtn(nullptr)
+    , m_ipBtn(nullptr)
+    , m_selectAllBtn(nullptr)
+    , m_selectSearchBtn(nullptr)
+    , m_selectNoneBtn(nullptr)
+    , m_applyFilterBtn(nullptr)
+    , m_clearFilterBtn(nullptr)
+    , m_reloadDataBtn(nullptr)
+    , m_savePDFBtn(nullptr)
+    , m_splitter(nullptr)
+    , m_splitterSizesRestored(false)
+    , m_viewStack(nullptr)
+    , m_circleWidget(nullptr)
+    , m_circleContainer(nullptr)
+    , m_searchLineEdit(nullptr)
+    , m_searchLabel(nullptr)
+    , m_tableWidget(nullptr)
+    , m_pairListWidget(nullptr)
+    , m_pairListContainer(nullptr)
+    , m_legendWidget(nullptr)
+    , m_legendLayout(nullptr)
+    , m_legendRow2Layout(nullptr)
+    , m_lineThicknessCheckBox(nullptr)
+    , m_pairListBlinkTimer(nullptr)
+    , m_pairListBlinkState(false)
+    , m_connectionPopup(nullptr)
+    , m_analysisResult(NULL)
+    , m_top_pairs(NULL)
+    , m_circle_pairs(NULL)
+    , m_topN(10)
+    , m_useBytes(FALSE)
+    , m_useMAC(FALSE)
+    , m_darkTheme(isDarkTheme())
+    , m_wifiMode(false)
+{
+    setupUI();
+}
+
+MainWindow::~MainWindow()
+{
+    /* Clear CircleWidget first to avoid dangling pointers */
+    if (m_circleWidget) {
+        m_circleWidget->setPairs(NULL, NULL);
+    }
+    
+    /* Free circle_pairs list (only the list nodes, pairs are owned by m_analysisResult) */
+    if (m_circle_pairs) {
+        g_list_free(m_circle_pairs);  /* Free list nodes only, not the pairs */
+        m_circle_pairs = NULL;
+    }
+    
+    /* Don't free m_top_pairs - it contains pointers to pairs owned by m_analysisResult */
+    /* The list nodes will be cleaned up when m_analysisResult is freed */
+    m_top_pairs = NULL;
+    
+    if (m_analysisResult) {
+        packet_analyzer_free_result(m_analysisResult);
+    }
+}
+
+/* --- Preferences persistence (stored in ~/.PacketCircle/settings.ini) --- */
+
+QString MainWindow::preferencesFilePath() const
+{
+    QString dir = QDir::homePath() + QDir::separator() + ".PacketCircle";
+    return dir + QDir::separator() + "settings.ini";
+}
+
+void MainWindow::savePreferences()
+{
+    /* Ensure the .PacketCircle directory exists */
+    QString dir = QDir::homePath() + QDir::separator() + ".PacketCircle";
+    QDir().mkpath(dir);
+
+    QSettings settings(preferencesFilePath(), QSettings::IniFormat);
+
+    /* Window geometry */
+    settings.beginGroup("Window");
+    settings.setValue("geometry", saveGeometry());
+    settings.setValue("pos", pos());
+    settings.setValue("size", size());
+    if (m_splitter) {
+        settings.setValue("splitterSizes", QVariant::fromValue(m_splitter->sizes()));
+    }
+    settings.endGroup();
+
+    /* Display preferences */
+    settings.beginGroup("Display");
+    settings.setValue("topN", (int)m_topN);
+    settings.setValue("useBytes", (bool)m_useBytes);
+    settings.setValue("useMAC", (bool)m_useMAC);
+    settings.setValue("view", m_viewStack ? m_viewStack->currentIndex() : 0);
+    if (m_lineThicknessCheckBox) {
+        settings.setValue("lineThickness", m_lineThicknessCheckBox->isChecked());
+    }
+    settings.endGroup();
+
+    settings.sync();
+}
+
+void MainWindow::loadPreferences()
+{
+    QString path = preferencesFilePath();
+    if (!QFile::exists(path))
+        return;  /* First launch - use defaults */
+
+    QSettings settings(path, QSettings::IniFormat);
+
+    /* Window geometry */
+    settings.beginGroup("Window");
+    QByteArray geom = settings.value("geometry").toByteArray();
+    if (!geom.isEmpty()) {
+        restoreGeometry(geom);
+    } else {
+        /* Fallback: use explicit pos/size if geometry blob is missing */
+        QPoint savedPos = settings.value("pos", QPoint()).toPoint();
+        QSize savedSize = settings.value("size", QSize()).toSize();
+        if (savedSize.isValid() && !savedSize.isNull()) {
+            resize(savedSize);
+        }
+        if (!savedPos.isNull()) {
+            move(savedPos);
+        }
+    }
+    QList<QVariant> splitterVar = settings.value("splitterSizes").toList();
+    if (!splitterVar.isEmpty() && m_splitter) {
+        QList<int> sizes;
+        for (const QVariant &v : splitterVar)
+            sizes.append(v.toInt());
+        if (sizes.size() == 2 && sizes[0] > 0 && sizes[1] > 0) {
+            m_splitter->setSizes(sizes);
+            m_splitterSizesRestored = true;
+        }
+    }
+    settings.endGroup();
+
+    /* Display preferences */
+    settings.beginGroup("Display");
+
+    int topN = settings.value("topN", 10).toInt();
+    if (topN == 25) {
+        m_topN = 25;
+        if (m_top10Btn) m_top10Btn->setChecked(false);
+        if (m_top25Btn) m_top25Btn->setChecked(true);
+        if (m_top50Btn) m_top50Btn->setChecked(false);
+    } else if (topN == 50) {
+        m_topN = 50;
+        if (m_top10Btn) m_top10Btn->setChecked(false);
+        if (m_top25Btn) m_top25Btn->setChecked(false);
+        if (m_top50Btn) m_top50Btn->setChecked(true);
+    } else {
+        m_topN = 10;
+        if (m_top10Btn) m_top10Btn->setChecked(true);
+        if (m_top25Btn) m_top25Btn->setChecked(false);
+        if (m_top50Btn) m_top50Btn->setChecked(false);
+    }
+
+    bool useBytes = settings.value("useBytes", false).toBool();
+    m_useBytes = useBytes ? TRUE : FALSE;
+    if (m_packetsBtn) m_packetsBtn->setChecked(!useBytes);
+    if (m_bytesBtn) m_bytesBtn->setChecked(useBytes);
+
+    bool useMAC = settings.value("useMAC", false).toBool();
+    m_useMAC = useMAC ? TRUE : FALSE;
+    if (m_ipBtn) m_ipBtn->setChecked(!useMAC);
+    if (m_macBtn) m_macBtn->setChecked(useMAC);
+    updateSearchBarForMode();
+
+    int viewIdx = settings.value("view", 0).toInt();
+    if (m_viewStack && (viewIdx == 0 || viewIdx == 1)) {
+        m_viewStack->setCurrentIndex(viewIdx);
+        if (m_circleBtn) m_circleBtn->setChecked(viewIdx == 0);
+        if (m_tableBtn) m_tableBtn->setChecked(viewIdx == 1);
+    }
+
+    bool lineThickness = settings.value("lineThickness", false).toBool();
+    if (m_lineThicknessCheckBox) {
+        m_lineThicknessCheckBox->setChecked(lineThickness);
+    }
+
+    settings.endGroup();
+}
+
+void MainWindow::closeEvent(QCloseEvent *event)
+{
+    savePreferences();
+    QMainWindow::closeEvent(event);
+}
+
+/* --- End preferences --- */
+
+void MainWindow::setupUI()
+{
+    m_centralWidget = new QWidget(this);
+    setCentralWidget(m_centralWidget);
+    m_mainLayout = new QVBoxLayout(m_centralWidget);
+
+    createControls();
+    createCircleView();
+    createTableView();
+    /* Legend will be created in createTableView after pair list container is ready */
+
+    /* Create view stack for circle/table */
+    m_viewStack = new QStackedWidget(this);
+    m_viewStack->addWidget(m_circleContainer);
+    m_viewStack->addWidget(m_tableWidget);
+    m_viewStack->setSizePolicy(QSizePolicy::Expanding, QSizePolicy::Expanding);
+    
+    /* Create splitter for main content */
+    m_splitter = new QSplitter(Qt::Horizontal, this);
+    m_splitter->addWidget(m_viewStack);
+    m_splitter->addWidget(m_pairListContainer);
+    
+    /* Set stretch factors - circle area stretches more, pair list less */
+    m_splitter->setStretchFactor(0, 1);  /* Circle container - takes extra space */
+    m_splitter->setStretchFactor(1, 0);  /* Pair list container - stays near its size */
+    
+    /* Make splitter handle visible and easy to grab on all platforms */
+#ifdef Q_OS_WIN
+    m_splitter->setHandleWidth(8);
+#else
+    m_splitter->setHandleWidth(5);
+#endif
+    if (m_darkTheme) {
+        m_splitter->setStyleSheet(
+            "QSplitter::handle { background-color: #555; }"
+            "QSplitter::handle:hover { background-color: #777; }"
+        );
+    } else {
+        m_splitter->setStyleSheet(
+            "QSplitter::handle { background-color: #ccc; }"
+            "QSplitter::handle:hover { background-color: #aaa; }"
+        );
+    }
+    m_splitter->setChildrenCollapsible(false);
+    
+    /* Set initial sizes: 68/32 split - circle gets majority of space */
+    m_splitter->setSizes(QList<int>() << 680 << 320);
+
+    /* Refresh MAC address display when the pair list panel is resized */
+    connect(m_splitter, &QSplitter::splitterMoved, this, &MainWindow::refreshPairListText);
+
+    m_mainLayout->addWidget(m_splitter);
+    
+    /* Set initial view */
+    m_circleBtn->setChecked(true);
+    m_viewStack->setCurrentIndex(0);
+    
+    /* Make window resizable with a reasonable minimum size
+     * 640x480 fits older laptops; 1280x780 is comfortable on 1080p */
+    setMinimumSize(640, 480);
+    resize(1280, 780);
+    
+    /* Set window title and flags */
+setWindowTitle("PacketCircle v.0.4.0");
+    
+    /* Create pair list blink timer for synchronized search highlighting */
+    m_pairListBlinkTimer = new QTimer(this);
+    m_pairListBlinkTimer->setInterval(500);
+    connect(m_pairListBlinkTimer, &QTimer::timeout, this, &MainWindow::onPairListBlinkTimer);
+
+    /* Restore user preferences from ~/.PacketCircle/settings.ini */
+    loadPreferences();
+}
+
+void MainWindow::createControls()
+{
+    m_controlsWidget = new QWidget(this);
+    m_controlsWidget->setObjectName("controlsToolbar");
+
+    /* ---- Segment shape rules (shared by both themes) ---- */
+    static const char *segmentShapeRules =
+        /* Left segment */
+        "#controlsToolbar QPushButton[seg_pos=\"left\"] {"
+        "  border-top-left-radius: 4px;"
+        "  border-bottom-left-radius: 4px;"
+        "  border-top-right-radius: 0;"
+        "  border-bottom-right-radius: 0;"
+        "}"
+        /* Middle segment */
+        "#controlsToolbar QPushButton[seg_pos=\"mid\"] {"
+        "  border-radius: 0;"
+        "  border-left: none;"
+        "}"
+        /* Right segment */
+        "#controlsToolbar QPushButton[seg_pos=\"right\"] {"
+        "  border-top-left-radius: 0;"
+        "  border-bottom-left-radius: 0;"
+        "  border-top-right-radius: 4px;"
+        "  border-bottom-right-radius: 4px;"
+        "  border-left: none;"
+        "}";
+
+    /* ---- Dark theme toolbar ---- */
+    static const char *darkToolbarStyle =
+        "#controlsToolbar {"
+        "  background: qlineargradient(x1:0, y1:0, x2:0, y2:1, stop:0 #3a3a3a, stop:1 #2b2b2b);"
+        "  border: 1px solid #222;"
+        "  border-radius: 4px;"
+        "  padding: 4px;"
+        "}"
+        "#controlsToolbar QPushButton[segmented=\"true\"] {"
+        "  background: #4a4a4a;"
+        "  color: #d0d0d0;"
+        "  border: 1px solid #555;"
+        "  padding: 4px 10px;"
+        "  font-size: 11px;"
+        "  font-weight: bold;"
+        "  min-height: 22px;"
+        "}"
+        "#controlsToolbar QPushButton[segmented=\"true\"]:checked {"
+        "  background: #0078d4;"
+        "  color: white;"
+        "  border-color: #005a9e;"
+        "}"
+        "#controlsToolbar QPushButton[segmented=\"true\"]:hover {"
+        "  background: #5a5a5a;"
+        "}"
+        "#controlsToolbar QPushButton[segmented=\"true\"]:checked:hover {"
+        "  background: #1a8ae8;"
+        "}"
+        "#controlsToolbar QPushButton[action=\"true\"] {"
+        "  background: transparent;"
+        "  color: #c0c0c0;"
+        "  border: 1px solid transparent;"
+        "  border-radius: 3px;"
+        "  padding: 4px 10px;"
+        "  font-size: 11px;"
+        "  min-height: 22px;"
+        "}"
+        "#controlsToolbar QPushButton[action=\"true\"]:hover {"
+        "  background: #4a4a4a;"
+        "  border-color: #666;"
+        "  color: #ffffff;"
+        "}"
+        "#controlsToolbar QPushButton[action=\"true\"]:pressed {"
+        "  background: #333;"
+        "}"
+        "#controlsToolbar QCheckBox {"
+        "  color: #d0d0d0;"
+        "  font-size: 11px;"
+        "  spacing: 4px;"
+        "}"
+        "#controlsToolbar QLineEdit {"
+        "  background: #444;"
+        "  color: #e0e0e0;"
+        "  border: 1px solid #666;"
+        "  border-radius: 3px;"
+        "  padding: 3px 6px;"
+        "  font-size: 11px;"
+        "  min-height: 22px;"
+        "  selection-background-color: #0078d4;"
+        "}"
+        "#controlsToolbar QLineEdit:focus {"
+        "  border-color: #0078d4;"
+        "}"
+        "#controlsToolbar QLabel {"
+        "  color: #a0a0a0;"
+        "  font-size: 10px;"
+        "}";
+
+    /* ---- Light theme toolbar ---- */
+    static const char *lightToolbarStyle =
+        "#controlsToolbar {"
+        "  background: qlineargradient(x1:0, y1:0, x2:0, y2:1, stop:0 #f0f0f0, stop:1 #dcdcdc);"
+        "  border: 1px solid #b0b0b0;"
+        "  border-radius: 4px;"
+        "  padding: 4px;"
+        "}"
+        "#controlsToolbar QPushButton[segmented=\"true\"] {"
+        "  background: #e0e0e0;"
+        "  color: #333;"
+        "  border: 1px solid #aaa;"
+        "  padding: 4px 10px;"
+        "  font-size: 11px;"
+        "  font-weight: bold;"
+        "  min-height: 22px;"
+        "}"
+        "#controlsToolbar QPushButton[segmented=\"true\"]:checked {"
+        "  background: #0078d4;"
+        "  color: white;"
+        "  border-color: #005a9e;"
+        "}"
+        "#controlsToolbar QPushButton[segmented=\"true\"]:hover {"
+        "  background: #d0d0d0;"
+        "}"
+        "#controlsToolbar QPushButton[segmented=\"true\"]:checked:hover {"
+        "  background: #1a8ae8;"
+        "}"
+        "#controlsToolbar QPushButton[action=\"true\"] {"
+        "  background: transparent;"
+        "  color: #444;"
+        "  border: 1px solid transparent;"
+        "  border-radius: 3px;"
+        "  padding: 4px 10px;"
+        "  font-size: 11px;"
+        "  min-height: 22px;"
+        "}"
+        "#controlsToolbar QPushButton[action=\"true\"]:hover {"
+        "  background: #d0d0d0;"
+        "  border-color: #aaa;"
+        "  color: #111;"
+        "}"
+        "#controlsToolbar QPushButton[action=\"true\"]:pressed {"
+        "  background: #c0c0c0;"
+        "}"
+        "#controlsToolbar QCheckBox {"
+        "  color: #333;"
+        "  font-size: 11px;"
+        "  spacing: 4px;"
+        "}"
+        "#controlsToolbar QLineEdit {"
+        "  background: #fff;"
+        "  color: #222;"
+        "  border: 1px solid #aaa;"
+        "  border-radius: 3px;"
+        "  padding: 3px 6px;"
+        "  font-size: 11px;"
+        "  min-height: 22px;"
+        "  selection-background-color: #0078d4;"
+        "}"
+        "#controlsToolbar QLineEdit:focus {"
+        "  border-color: #0078d4;"
+        "}"
+        "#controlsToolbar QLabel {"
+        "  color: #666;"
+        "  font-size: 10px;"
+        "}";
+
+    QString style = QString(m_darkTheme ? darkToolbarStyle : lightToolbarStyle) + segmentShapeRules;
+    m_controlsWidget->setStyleSheet(style);
+
+    m_controlsOuterLayout = new QVBoxLayout(m_controlsWidget);
+    m_controlsOuterLayout->setSpacing(4);
+    m_controlsOuterLayout->setContentsMargins(6, 4, 6, 4);
+
+    /* === Row 1: View/Data option groups === */
+    m_row1Widget = new QWidget(m_controlsWidget);
+    m_controlsRow1 = new QHBoxLayout(m_row1Widget);
+    m_controlsRow1->setSpacing(12);
+    m_controlsRow1->setContentsMargins(0, 0, 0, 0);
+
+    /* Helper lambda to create a segmented button */
+    auto makeSegBtn = [this](const QString &text, const QString &pos) -> QPushButton* {
+        QPushButton *btn = new QPushButton(text, m_controlsWidget);
+        btn->setCheckable(true);
+        btn->setProperty("segmented", true);
+        btn->setProperty("seg_pos", pos);
+        return btn;
+    };
+
+    /* Helper lambda to create an action button */
+    auto makeActionBtn = [this](const QString &text) -> QPushButton* {
+        QPushButton *btn = new QPushButton(text, m_controlsWidget);
+        btn->setProperty("action", true);
+        return btn;
+    };
+
+    /* -- Top N segment group -- */
+    QLabel *topLabel = new QLabel("Top:", m_controlsWidget);
+    m_top10Btn = makeSegBtn("10", "left");
+    m_top25Btn = makeSegBtn("25", "mid");
+    m_top50Btn = makeSegBtn("50", "right");
+    m_top10Btn->setChecked(true);
+
+    QButtonGroup *topGroup = new QButtonGroup(this);
+    topGroup->setExclusive(true);
+    topGroup->addButton(m_top10Btn);
+    topGroup->addButton(m_top25Btn);
+    topGroup->addButton(m_top50Btn);
+
+    connect(m_top10Btn, &QPushButton::clicked, this, &MainWindow::onTop10Clicked);
+    connect(m_top25Btn, &QPushButton::clicked, this, &MainWindow::onTop25Clicked);
+    connect(m_top50Btn, &QPushButton::clicked, this, &MainWindow::onTop50Clicked);
+
+    /* -- Metric segment group -- */
+    QLabel *metricLabel = new QLabel("Metric:", m_controlsWidget);
+    m_packetsBtn = makeSegBtn("Pkts", "left");
+    m_bytesBtn = makeSegBtn("Bytes", "right");
+    m_packetsBtn->setChecked(true);
+
+    QButtonGroup *metricGroup = new QButtonGroup(this);
+    metricGroup->setExclusive(true);
+    metricGroup->addButton(m_packetsBtn);
+    metricGroup->addButton(m_bytesBtn);
+
+    connect(m_packetsBtn, &QPushButton::clicked, this, [this]() { onPacketsToggled(true); });
+    connect(m_bytesBtn, &QPushButton::clicked, this, [this]() { onBytesToggled(true); });
+
+    /* -- View segment group -- */
+    QLabel *viewLabel = new QLabel("View:", m_controlsWidget);
+    m_circleBtn = makeSegBtn("Circle", "left");
+    m_tableBtn = makeSegBtn("Table", "right");
+    m_circleBtn->setChecked(true);
+
+    QButtonGroup *viewGroup = new QButtonGroup(this);
+    viewGroup->setExclusive(true);
+    viewGroup->addButton(m_circleBtn);
+    viewGroup->addButton(m_tableBtn);
+
+    connect(m_circleBtn, &QPushButton::clicked, this, [this]() { onCircleViewToggled(true); });
+    connect(m_tableBtn, &QPushButton::clicked, this, [this]() { onTableViewToggled(true); });
+
+    /* -- Mode segment group -- */
+    QLabel *modeLabel = new QLabel("Mode:", m_controlsWidget);
+    m_ipBtn = makeSegBtn("IP", "left");
+    m_macBtn = makeSegBtn("MAC", "right");
+    m_ipBtn->setChecked(true);
+
+    QButtonGroup *modeGroup = new QButtonGroup(this);
+    modeGroup->setExclusive(true);
+    modeGroup->addButton(m_ipBtn);
+    modeGroup->addButton(m_macBtn);
+
+    connect(m_ipBtn, &QPushButton::clicked, this, [this]() { onIPToggled(true); });
+    connect(m_macBtn, &QPushButton::clicked, this, [this]() { onMACToggled(true); });
+
+    /* -- Weight checkbox -- */
+    m_lineThicknessCheckBox = new QCheckBox("Weight", m_controlsWidget);
+    m_lineThicknessCheckBox->setChecked(false);
+    connect(m_lineThicknessCheckBox, &QCheckBox::toggled, this, &MainWindow::onLineThicknessToggled);
+
+    /* -- Help button (created here so it exists before being added to layout) -- */
+    QPushButton *helpBtn = new QPushButton("?", m_row1Widget);
+    helpBtn->setToolTip("Show help and controls description");
+    helpBtn->setFixedSize(26, 26);
+    helpBtn->setStyleSheet(
+        QString("QPushButton {"
+        "  background: %1;"
+        "  color: %2;"
+        "  border: 1px solid %3;"
+        "  border-radius: 13px;"
+        "  font-weight: bold;"
+        "  font-size: 15px;"
+        "}"
+        "QPushButton:hover {"
+        "  background: %4;"
+        "}")
+        .arg(m_darkTheme ? "#4a4a4a" : "#d8d8d8")
+        .arg(m_darkTheme ? "#e0e0e0" : "#333")
+        .arg(m_darkTheme ? "#666" : "#aaa")
+        .arg(m_darkTheme ? "#5a5a5a" : "#c0c0c0")
+    );
+    connect(helpBtn, &QPushButton::clicked, this, &MainWindow::onHelpClicked);
+
+    /* Layout Row 1 */
+    m_controlsRow1->addWidget(topLabel);
+    m_controlsRow1->addWidget(m_top10Btn);
+    m_controlsRow1->addWidget(m_top25Btn);
+    m_controlsRow1->addWidget(m_top50Btn);
+    m_controlsRow1->addSpacing(8);
+    m_controlsRow1->addWidget(metricLabel);
+    m_controlsRow1->addWidget(m_packetsBtn);
+    m_controlsRow1->addWidget(m_bytesBtn);
+    m_controlsRow1->addSpacing(8);
+    m_controlsRow1->addWidget(viewLabel);
+    m_controlsRow1->addWidget(m_circleBtn);
+    m_controlsRow1->addWidget(m_tableBtn);
+    m_controlsRow1->addSpacing(8);
+    m_controlsRow1->addWidget(modeLabel);
+    m_controlsRow1->addWidget(m_ipBtn);
+    m_controlsRow1->addWidget(m_macBtn);
+    m_controlsRow1->addSpacing(8);
+    m_controlsRow1->addWidget(m_lineThicknessCheckBox);
+    m_controlsRow1->addStretch();
+    m_controlsRow1->addWidget(helpBtn);
+
+    /* === Row 2: Actions + Search === */
+    m_row2Widget = new QWidget(m_controlsWidget);
+    m_controlsRow2 = new QHBoxLayout(m_row2Widget);
+    m_controlsRow2->setSpacing(6);
+    m_controlsRow2->setContentsMargins(0, 0, 0, 0);
+
+    m_selectAllBtn = makeActionBtn("Select All");
+    m_selectNoneBtn = makeActionBtn("Select None");
+    m_applyFilterBtn = makeActionBtn("Filter");
+    m_applyFilterBtn->setStyleSheet(
+        m_applyFilterBtn->styleSheet() +
+        "QPushButton { font-weight: bold; }"
+    );
+    m_clearFilterBtn = makeActionBtn("Clear");
+    m_clearFilterBtn->setToolTip("Clear Wireshark display filter and show all connections");
+    m_reloadDataBtn = makeActionBtn("Reload");
+    m_savePDFBtn = makeActionBtn("PDF");
+    m_savePDFBtn->setToolTip("Save report as PDF with circle visualization and IP pair list");
+    m_selectSearchBtn = makeActionBtn("Select Results");
+    m_selectSearchBtn->setToolTip("Select only the communication pairs matching the current search");
+    m_selectSearchBtn->setEnabled(false);
+
+    connect(m_selectAllBtn, &QPushButton::clicked, this, &MainWindow::onSelectAllClicked);
+    connect(m_selectSearchBtn, &QPushButton::clicked, this, &MainWindow::onSelectSearchResultsClicked);
+    connect(m_selectNoneBtn, &QPushButton::clicked, this, &MainWindow::onSelectNoneClicked);
+    connect(m_applyFilterBtn, &QPushButton::clicked, this, &MainWindow::onApplyFilterClicked);
+    connect(m_clearFilterBtn, &QPushButton::clicked, this, &MainWindow::onClearFilterClicked);
+    connect(m_reloadDataBtn, &QPushButton::clicked, this, &MainWindow::onReloadDataClicked);
+    connect(m_savePDFBtn, &QPushButton::clicked, this, &MainWindow::onSavePDFClicked);
+
+    /* Search bar (moved from circle container) */
+    m_searchLabel = new QLabel("Search IP", m_controlsWidget);
+    m_searchLineEdit = new QLineEdit(m_controlsWidget);
+    m_searchLineEdit->setPlaceholderText("Partial IP or CIDR (e.g., 192.168.1 or 10.0.0.0/24)");
+    m_searchLineEdit->setMinimumWidth(160);
+
+    connect(m_searchLineEdit, &QLineEdit::returnPressed, this, [this]() {
+        applySearchFilter(m_searchLineEdit->text());
+    });
+    connect(m_searchLineEdit, &QLineEdit::textChanged, this, [this](const QString &text) {
+        if (text.trimmed().isEmpty()) {
+            applySearchFilter(QString());
+        }
+    });
+
+    /* Layout Row 2 */
+    m_controlsRow2->addWidget(m_selectAllBtn);
+    m_controlsRow2->addWidget(m_selectSearchBtn);
+    m_controlsRow2->addWidget(m_selectNoneBtn);
+    m_controlsRow2->addWidget(m_applyFilterBtn);
+    m_controlsRow2->addWidget(m_clearFilterBtn);
+    m_controlsRow2->addSpacing(6);
+    m_controlsRow2->addWidget(m_reloadDataBtn);
+    m_controlsRow2->addWidget(m_savePDFBtn);
+    m_controlsRow2->addSpacing(12);
+    m_controlsRow2->addWidget(m_searchLabel);
+    m_controlsRow2->addWidget(m_searchLineEdit, 1);
+
+    m_controlsOuterLayout->addWidget(m_row1Widget);
+    m_controlsOuterLayout->addWidget(m_row2Widget);
+
+    m_controlsWidget->setSizePolicy(QSizePolicy::Expanding, QSizePolicy::Fixed);
+    m_mainLayout->addWidget(m_controlsWidget);
+}
+
+void MainWindow::createCircleView()
+{
+    m_circleWidget = new CircleWidget(this);
+    m_circleWidget->setDarkTheme(m_darkTheme);
+    connect(m_circleWidget, &CircleWidget::pairSelectionChanged, 
+            this, &MainWindow::onPairSelectionChanged);
+    connect(m_circleWidget, &CircleWidget::nodeVisibilityToggle,
+            this, &MainWindow::onNodeVisibilityToggle);
+    connect(m_circleWidget, &CircleWidget::lineClicked,
+            this, &MainWindow::onLineClicked);
+
+    m_circleContainer = new QWidget(this);
+    QVBoxLayout *circleLayout = new QVBoxLayout(m_circleContainer);
+    circleLayout->setContentsMargins(0, 0, 0, 0);
+    circleLayout->setSpacing(0);
+
+    circleLayout->addWidget(m_circleWidget, 1);
+    /* Search bar is now in the controls toolbar */
+}
+
+void MainWindow::createTableView()
+{
+    m_tableWidget = new QTableWidget(this);
+    m_tableWidget->setColumnCount(8);
+    m_tableWidget->setHorizontalHeaderLabels(QStringList() << "" << "Source" << "Destination" 
+                                                          << "Packets" << "Bytes" << "Protocol"
+                                                          << "Transport" << "Top Ports");
+    m_tableWidget->setSelectionBehavior(QAbstractItemView::SelectRows);
+    m_tableWidget->setEditTriggers(QAbstractItemView::NoEditTriggers);
+    m_tableWidget->horizontalHeader()->setStretchLastSection(true);
+    
+    /* Set column widths */
+    m_tableWidget->setColumnWidth(0, 30);   /* Checkbox - narrow */
+    m_tableWidget->setColumnWidth(1, 140);  /* Source */
+    m_tableWidget->setColumnWidth(2, 140);  /* Destination */
+    m_tableWidget->setColumnWidth(3, 80);   /* Packets */
+    m_tableWidget->setColumnWidth(4, 90);   /* Bytes */
+    m_tableWidget->setColumnWidth(5, 90);   /* Protocol */
+    m_tableWidget->setColumnWidth(6, 70);   /* Transport */
+    /* Top Ports stretches to fill remaining space */
+
+    /* Create container widget for pair list and legend */
+    m_pairListContainer = new QWidget(this);
+    QVBoxLayout *pairListContainerLayout = new QVBoxLayout(m_pairListContainer);
+    pairListContainerLayout->setContentsMargins(0, 0, 0, 0);
+    pairListContainerLayout->setSpacing(0);
+    
+    m_pairListWidget = new QListWidget(m_pairListContainer);
+    /* Set minimum width to hold IP address pairs, but allow resizing via splitter */
+    m_pairListWidget->setMinimumWidth(180);
+    m_pairListWidget->setSizePolicy(QSizePolicy::Expanding, QSizePolicy::Expanding);
+    
+    /* Remove left padding/margins to minimize empty space - use stylesheet */
+    /* NOTE: ANY QListWidget::item rule in a stylesheet — even one that does
+     * NOT set background-color — causes Qt's stylesheet renderer to take over
+     * ALL item painting, silently preventing setBackground() / setForeground()
+     * calls from having any visible effect.  This breaks the search-result
+     * red-blink animation.  Therefore we ONLY style the container (padding,
+     * border) and handle per-item sizing via setSizeHint() when items are
+     * created.                                                                */
+    m_pairListWidget->setStyleSheet(
+        "QListWidget { "
+        "    padding: 0px; "
+        "    margin: 0px; "
+        "    border: none; "
+        "} "
+    );
+    
+    /* Set fixed-width font for IP list - use platform-appropriate size */
+#ifdef Q_OS_WIN
+    QFont fixedFont("Consolas", 11);
+#else
+    QFont fixedFont("Courier", 15);
+#endif
+    m_pairListWidget->setFont(fixedFont);
+    
+    /* Ensure items have proper spacing */
+    m_pairListWidget->setSpacing(0);
+    
+    /* Set uniform item sizes for consistent display */
+    m_pairListWidget->setUniformItemSizes(true);
+    
+    /* Connect item changed signal to update circle widget selections */
+    connect(m_pairListWidget, &QListWidget::itemChanged, this, &MainWindow::onPairListItemChanged);
+    
+    /* Add pair list to container - it will expand */
+    pairListContainerLayout->addWidget(m_pairListWidget, 1);  /* Stretch factor 1 = takes available space */
+    
+    /* Create and add legend widget to bottom of pair list container */
+    createLegend();
+    pairListContainerLayout->addWidget(m_legendWidget, 0);  /* Stretch factor 0 = fixed size */
+    
+    /* Set container size policy - allow resizing via splitter, with reasonable minimum */
+    m_pairListContainer->setMinimumWidth(180);
+    m_pairListContainer->setSizePolicy(QSizePolicy::Preferred, QSizePolicy::Expanding);
+}
+
+void MainWindow::createLegend()
+{
+    /* Create legend widget as child of pair list container */
+    m_legendWidget = new QWidget(m_pairListContainer);
+    QVBoxLayout *outerLayout = new QVBoxLayout(m_legendWidget);
+    outerLayout->setContentsMargins(5, 5, 5, 5);
+    outerLayout->setSpacing(3);  /* Small spacing between rows */
+    
+    /* Create two horizontal rows */
+    m_legendLayout = new QHBoxLayout();
+    m_legendLayout->setContentsMargins(0, 0, 0, 0);
+    m_legendLayout->setSpacing(8);  /* Spacing between category groups */
+    
+    m_legendRow2Layout = new QHBoxLayout();
+    m_legendRow2Layout->setContentsMargins(0, 0, 0, 0);
+    m_legendRow2Layout->setSpacing(8);  /* Spacing between category groups */
+    
+    outerLayout->addLayout(m_legendLayout);
+    outerLayout->addLayout(m_legendRow2Layout);
+    
+    /* Set compact fixed height for legend - taller for two rows */
+    m_legendWidget->setMinimumHeight(70);
+    m_legendWidget->setMaximumHeight(70);
+    /* Span the width of the IP pair window */
+    m_legendWidget->setSizePolicy(QSizePolicy::Expanding, QSizePolicy::Fixed);
+}
+
+void MainWindow::updateViews()
+{
+    static bool updating = false;
+    if (updating) {
+        /* Prevent recursive calls */
+        return;
+    }
+    updating = true;
+    
+    if (!m_analysisResult) {
+        if (m_circleWidget) {
+            m_circleWidget->setPairs(NULL, NULL);
+        }
+        if (m_circle_pairs) {
+            g_list_free(m_circle_pairs);
+            m_circle_pairs = NULL;
+        }
+        m_tableWidget->setRowCount(0);
+        m_pairListWidget->clear();
+        updating = false;
+        return;
+    }
+    
+    if (!m_analysisResult->pairs) {
+        if (m_circleWidget) {
+            m_circleWidget->setPairs(NULL, NULL);
+        }
+        if (m_circle_pairs) {
+            g_list_free(m_circle_pairs);
+            m_circle_pairs = NULL;
+        }
+        m_tableWidget->setRowCount(0);
+        m_pairListWidget->clear();
+        updating = false;
+        return;
+    }
+
+    /* Clear CircleWidget's reference to old pairs first */
+    if (m_circleWidget) {
+        m_circleWidget->setPairs(NULL, NULL);
+    }
+    
+    /* Free old circle_pairs list if it exists (only list nodes, pairs are owned by m_analysisResult) */
+    if (m_circle_pairs) {
+        g_list_free(m_circle_pairs);
+        m_circle_pairs = NULL;
+    }
+    
+    /* Don't free m_top_pairs - it contains pointers to pairs owned by m_analysisResult */
+    /* The list nodes are small and will be cleaned up when m_analysisResult is freed */
+    /* Setting to NULL prevents use-after-free issues */
+    m_top_pairs = NULL;
+    
+    /* Get top pairs - we'll show both directions, so get enough pairs */
+    m_top_pairs = packet_analyzer_get_top_pairs(m_analysisResult, m_topN, m_useBytes);
+    if (!m_top_pairs) {
+        /* No pairs to display */
+        if (m_circleWidget) {
+            m_circleWidget->setPairs(NULL, NULL);
+        }
+        if (m_circle_pairs) {
+            g_list_free(m_circle_pairs);
+            m_circle_pairs = NULL;
+        }
+        m_tableWidget->setRowCount(0);
+        m_pairListWidget->clear();
+        updating = false;
+        return;
+    }
+
+    /* Update circle view - limit to exactly top_n pairs for the circle */
+    if (m_circleWidget) {
+        /* Free old circle_pairs list if it exists (only list nodes, pairs are owned by m_analysisResult) */
+        if (m_circle_pairs) {
+            g_list_free(m_circle_pairs);
+            m_circle_pairs = NULL;
+        }
+        
+        /* Create a limited list with exactly top_n pairs for the circle widget */
+        GList *iter;
+        guint pair_count = 0;
+        for (iter = m_top_pairs; iter && pair_count < m_topN; iter = iter->next, pair_count++) {
+            m_circle_pairs = g_list_append(m_circle_pairs, iter->data);
+        }
+        
+        m_circleWidget->setMaxPairs(m_topN);
+        m_circleWidget->setUseBytes(m_useBytes);
+        m_circleWidget->setPairs(m_circle_pairs, m_analysisResult->protocols);
+        m_circleWidget->setSelectedPairs(m_selectedPairs);
+        
+        /* Note: m_circle_pairs list nodes will be freed in destructor or when updateViews is called again */
+        /* The pairs themselves are owned by m_analysisResult, so we don't free them */
+    }
+
+    /* Update table view — adjust columns for Wi-Fi vs standard mode */
+    m_tableWidget->setRowCount(0);
+    m_tableCheckboxes.clear();
+
+    if (m_wifiMode) {
+        m_tableWidget->setColumnCount(9);
+        m_tableWidget->setHorizontalHeaderLabels(QStringList()
+            << "" << "Station" << "BSSID" << "SSID" << "Ch"
+            << "Signal" << "Frames" << "Bytes" << "Retries");
+        m_tableWidget->setColumnWidth(0, 30);
+        m_tableWidget->setColumnWidth(1, 140);
+        m_tableWidget->setColumnWidth(2, 140);
+        m_tableWidget->setColumnWidth(3, 110);
+        m_tableWidget->setColumnWidth(4, 40);
+        m_tableWidget->setColumnWidth(5, 110);
+        m_tableWidget->setColumnWidth(6, 70);
+        m_tableWidget->setColumnWidth(7, 80);
+        /* Retries stretches */
+    } else {
+        m_tableWidget->setColumnCount(8);
+        m_tableWidget->setHorizontalHeaderLabels(QStringList()
+            << "" << "Source" << "Destination" << "Packets" << "Bytes"
+            << "Protocol" << "Transport" << "Top Ports");
+        m_tableWidget->setColumnWidth(0, 30);
+        m_tableWidget->setColumnWidth(1, 140);
+        m_tableWidget->setColumnWidth(2, 140);
+        m_tableWidget->setColumnWidth(3, 80);
+        m_tableWidget->setColumnWidth(4, 90);
+        m_tableWidget->setColumnWidth(5, 90);
+        m_tableWidget->setColumnWidth(6, 70);
+        /* Top Ports stretches */
+    }
+
+    GList *iter;
+    guint row = 0;
+    for (iter = m_top_pairs; iter; iter = iter->next, row++) {
+        comm_pair_t *pair = (comm_pair_t *)iter->data;
+        if (!pair || !pair->src_addr || !pair->dst_addr)
+            continue;
+            
+        m_tableWidget->insertRow(row);
+
+        /* Checkbox centered in cell */
+        QCheckBox *checkbox = new QCheckBox();
+        checkbox->setChecked(true);
+        QWidget *checkWidget = new QWidget();
+        QHBoxLayout *checkLayout = new QHBoxLayout(checkWidget);
+        checkLayout->addWidget(checkbox);
+        checkLayout->setAlignment(Qt::AlignCenter);
+        checkLayout->setContentsMargins(0, 0, 0, 0);
+        m_tableWidget->setCellWidget(row, 0, checkWidget);
+        m_tableCheckboxes[checkbox] = pair;
+        connect(checkbox, &QCheckBox::toggled, this, [this, pair](bool checked) {
+            onTableCheckboxToggled(pair, checked);
+        });
+
+        if (m_wifiMode) {
+            /* ---- Wi-Fi table row ---- */
+            QString station = pair->resolved_src ? QString::fromUtf8(pair->resolved_src) : QString::fromUtf8(pair->src_addr);
+            QString bssid   = pair->wifi_bssid   ? QString::fromUtf8(pair->wifi_bssid)   : QString::fromUtf8(pair->dst_addr);
+            m_tableWidget->setItem(row, 1, new QTableWidgetItem(station));
+            m_tableWidget->setItem(row, 2, new QTableWidgetItem(bssid));
+
+            /* SSID */
+            m_tableWidget->setItem(row, 3, new QTableWidgetItem(
+                pair->wifi_ssid ? QString::fromUtf8(pair->wifi_ssid) : ""));
+
+            /* Channel */
+            QTableWidgetItem *chItem = new QTableWidgetItem(
+                pair->wifi_channel > 0 ? QString::number(pair->wifi_channel) : "-");
+            chItem->setTextAlignment(Qt::AlignCenter);
+            m_tableWidget->setItem(row, 4, chItem);
+
+            /* Signal: quality label + avg dBm */
+            QString sigText = "-";
+            if (pair->rssi_count > 0) {
+                int avg = (int)(pair->rssi_sum / (gint32)pair->rssi_count);
+                QString quality;
+                if (avg >= -55)      quality = "Excellent";
+                else if (avg >= -65) quality = "Good";
+                else if (avg >= -75) quality = "Fair";
+                else                 quality = "Poor";
+                sigText = QString("%1 (%2 dBm)").arg(quality).arg(avg);
+            }
+            m_tableWidget->setItem(row, 5, new QTableWidgetItem(sigText));
+
+            /* Frames */
+            QTableWidgetItem *frmItem = new QTableWidgetItem(QString::number(pair->packet_count));
+            frmItem->setTextAlignment(Qt::AlignRight | Qt::AlignVCenter);
+            m_tableWidget->setItem(row, 6, frmItem);
+
+            /* Bytes */
+            QString bytesStr;
+            if (pair->byte_count >= 1048576)
+                bytesStr = QString("%1 MB").arg(pair->byte_count / 1048576.0, 0, 'f', 1);
+            else if (pair->byte_count >= 1024)
+                bytesStr = QString("%1 KB").arg(pair->byte_count / 1024.0, 0, 'f', 1);
+            else
+                bytesStr = QString("%1 B").arg(pair->byte_count);
+            QTableWidgetItem *byteItem = new QTableWidgetItem(bytesStr);
+            byteItem->setTextAlignment(Qt::AlignRight | Qt::AlignVCenter);
+            m_tableWidget->setItem(row, 7, byteItem);
+
+            /* Retries: count (pct%) */
+            QString retryStr = "-";
+            if (pair->retry_count > 0 && pair->packet_count > 0) {
+                double pct = 100.0 * pair->retry_count / pair->packet_count;
+                retryStr = QString("%1 (%2%)").arg(pair->retry_count).arg(QString::number(pct, 'f', 1));
+            }
+            QTableWidgetItem *retryItem = new QTableWidgetItem(retryStr);
+            retryItem->setTextAlignment(Qt::AlignRight | Qt::AlignVCenter);
+            m_tableWidget->setItem(row, 8, retryItem);
+        } else {
+            /* ---- Standard table row ---- */
+            QString displaySrc = pair->resolved_src ? QString::fromUtf8(pair->resolved_src) : QString::fromUtf8(pair->src_addr);
+            QString displayDst = pair->resolved_dst ? QString::fromUtf8(pair->resolved_dst) : QString::fromUtf8(pair->dst_addr);
+            m_tableWidget->setItem(row, 1, new QTableWidgetItem(displaySrc));
+            m_tableWidget->setItem(row, 2, new QTableWidgetItem(displayDst));
+
+            QTableWidgetItem *pktItem = new QTableWidgetItem(QString::number(pair->packet_count));
+            pktItem->setTextAlignment(Qt::AlignRight | Qt::AlignVCenter);
+            m_tableWidget->setItem(row, 3, pktItem);
+
+            QTableWidgetItem *byteItem = new QTableWidgetItem(QString::number(pair->byte_count));
+            byteItem->setTextAlignment(Qt::AlignRight | Qt::AlignVCenter);
+            m_tableWidget->setItem(row, 4, byteItem);
+
+            m_tableWidget->setItem(row, 5, new QTableWidgetItem(pair->top_protocol ? pair->top_protocol : "Unknown"));
+
+            QString transport;
+            if (pair->has_tcp && pair->has_udp) transport = "TCP+UDP";
+            else if (pair->has_tcp) transport = "TCP";
+            else if (pair->has_udp) transport = "UDP";
+            else transport = "-";
+            m_tableWidget->setItem(row, 6, new QTableWidgetItem(transport));
+
+            /* Top Ports column */
+            QString portsStr;
+            if (pair->dst_ports) {
+                QList<QPair<guint16, guint64>> port_list;
+                GHashTableIter port_iter;
+                gpointer port_key, port_value;
+                g_hash_table_iter_init(&port_iter, pair->dst_ports);
+                while (g_hash_table_iter_next(&port_iter, &port_key, &port_value)) {
+                    guint16 port = GPOINTER_TO_UINT(port_key);
+                    port_stats_t *ps = (port_stats_t *)port_value;
+                    guint64 count = ps ? ps->count : 0;
+                    port_list.append(qMakePair(port, count));
+                }
+                std::sort(port_list.begin(), port_list.end(),
+                          [](const QPair<guint16, guint64> &a, const QPair<guint16, guint64> &b) {
+                              return a.second > b.second;
+                          });
+                QStringList port_strs;
+                int shown = 0;
+                for (const auto &p : port_list) {
+                    if (shown >= 3) break;
+                    QString name;
+                    switch (p.first) {
+                        case 80: name = "HTTP"; break;
+                        case 443: name = "HTTPS"; break;
+                        case 53: name = "DNS"; break;
+                        case 22: name = "SSH"; break;
+                        case 445: name = "SMB"; break;
+                        case 3389: name = "RDP"; break;
+                        case 1433: name = "MSSQL"; break;
+                        case 3306: name = "MySQL"; break;
+                        case 21: name = "FTP"; break;
+                        case 25: name = "SMTP"; break;
+                        case 110: name = "POP3"; break;
+                        case 143: name = "IMAP"; break;
+                        case 8080: name = "HTTP-Alt"; break;
+                        case 5060: name = "SIP"; break;
+                        case 5061: name = "SIPS"; break;
+                        case 123: name = "NTP"; break;
+                        case 161: name = "SNMP"; break;
+                        case 389: name = "LDAP"; break;
+                        case 636: name = "LDAPS"; break;
+                        case 88: name = "Kerberos"; break;
+                        default: name = QString::number(p.first); break;
+                    }
+                    if (name != QString::number(p.first))
+                        port_strs << QString("%1/%2").arg(name).arg(p.first);
+                    else
+                        port_strs << name;
+                    shown++;
+                }
+                portsStr = port_strs.join(", ");
+            }
+            m_tableWidget->setItem(row, 7, new QTableWidgetItem(portsStr));
+        }
+    }
+
+    /* Update pair list */
+    m_pairListWidget->clear();
+    m_linkedPairs.clear();  /* Clear linked pairs map */
+    
+    /* Build a map to group bidirectional pairs together */
+    QMap<QString, QList<comm_pair_t*>> pair_groups;  /* Key: sorted address pair, Value: list of pairs */
+    
+    /* First pass: group pairs by their addresses (sorted) to find bidirectional pairs */
+    for (iter = m_top_pairs; iter; iter = iter->next) {
+        comm_pair_t *pair = (comm_pair_t *)iter->data;
+        if (!pair || !pair->src_addr || !pair->dst_addr)
+            continue;
+        
+        QString addr1 = QString::fromUtf8(pair->src_addr);
+        QString addr2 = QString::fromUtf8(pair->dst_addr);
+        
+        /* Create a canonical key by sorting addresses to group bidirectional pairs */
+        QString key = (addr1 < addr2) ? QString("%1|%2").arg(addr1).arg(addr2) 
+                                      : QString("%1|%2").arg(addr2).arg(addr1);
+        
+        if (!pair_groups.contains(key)) {
+            pair_groups[key] = QList<comm_pair_t*>();
+        }
+        pair_groups[key].append(pair);
+    }
+    
+    /* Find maximum display address length for alignment (use resolved names if available) */
+    guint max_src_len = 0;
+    guint max_dst_len = 0;
+    for (iter = m_top_pairs; iter; iter = iter->next) {
+        comm_pair_t *pair = (comm_pair_t *)iter->data;
+        if (!pair || !pair->src_addr || !pair->dst_addr)
+            continue;
+        QString dSrc = pair->resolved_src ? QString::fromUtf8(pair->resolved_src) : QString::fromUtf8(pair->src_addr);
+        QString dDst = pair->resolved_dst ? QString::fromUtf8(pair->resolved_dst) : QString::fromUtf8(pair->dst_addr);
+        guint src_len = (guint)dSrc.length();
+        guint dst_len = (guint)dDst.length();
+        if (src_len > max_src_len)
+            max_src_len = src_len;
+        if (dst_len > max_dst_len)
+            max_dst_len = dst_len;
+    }
+    
+    /* Second pass: create list items, keeping bidirectional pairs adjacent and linking checkboxes */
+    guint list_entry_count = 0;
+#ifdef Q_OS_WIN
+    QFont fixedFont("Consolas", 11);
+#else
+    QFont fixedFont("Courier", 15);
+#endif
+    
+    for (auto group_it = pair_groups.begin(); group_it != pair_groups.end() && list_entry_count < m_topN; ++group_it) {
+        QList<comm_pair_t*> &pairs = group_it.value();
+        
+        /* Sort pairs within group: A→B before B→A (alphabetically) */
+        std::sort(pairs.begin(), pairs.end(), [](comm_pair_t *a, comm_pair_t *b) {
+            QString a_src = QString::fromUtf8(a->src_addr);
+            QString a_dst = QString::fromUtf8(a->dst_addr);
+            QString b_src = QString::fromUtf8(b->src_addr);
+            QString b_dst = QString::fromUtf8(b->dst_addr);
+            
+            if (a_src != b_src) {
+                return a_src < b_src;
+            }
+            return a_dst < b_dst;
+        });
+        
+        QListWidgetItem *first_item = nullptr;
+        QListWidgetItem *second_item = nullptr;
+        
+        /* Create list items for each pair in the group */
+        for (comm_pair_t *pair : pairs) {
+            if (list_entry_count >= m_topN)
+                break;
+            
+            /* Use resolved names for display, raw addresses for internal use */
+            QString src_addr = pair->resolved_src ? QString::fromUtf8(pair->resolved_src) : QString::fromUtf8(pair->src_addr);
+            QString dst_addr = pair->resolved_dst ? QString::fromUtf8(pair->resolved_dst) : QString::fromUtf8(pair->dst_addr);
+            
+            /* Truncate long addresses/names — will be refined by refreshPairListText()
+             * In Wi-Fi mode, keep full MAC addresses (17 chars) since they fit easily. */
+            if (!m_wifiMode) {
+                src_addr = truncateIPv6Address(src_addr);
+                dst_addr = truncateIPv6Address(dst_addr);
+            }
+            
+            /* Pad addresses for alignment */
+            src_addr = src_addr.leftJustified(max_src_len, ' ');
+            dst_addr = dst_addr.leftJustified(max_dst_len, ' ');
+            
+            /* Use arrow to show direction - use plain text with Unicode arrow (no HTML) */
+            QString text = QString("%1 → %2").arg(src_addr).arg(dst_addr);
+            QListWidgetItem *item = new QListWidgetItem(m_pairListWidget);
+            item->setFlags(item->flags() | Qt::ItemIsUserCheckable);
+            item->setCheckState(Qt::Checked);  /* All pairs visible by default */
+            item->setData(Qt::UserRole, QVariant::fromValue((void*)pair));  /* Store pair pointer */
+            item->setSizeHint(QSize(-1, 30));  /* Only constrain height, width adapts to list */
+            item->setFont(fixedFont);
+            item->setText(text);  /* Plain text - no HTML */
+            
+            m_pairListWidget->addItem(item);
+            
+            /* Track items for linking if bidirectional */
+            if (!first_item) {
+                first_item = item;
+            } else if (!second_item) {
+                second_item = item;
+            }
+            
+            list_entry_count++;
+        }
+        
+        /* Link checkboxes for bidirectional pairs */
+        if (first_item && second_item && pairs.size() == 2) {
+            m_linkedPairs[first_item] = second_item;
+            m_linkedPairs[second_item] = first_item;
+        }
+    }
+    
+    /* Initialize visible pairs after creating list items */
+    updateVisiblePairsFromWidgets();
+
+    /* Adapt display names to available width (truncate long hostnames etc.) */
+    refreshPairListText();
+
+    /* Auto-fit pair list width to content on first data load (when no saved
+     * splitter position exists).  Measures the widest item text plus checkbox
+     * and scrollbar overhead, then sizes the splitter so the pair list is
+     * just wide enough to show everything without wasted space.             */
+    if (!m_splitterSizesRestored && m_splitter && m_pairListWidget->count() > 0) {
+        QFontMetrics fm(m_pairListWidget->font());
+        int maxTextWidth = 0;
+        for (int i = 0; i < m_pairListWidget->count(); i++) {
+            QListWidgetItem *item = m_pairListWidget->item(i);
+            if (!item) continue;
+            int w = fm.horizontalAdvance(item->text());
+            if (w > maxTextWidth) maxTextWidth = w;
+        }
+        /* Add space for: checkbox (~28px) + left padding + scrollbar (~18px) + margin */
+        int idealWidth = maxTextWidth + 60;
+        int minWidth = 180;
+        int maxWidth = m_splitter->width() / 2;  /* never more than half */
+        idealWidth = qBound(minWidth, idealWidth, maxWidth);
+
+        int totalWidth = m_splitter->width();
+        if (totalWidth > 0) {
+            m_splitter->setSizes(QList<int>() << (totalWidth - idealWidth) << idealWidth);
+        }
+    }
+
+    /* Re-apply search highlights if query is present */
+    if (m_searchLineEdit && !m_searchLineEdit->text().trimmed().isEmpty()) {
+        applySearchFilter(m_searchLineEdit->text());
+    }
+    
+    /* Note: m_top_pairs contains pointers to pairs owned by m_analysisResult */
+    /* We free m_top_pairs (the list structure) but not the pairs themselves */
+    
+    updating = false;
+}
+
+void MainWindow::updateLegend()
+{
+    /* Clear existing legend items and checkboxes from both rows */
+    QLayoutItem *item;
+    while ((item = m_legendLayout->takeAt(0)) != NULL) {
+        if (item->widget()) {
+            delete item->widget();
+        }
+        delete item;
+    }
+    while ((item = m_legendRow2Layout->takeAt(0)) != NULL) {
+        if (item->widget()) {
+            delete item->widget();
+        }
+        delete item;
+    }
+    
+    /* Clear checkbox hash */
+    m_protocolCheckboxes.clear();
+
+    /* Wi-Fi mode: show 4-bin RSSI legend instead of protocol categories */
+    if (m_wifiMode) {
+        struct RssiLegendItem {
+            const char *label;   /* e.g., "Excellent" */
+            const char *range;   /* e.g., ">= -55 dBm" */
+            int r, g, b;         /* swatch color (on-screen palette to match CircleWidget) */
+        };
+        const RssiLegendItem bins[] = {
+            {"Excellent", ">= -55 dBm", 0, 200, 0},
+            {"Good",      "-65..-56 dBm", 160, 220, 0},
+            {"Fair",      "-75..-66 dBm", 255, 165, 0},
+            {"Poor",      "< -75 dBm", 220, 30, 30}
+        };
+
+        QString borderColor = m_darkTheme ? "#666" : "#aaa";
+        for (int i = 0; i < 4; i++) {
+            const RssiLegendItem &it = bins[i];
+            /* Color swatch */
+            QLabel *color_label = new QLabel(m_legendWidget);
+            color_label->setStyleSheet(QString("background-color: rgb(%1,%2,%3); min-width: 12px; min-height: 12px; max-width: 12px; max-height: 12px; border: 1px solid %4;")
+                                       .arg(it.r).arg(it.g).arg(it.b).arg(borderColor));
+            color_label->setSizePolicy(QSizePolicy::Fixed, QSizePolicy::Fixed);
+
+            /* Text label */
+            QLabel *text_label = new QLabel(QString("%1 (%2)").arg(it.label).arg(it.range), m_legendWidget);
+            text_label->setSizePolicy(QSizePolicy::Minimum, QSizePolicy::Fixed);
+            text_label->setStyleSheet("QLabel { font-size: 9pt; }");
+
+            /* Distribute 2 per row for balance */
+            QHBoxLayout *targetLayout = (i < 2) ? m_legendLayout : m_legendRow2Layout;
+            targetLayout->addWidget(color_label);
+            targetLayout->addWidget(text_label);
+        }
+        qDebug() << "updateLegend: Wi-Fi mode — added 4-bin RSSI legend";
+        return;
+    }
+
+    /* Define protocol categories */
+    struct ProtocolCategory {
+        QString name;
+        QStringList protocols;  /* Protocols that belong to this category */
+        guint32 color;
+    };
+    
+    ProtocolCategory categories[] = {
+        {"ARP", QStringList() << "ARP" << "RARP", 0x87CEEB},  /* Sky Blue */
+        {"ICMP", QStringList() << "ICMP" << "ICMPv6", 0xAFEEEE},  /* Pale Turquoise */
+        {"TCP", QStringList() << "TCP", 0x90EE90},  /* Light Green */
+        {"UDP", QStringList() << "UDP", 0xFFB347},  /* Pastel Orange */
+        {"Infrastructure", QStringList() << "OSPF" << "BGP" << "RIP" << "RIPv2" << "EIGRP" 
+                                         << "ISIS" << "IS-IS" << "IGMP" << "IGMPv2" << "IGMPv3"
+                                         << "PIM" << "VRRP" << "HSRP" << "SCTP" << "DCCP", 0xFFE4B5},  /* Moccasin */
+        {"Unknown", QStringList() << "Unknown" << "IP" << "IPv4" << "IPv6" << "Ethernet", 0x808080}  /* Gray */
+    };
+    
+    /* Build set of protocols found in analysis */
+    QSet<QString> found_protocols;
+    if (m_analysisResult && m_analysisResult->protocols) {
+        GHashTableIter iter;
+        gpointer key, value;
+        g_hash_table_iter_init(&iter, m_analysisResult->protocols);
+        while (g_hash_table_iter_next(&iter, &key, &value)) {
+            protocol_stats_t *stats = (protocol_stats_t *)value;
+            if (stats && stats->protocol_name && *stats->protocol_name) {
+                QString protocol_name = QString::fromUtf8(stats->protocol_name);
+                if (protocol_name.contains("Missing", Qt::CaseInsensitive)) {
+                    protocol_name = "Unknown";
+                }
+                found_protocols.insert(protocol_name);
+            }
+        }
+    }
+    
+    /* Add category groups to legend - split into two rows */
+    for (int i = 0; i < 6; i++) {
+        ProtocolCategory &cat = categories[i];
+        
+        /* Check if any protocol in this category was found */
+        bool category_found = false;
+        for (const QString &proto : cat.protocols) {
+            if (found_protocols.contains(proto)) {
+                category_found = true;
+                break;
+            }
+        }
+        
+        /* Get representative color for category */
+        QColor color((cat.color >> 16) & 0xFF, (cat.color >> 8) & 0xFF, cat.color & 0xFF);
+        
+        /* Create color box */
+        QLabel *color_label = new QLabel(m_legendWidget);
+        QString borderColor = m_darkTheme ? "#666" : "#aaa";
+        color_label->setStyleSheet(QString("background-color: rgb(%1,%2,%3); min-width: 12px; min-height: 12px; max-width: 12px; max-height: 12px; border: 1px solid %4;")
+                                   .arg(color.red()).arg(color.green()).arg(color.blue()).arg(borderColor));
+        color_label->setSizePolicy(QSizePolicy::Fixed, QSizePolicy::Fixed);
+        
+        /* Create checkbox for category */
+        QCheckBox *category_checkbox = new QCheckBox(cat.name, m_legendWidget);
+        
+        if (category_found) {
+            /* Category found - normal checkbox */
+            category_checkbox->setChecked(true);  /* Default to checked */
+            category_checkbox->setEnabled(true);
+        } else {
+            /* Category not found - show dash (N/A) inside checkbox using tristate */
+            category_checkbox->setTristate(true);
+            category_checkbox->setCheckState(Qt::PartiallyChecked);  /* Shows dash/partial check */
+            category_checkbox->setEnabled(false);   /* Disable if category not found */
+        }
+        
+        if (m_darkTheme)
+            category_checkbox->setStyleSheet("QCheckBox { font-size: 9pt; } QCheckBox:disabled { color: #888; }");
+        else
+            category_checkbox->setStyleSheet("QCheckBox { font-size: 9pt; } QCheckBox:disabled { color: #aaa; }");
+        category_checkbox->setSizePolicy(QSizePolicy::Minimum, QSizePolicy::Fixed);
+        
+        /* Connect checkbox to filter function */
+        if (category_found) {
+            connect(category_checkbox, &QCheckBox::toggled, this, [this, cat](bool checked) {
+                onProtocolCategoryToggled(cat.name, cat.protocols, checked);
+            });
+        }
+        
+        /* Store checkbox in hash using category name */
+        m_protocolCheckboxes[cat.name] = category_checkbox;
+        
+        /* Add to appropriate row: first 3 in row 1, last 3 in row 2 */
+        QHBoxLayout *targetLayout = (i < 3) ? m_legendLayout : m_legendRow2Layout;
+        targetLayout->addWidget(color_label);
+        targetLayout->addWidget(category_checkbox);
+    }
+    
+    qDebug() << "updateLegend: Added 6 protocol categories to legend";
+}
+
+void MainWindow::updateAnalysis(analysis_result_t *result)
+{
+    /* Log what we received */
+    if (result) {
+        guint pairs_count = result->pairs ? g_list_length(result->pairs) : 0;
+        qDebug() << "MainWindow::updateAnalysis: received" << pairs_count << "pairs";
+        qDebug() << "MainWindow::updateAnalysis: total_packets=" << result->total_packets 
+                 << "total_bytes=" << result->total_bytes;
+    } else {
+        qDebug() << "MainWindow::updateAnalysis: received NULL result";
+    }
+    
+    /* Clear CircleWidget's pairs and free top_pairs BEFORE freeing old result */
+    if (m_circleWidget) {
+        m_circleWidget->setPairs(NULL, NULL);
+    }
+    
+    /* Clear CircleWidget's reference to old pairs first */
+    if (m_circleWidget) {
+        m_circleWidget->setPairs(NULL, NULL);
+    }
+    
+    /* Don't free m_top_pairs - it contains pointers to pairs owned by m_analysisResult */
+    /* Setting to NULL prevents use-after-free issues */
+    m_top_pairs = NULL;
+    
+    if (m_analysisResult) {
+        packet_analyzer_free_result(m_analysisResult);
+    }
+    m_analysisResult = result;
+
+    /* Detect Wi-Fi mode from analysis result and adapt UI */
+    bool wasWifi = m_wifiMode;
+    m_wifiMode = (result && result->mode == ANALYSIS_MODE_WIFI);
+    if (m_circleWidget) {
+        m_circleWidget->setWiFiMode(m_wifiMode);
+    }
+    /* Hide IP/MAC toggle in Wi-Fi mode (always uses MAC internally) */
+    if (m_ipBtn)  m_ipBtn->setVisible(!m_wifiMode);
+    if (m_macBtn) m_macBtn->setVisible(!m_wifiMode);
+    /* Find and hide the "Mode:" label too */
+    if (m_row1Widget) {
+        for (QObject *child : m_row1Widget->children()) {
+            QLabel *lbl = qobject_cast<QLabel*>(child);
+            if (lbl && lbl->text() == "Mode:") {
+                lbl->setVisible(!m_wifiMode);
+                break;
+            }
+        }
+    }
+    /* Update search bar hint for Wi-Fi */
+    if (m_wifiMode) {
+        if (m_searchLabel) m_searchLabel->setText("Search Wi-Fi");
+        if (m_searchLineEdit) m_searchLineEdit->setPlaceholderText("MAC, SSID, ap, or signal (excellent/good/fair/poor)");
+    } else if (wasWifi) {
+        /* Restore normal hint when leaving Wi-Fi mode */
+        updateSearchBarForMode();
+    }
+
+    updateViews();
+    updateLegend();
+    
+    /* Initialize visible pairs - all pairs should be visible by default */
+    /* This will be updated when updateViews() creates the list items */
+    
+    /* Initialize protocol filter - show all enabled categories by default (empty set = show all) */
+    if (m_circleWidget) {
+        QSet<QString> enabled_protocols;
+        for (auto it = m_protocolCheckboxes.begin(); it != m_protocolCheckboxes.end(); ++it) {
+            QCheckBox *checkbox = it.value();
+            /* Only consider enabled checkboxes that are checked */
+            if (checkbox->isEnabled() && checkbox->isChecked()) {
+                QString category_name = it.key();
+                /* Map category to its protocols */
+                if (category_name == "ARP") {
+                    enabled_protocols.insert("ARP");
+                    enabled_protocols.insert("RARP");
+                } else if (category_name == "ICMP") {
+                    enabled_protocols.insert("ICMP");
+                    enabled_protocols.insert("ICMPv6");
+                } else if (category_name == "TCP") {
+                    enabled_protocols.insert("TCP");
+                } else if (category_name == "UDP") {
+                    enabled_protocols.insert("UDP");
+                } else if (category_name == "Infrastructure") {
+                    enabled_protocols.insert("OSPF");
+                    enabled_protocols.insert("BGP");
+                    enabled_protocols.insert("RIP");
+                    enabled_protocols.insert("RIPv2");
+                    enabled_protocols.insert("EIGRP");
+                    enabled_protocols.insert("ISIS");
+                    enabled_protocols.insert("IS-IS");
+                    enabled_protocols.insert("IGMP");
+                    enabled_protocols.insert("IGMPv2");
+                    enabled_protocols.insert("IGMPv3");
+                    enabled_protocols.insert("PIM");
+                    enabled_protocols.insert("VRRP");
+                    enabled_protocols.insert("HSRP");
+                    enabled_protocols.insert("SCTP");
+                    enabled_protocols.insert("DCCP");
+                } else if (category_name == "Unknown") {
+                    enabled_protocols.insert("Unknown");
+                    enabled_protocols.insert("IP");
+                    enabled_protocols.insert("IPv4");
+                    enabled_protocols.insert("IPv6");
+                    enabled_protocols.insert("Ethernet");
+                }
+            }
+        }
+        /* If all enabled categories are checked, use empty set to show all (more efficient) */
+        guint enabled_count = 0;
+        guint checked_count = 0;
+        for (auto it = m_protocolCheckboxes.begin(); it != m_protocolCheckboxes.end(); ++it) {
+            if (it.value()->isEnabled()) {
+                enabled_count++;
+                if (it.value()->isChecked()) {
+                    checked_count++;
+                }
+            }
+        }
+        if (enabled_count > 0 && checked_count == enabled_count) {
+            enabled_protocols.clear();  /* Empty set = show all */
+        }
+        m_circleWidget->setProtocolFilter(enabled_protocols);
+    }
+}
+
+/* Slot implementations */
+void MainWindow::onTop10Clicked() { m_topN = 10; m_top25Btn->setChecked(false); m_top50Btn->setChecked(false); updateViews(); }
+void MainWindow::onTop25Clicked() { m_topN = 25; m_top10Btn->setChecked(false); m_top50Btn->setChecked(false); updateViews(); }
+void MainWindow::onTop50Clicked() { m_topN = 50; m_top10Btn->setChecked(false); m_top25Btn->setChecked(false); updateViews(); }
+void MainWindow::onLineThicknessToggled(bool checked) 
+{ 
+    if (m_circleWidget) {
+        m_circleWidget->setShowLineThickness(checked ? TRUE : FALSE);
+    }
+}
+
+void MainWindow::onPacketsToggled(bool checked) { if (checked) { m_useBytes = FALSE; updateViews(); } }
+void MainWindow::onBytesToggled(bool checked) { if (checked) { m_useBytes = TRUE; updateViews(); } }
+void MainWindow::onCircleViewToggled(bool checked) { if (checked) m_viewStack->setCurrentIndex(0); }
+void MainWindow::onTableViewToggled(bool checked) { if (checked) m_viewStack->setCurrentIndex(1); }
+void MainWindow::onMACToggled(bool checked) {
+    if (checked) {
+        m_useMAC = TRUE;
+        updateSearchBarForMode();
+        /* Trigger re-analysis when switching to MAC */
+        circle_vis_reload_data();
+    }
+}
+void MainWindow::onIPToggled(bool checked) {
+    if (checked) {
+        m_useMAC = FALSE;
+        updateSearchBarForMode();
+        /* Trigger re-analysis when switching to IP */
+        circle_vis_reload_data();
+    }
+}
+
+void MainWindow::resizeEvent(QResizeEvent *event)
+{
+    QMainWindow::resizeEvent(event);
+    relayoutControls();
+}
+
+void MainWindow::relayoutControls()
+{
+    /* Responsive: merge row1 + row2 into single row if window is wide enough */
+    /* For now, the two-row layout always shows both rows */
+    /* Both rows are visible - they will wrap content naturally via QHBoxLayout */
+}
+
+void MainWindow::onLineClicked(comm_pair_t *pair, const QPoint &globalPos)
+{
+    if (!pair || !pair->src_addr || !pair->dst_addr)
+        return;
+
+    /* Close existing popup if any.
+     * m_connectionPopup is a QPointer: it auto-nulls when the widget is
+     * destroyed (via deleteLater from the auto-close timer).               */
+    if (m_connectionPopup) {
+        m_connectionPopup->hide();
+        m_connectionPopup->deleteLater();
+        m_connectionPopup = nullptr;
+    }
+
+    /* Find the reverse pair (B→A) so the popup can merge port data from
+     * both directions for a complete view.  Search through the same pair
+     * list that the circle widget uses.                                     */
+    comm_pair_t *reversePair = nullptr;
+    if (m_circle_pairs) {
+        for (GList *iter = m_circle_pairs; iter; iter = iter->next) {
+            comm_pair_t *p = (comm_pair_t *)iter->data;
+            if (!p || !p->src_addr || !p->dst_addr) continue;
+            if (p == pair) continue;  /* skip self */
+            if (g_strcmp0(p->src_addr, pair->dst_addr) == 0 &&
+                g_strcmp0(p->dst_addr, pair->src_addr) == 0) {
+                reversePair = p;
+                break;
+            }
+        }
+    }
+
+    /* Create new connection popup with both directions */
+    m_connectionPopup = new ConnectionPopup(pair, reversePair, m_useMAC, this);
+    
+    /* Position near the click point, offset slightly so cursor isn't on the popup */
+    QPoint popupPos = globalPos + QPoint(10, 10);
+    
+    /* Ensure popup stays on screen */
+    QScreen *screen = QApplication::screenAt(globalPos);
+    if (screen) {
+        QRect screenGeom = screen->availableGeometry();
+        QSize popupSize = m_connectionPopup->sizeHint();
+        if (popupPos.x() + popupSize.width() > screenGeom.right()) {
+            popupPos.setX(globalPos.x() - popupSize.width() - 10);
+        }
+        if (popupPos.y() + popupSize.height() > screenGeom.bottom()) {
+            popupPos.setY(globalPos.y() - popupSize.height() - 10);
+        }
+    }
+    
+    m_connectionPopup->move(popupPos);
+    m_connectionPopup->show();
+}
+
+void MainWindow::onSelectAllClicked()
+{
+    /* Temporarily disconnect signal to avoid multiple update calls */
+    disconnect(m_pairListWidget, &QListWidget::itemChanged, this, &MainWindow::onPairListItemChanged);
+    
+    /* Check all pairs in the list to make them visible */
+    QSet<QListWidgetItem*> processed;  /* Track processed items to avoid double-processing linked pairs */
+    
+    for (int i = 0; i < m_pairListWidget->count(); i++) {
+        QListWidgetItem *item = m_pairListWidget->item(i);
+        if (!item || processed.contains(item))
+            continue;
+        
+        item->setCheckState(Qt::Checked);
+        processed.insert(item);
+        
+        /* If linked, also check the linked item */
+        if (m_linkedPairs.contains(item)) {
+            QListWidgetItem *linked = m_linkedPairs[item];
+            linked->setCheckState(Qt::Checked);
+            processed.insert(linked);
+        }
+    }
+    
+    /* Reconnect signal */
+    connect(m_pairListWidget, &QListWidget::itemChanged, this, &MainWindow::onPairListItemChanged);
+    
+    /* Sync table checkboxes and refresh */
+    syncTableCheckboxesFromPairList();
+    updateVisiblePairsFromWidgets();
+    if (m_circleWidget) {
+        m_circleWidget->update();
+    }
+}
+
+void MainWindow::onSelectSearchResultsClicked()
+{
+    if (m_highlightedPairItems.isEmpty())
+        return;
+
+    /* Temporarily disconnect signal to avoid multiple update calls */
+    disconnect(m_pairListWidget, &QListWidget::itemChanged, this, &MainWindow::onPairListItemChanged);
+
+    QSet<int> highlighted(m_highlightedPairItems.begin(), m_highlightedPairItems.end());
+    QSet<QListWidgetItem*> processed;
+
+    for (int i = 0; i < m_pairListWidget->count(); i++) {
+        QListWidgetItem *item = m_pairListWidget->item(i);
+        if (!item || processed.contains(item))
+            continue;
+
+        bool isMatch = highlighted.contains(i);
+        Qt::CheckState state = isMatch ? Qt::Checked : Qt::Unchecked;
+        item->setCheckState(state);
+        processed.insert(item);
+
+        /* Also set linked pair to the same state */
+        if (m_linkedPairs.contains(item)) {
+            QListWidgetItem *linked = m_linkedPairs[item];
+            linked->setCheckState(state);
+            processed.insert(linked);
+        }
+    }
+
+    /* Reconnect signal */
+    connect(m_pairListWidget, &QListWidget::itemChanged, this, &MainWindow::onPairListItemChanged);
+
+    /* Sync table checkboxes and refresh */
+    syncTableCheckboxesFromPairList();
+    updateVisiblePairsFromWidgets();
+    if (m_circleWidget) {
+        m_circleWidget->update();
+    }
+}
+
+void MainWindow::onSelectNoneClicked()
+{
+    /* Temporarily disconnect signal to avoid multiple update calls */
+    disconnect(m_pairListWidget, &QListWidget::itemChanged, this, &MainWindow::onPairListItemChanged);
+    
+    /* Uncheck all pairs in the list to hide them */
+    QSet<QListWidgetItem*> processed;  /* Track processed items to avoid double-processing linked pairs */
+    
+    for (int i = 0; i < m_pairListWidget->count(); i++) {
+        QListWidgetItem *item = m_pairListWidget->item(i);
+        if (!item || processed.contains(item))
+            continue;
+        
+        item->setCheckState(Qt::Unchecked);
+        processed.insert(item);
+        
+        /* If linked, also uncheck the linked item */
+        if (m_linkedPairs.contains(item)) {
+            QListWidgetItem *linked = m_linkedPairs[item];
+            linked->setCheckState(Qt::Unchecked);
+            processed.insert(linked);
+        }
+    }
+    
+    /* Reconnect signal */
+    connect(m_pairListWidget, &QListWidget::itemChanged, this, &MainWindow::onPairListItemChanged);
+    
+    /* Sync table checkboxes and refresh */
+    syncTableCheckboxesFromPairList();
+    updateVisiblePairsFromWidgets();
+    if (m_circleWidget) {
+        m_circleWidget->update();
+    }
+}
+
+void MainWindow::onHelpClicked()
+{
+    /* Use custom QDialog instead of QMessageBox for full size control */
+    QDialog *helpDialog = new QDialog(this);
+helpDialog->setWindowTitle("Help - PacketCircle v.0.4.0");
+    helpDialog->setMinimumSize(600, 400);
+    helpDialog->resize(900, 650);
+    /* Make dialog resizable */
+    helpDialog->setSizeGripEnabled(true);
+    
+    QVBoxLayout *layout = new QVBoxLayout(helpDialog);
+    
+    /* Create QTextEdit for rich text display with proper sizing */
+    QTextEdit *textEdit = new QTextEdit(helpDialog);
+    textEdit->setReadOnly(true);
+    textEdit->setMinimumWidth(500);
+    textEdit->setMinimumHeight(300);
+    
+    /* Use plain text formatting - no bold for descriptions, only titles */
+    textEdit->setHtml(
+        "<style>"
+        "h2 { font-weight: bold; margin-top: 10px; margin-bottom: 15px; }"
+        "h3 { font-weight: bold; margin-top: 15px; margin-bottom: 10px; }"
+        "p { font-weight: normal; margin-top: 8px; margin-bottom: 8px; line-height: 1.4; }"
+        "li { font-weight: normal; margin-top: 6px; margin-bottom: 6px; }"
+        "</style>"
+        "<h2>PacketCircle Help</h2>"
+
+        "<h3>Toolbar Controls:</h3>"
+        "<p style='margin-left: 0; padding-left: 0; font-weight: normal;'>"
+        "• <b>Top 10/25/50</b>: Limit display to top N communication pairs<br/>"
+        "• <b>Weight</b>: Enable/disable line weight variation based on traffic volume<br/>"
+        "• <b>Packets/Bytes</b>: Sort pairs by packet count or byte count<br/>"
+        "• <b>Circle/Table</b>: Switch between circular visualization and table view<br/>"
+        "• <b>MAC/IP</b>: Display MAC address pairs or IP address pairs<br/>"
+        "• <b>?</b> (top right): Open this help window"
+        "</p>"
+
+        "<h3>Action Buttons:</h3>"
+        "<p style='margin-left: 0; padding-left: 0; font-weight: normal;'>"
+        "• <b>Select All / Select None</b>: Show or hide all communication pairs<br/>"
+        "• <b>Select Results</b>: Select only the communication pairs matching the current search (enabled after a search produces results)<br/>"
+        "• <b>Filter</b>: Apply selected pairs as a Wireshark display filter (directional — filters by exact source→destination)<br/>"
+        "• <b>Clear</b>: Select all pairs, clear the Wireshark display filter, and show all packets<br/>"
+        "• <b>Reload</b>: Re-analyze current capture file (respects active Wireshark display filter)<br/>"
+        "• <b>PDF</b>: Export a one-page PDF report containing the circle visualization and IP pair table"
+        "</p>"
+
+        "<h3>Search & Highlighting:</h3>"
+        "<p style='font-weight: normal;'>The search bar supports several query types. "
+        "Press <b>Enter</b> to search; matching nodes flash red in the circle and the pair list blinks in sync.</p>"
+        "<p style='margin-left: 0; padding-left: 0; font-weight: normal;'>"
+        "• <b>IP address</b> (partial): e.g. <code>192.168</code> or <code>10.0.0.1</code><br/>"
+        "• <b>CIDR range</b>: e.g. <code>10.0.0.0/8</code> or <code>172.16.0.0/12</code><br/>"
+        "• <b>MAC address</b> (partial, in MAC mode): e.g. <code>aa:bb</code> or <code>00:1a:2b</code><br/>"
+        "• <b>TCP port</b>: e.g. <code>TCP 443</code> or <code>tcp 23</code> — highlights all pairs that use the specified TCP port<br/>"
+        "• <b>UDP port</b>: e.g. <code>UDP 53</code> or <code>udp 5060</code> — highlights all pairs that use the specified UDP port"
+        "</p>"
+        "<p style='font-weight: normal;'>Port search works by inspecting the per-pair connection table (same data shown when clicking a line). "
+        "It checks both directions of a communication pair. Clear the search box to remove all highlights.</p>"
+
+        "<h3>Wi-Fi Monitor Mode:</h3>"
+        "<p style='font-weight: normal;'>When a Wi-Fi monitor-mode capture is loaded (radiotap / 802.11), "
+        "PacketCircle automatically switches to <b>Wi-Fi mode</b>. The MAC/IP toggle is hidden (Wi-Fi always uses MAC addresses), "
+        "and connection colors reflect signal strength (RSSI) instead of protocol.</p>"
+        "<p style='font-weight: normal;'>The <b>RSSI legend</b> at the bottom shows four signal quality bins:</p>"
+        "<p style='margin-left: 0; padding-left: 0; font-weight: normal;'>"
+        "• <b>Excellent</b>: &ge; &minus;55 dBm (green)<br/>"
+        "• <b>Good</b>: &minus;65 to &minus;56 dBm (yellow-green)<br/>"
+        "• <b>Fair</b>: &minus;75 to &minus;66 dBm (orange)<br/>"
+        "• <b>Poor</b>: &lt; &minus;75 dBm (red)"
+        "</p>"
+        "<p style='font-weight: normal;'>Node tooltips show Wi-Fi details: SSID, BSSID, channel, average/min/max RSSI, and retry count.</p>"
+        "<h3>Wi-Fi Search Keywords:</h3>"
+        "<p style='font-weight: normal;'>In Wi-Fi mode the search bar accepts additional query types:</p>"
+        "<p style='margin-left: 0; padding-left: 0; font-weight: normal;'>"
+        "• <b>SSID</b> (partial): e.g. <code>MyNetwork</code> — highlights all station↔AP pairs associated with a matching SSID<br/>"
+        "• <b>BSSID / MAC</b> (partial): e.g. <code>aa:bb:cc</code> — matches the raw MAC, the BSSID field, or the SSID<br/>"
+        "• <b>ap</b>: highlights all access-point (BSSID) nodes in the circle<br/>"
+        "• <b>excellent</b> / <b>good</b> / <b>fair</b> / <b>poor</b>: highlights pairs whose average RSSI falls in the corresponding bin"
+        "</p>"
+
+        "<h3>Connection Details (Line Click):</h3>"
+        "<p style='font-weight: normal;'>Click any communication line in the circle to open a "
+        "<b>Connection Details</b> popup showing the port/socket breakdown for that pair. "
+        "Data is aggregated from both directions (A→B and B→A).</p>"
+        "<p style='margin-left: 0; padding-left: 0; font-weight: normal;'>"
+        "• <b>Protocol</b>: Transport protocol for each port (TCP, UDP, or TCP+UDP), detected per-port<br/>"
+        "• <b>Port</b>: Destination port number<br/>"
+        "• <b>Service</b>: Well-known service name (HTTP, HTTPS, SSH, Telnet, DNS, SMB, etc.)<br/>"
+        "• <b>Packets</b>: Number of packets observed on that port<br/>"
+        "• <b>% of Total</b>: Share of total traffic for the pair"
+        "</p>"
+        "<p style='font-weight: normal;'><b>Right-click</b> a row in the popup to access:</p>"
+        "<p style='margin-left: 0; padding-left: 0; font-weight: normal;'>"
+        "• <b>Apply Filter in Wireshark</b>: Sets a bidirectional display filter matching both addresses "
+        "and the selected port. Uses <code>ip.addr</code> / <code>eth.addr</code> for addresses "
+        "and <code>tcp.port</code> or <code>udp.port</code> for the port.<br/>"
+        "• <b>Follow TCP Stream</b>: Opens Wireshark's TCP stream reassembly dialog for that connection (TCP only).<br/>"
+        "• <b>TCP Throughput Graph</b>: Opens Wireshark's TCP throughput time-series graph for the selected stream (TCP only).<br/>"
+        "• <b>TCP Round-Trip Time Graph</b>: Opens Wireshark's TCP RTT graph for the selected stream (TCP only).<br/>"
+        "• <b>Protocol Info</b> (port-dependent): Opens a detailed protocol information dialog — see below."
+        "</p>"
+        "<p style='font-weight: normal;'>The popup auto-closes when the mouse leaves it. "
+        "It remains open while a right-click context menu is active.</p>"
+
+        "<h3>Protocol Information Dialogs:</h3>"
+        "<p style='font-weight: normal;'>When you right-click a row in the Connection Details popup, "
+        "port-specific protocol information options appear based on the destination port. "
+        "Each dialog extracts and displays deep protocol details from the captured packets.</p>"
+        "<p style='margin-left: 0; padding-left: 0; font-weight: normal;'>"
+        "• <b>TLS/SSL Info</b> (ports 443, 465, 993, 995, 8443): Certificate details (subject, issuer, validity, SANs), "
+        "negotiated cipher suites, TLS version, ALPN, SNI, and JA3/JA4 fingerprints.<br/>"
+        "• <b>HTTP Info</b> (ports 80, 8080, 8000, 8888): Request/response headers, methods, status codes, URIs, "
+        "content types, server info, cookies, and user agents.<br/>"
+        "• <b>SMB/CIFS &amp; DCE/RPC Info</b> (ports 445, 139): Share names, file operations, tree operations, "
+        "named pipe access, DCE/RPC interface UUIDs, and operation names.<br/>"
+        "• <b>Kerberos Info</b> (port 88): Ticket details (TGT/TGS), client and server principals, realms, "
+        "encryption types, pre-authentication data, and service principal names.<br/>"
+        "• <b>Email Info</b> (ports 25, 110, 143, 587, 993, 995): SMTP senders/recipients/subjects, "
+        "IMAP mailbox operations, POP3 commands, server responses, and authentication methods.<br/>"
+        "• <b>SQL Database Info</b> (ports 1433, 3306, 5432): Queries, database/schema names, authentication details, "
+        "server version, application name, command/response statistics, and error messages. "
+        "Supports MSSQL/TDS, MySQL/MariaDB, and PostgreSQL.<br/>"
+        "• <b>VoIP/SIP Info</b> (ports 5060, 5061): SIP Call-IDs, method and status code counts, "
+        "From/To addresses, user agents, RTP payload types and SSRCs, setup methods, and H.223 mux entries."
+        "</p>"
+
+        "<h3>Filtering:</h3>"
+        "<p style='font-weight: normal;'>The <b>Filter</b> button applies a Wireshark display filter for the currently checked pairs. "
+        "Each pair is filtered by its exact direction — selecting only \"A → B\" filters to packets where A is the source "
+        "and B is the destination. To see both directions, check both \"A → B\" and \"B → A\".</p>"
+        "<p style='font-weight: normal;'>The <b>Clear</b> button resets everything: selects all pairs "
+        "and sends an empty display filter to Wireshark so all packets are visible again.</p>"
+        "<p style='font-weight: normal;'>Filters applied from the connection popup use <b>bidirectional</b> address matching "
+        "so traffic in both directions is always included.</p>"
+
+        "<h3>Protocol Legend (standard mode):</h3>"
+        "<p style='font-weight: normal;'>In standard (non-Wi-Fi) mode, the protocol legend at the bottom shows protocol categories with checkboxes:</p>"
+        "<p style='margin-left: 0; padding-left: 0; font-weight: normal;'>"
+        "• <b>ARP</b>: Address Resolution Protocol (ARP, RARP)<br/>"
+        "• <b>ICMP</b>: Internet Control Message Protocol (ICMP, ICMPv6)<br/>"
+        "• <b>TCP</b>: Transmission Control Protocol<br/>"
+        "• <b>UDP</b>: User Datagram Protocol<br/>"
+        "• <b>Infra</b>: Routing and infrastructure protocols (OSPF, BGP, RIP, EIGRP, ISIS, IGMP, PIM, VRRP, HSRP, SCTP, DCCP)<br/>"
+        "• <b>Unknown</b>: Unidentified or generic protocols (IP, IPv4, IPv6, Ethernet)"
+        "</p>"
+        "<p style='font-weight: normal;'>Uncheck a protocol category to hide its connections in the circle view. "
+        "Protocols not found in the current capture show a dash (N/A). "
+        "Mixed TCP+UDP pairs display as alternating dotted lines.</p>"
+
+        "<h3>Node Pair List:</h3>"
+        "<p style='font-weight: normal;'>Checkboxes control visibility of communication lines in the circle. "
+        "Pairs with traffic in both directions (A→B and B→A) are grouped with linked checkboxes. "
+        "Long hostnames and addresses are automatically truncated with \"...\" to fit the available panel width — "
+        "drag the splitter between the circle and the list to resize.</p>"
+
+        "<h3>Node Tooltips:</h3>"
+        "<p style='font-weight: normal;'>Hover over a node in the circle to see detailed information:</p>"
+        "<p style='margin-left: 0; padding-left: 0; font-weight: normal;'>"
+        "• MAC and IP address<br/>"
+        "• Bytes and packets sent/received<br/>"
+        "• Services (target ports): A list of destination ports targeted on this node, "
+        "sorted by packet count. Well-known ports are resolved to service names "
+        "(e.g. HTTP/80, HTTPS/443, SMB/445, SSH/22, DNS/53, RDP/3389, etc.)."
+        "</p>"
+
+        "<h3>PDF Export:</h3>"
+        "<p style='font-weight: normal;'>Click the <b>PDF</b> button to generate a one-page A4 landscape report containing:</p>"
+        "<p style='margin-left: 0; padding-left: 0; font-weight: normal;'>"
+        "• Header with the PacketCircle logo and report title<br/>"
+        "• An introduction describing the analysis parameters<br/>"
+        "• The circle visualization (rendered with a white background and darkened colors for print)<br/>"
+        "• A table of all IP pairs with source, destination, packet count, and byte count"
+        "</p>"
+
+        "<h3>Preferences:</h3>"
+        "<p style='font-weight: normal;'>PacketCircle automatically saves your preferences to "
+        "<code>~/.PacketCircle/settings.ini</code>. The following settings are remembered between sessions:</p>"
+        "<p style='margin-left: 0; padding-left: 0; font-weight: normal;'>"
+        "• Window position and size<br/>"
+        "• Splitter position (circle vs. pair list width)<br/>"
+        "• Top N selection (10/25/50)<br/>"
+        "• Packets vs. Bytes mode<br/>"
+        "• MAC vs. IP mode<br/>"
+        "• Circle vs. Table view<br/>"
+        "• Line weight checkbox state"
+        "</p>"
+    );
+    
+    /* Footer row: "Built with..." label + OK button side by side */
+    QHBoxLayout *footerRow = new QHBoxLayout();
+    footerRow->setContentsMargins(0, 2, 0, 0);
+
+    QLabel *footerLabel = new QLabel(helpDialog);
+    footerLabel->setText(
+        QString::fromUtf8("Built with \xe2\x9d\xa4\xef\xb8\x8f for the network analysis community \u2014 "
+        "<a href=\"https://github.com/netwho/PacketCircle\">https://github.com/netwho/PacketCircle</a>")
+    );
+    footerLabel->setOpenExternalLinks(true);
+    footerLabel->setStyleSheet(m_darkTheme ? "color: #888; font-size: 11px;" : "color: #999; font-size: 11px;");
+
+    QPushButton *okButton = new QPushButton("OK", helpDialog);
+    connect(okButton, &QPushButton::clicked, helpDialog, &QDialog::accept);
+
+    footerRow->addWidget(footerLabel, 1);
+    footerRow->addWidget(okButton, 0);
+
+    layout->addWidget(textEdit);
+    layout->addLayout(footerRow);
+    
+    helpDialog->exec();
+    delete helpDialog;
+}
+
+void MainWindow::onApplyFilterClicked()
+{
+    QString filter = createFilterString();
+    if (filter.isEmpty()) {
+        QMessageBox::warning(this, "No Selection", 
+                            "Please select communication pairs to filter.");
+        return;
+    }
+
+    QByteArray filter_bytes = filter.toUtf8();
+    plugin_if_apply_filter(filter_bytes.constData(), true);
+}
+
+void MainWindow::onClearFilterClicked()
+{
+    /* Select all pairs to show all connections in the circle */
+    onSelectAllClicked();
+
+    /* Apply an empty filter to Wireshark to clear the display filter and show all packets */
+    plugin_if_apply_filter("", true);
+}
+
+void MainWindow::onSavePDFClicked()
+{
+    /* Ask user where to save */
+    QString defaultName = QString("PacketCircle_Report_%1.pdf")
+                              .arg(QDateTime::currentDateTime().toString("yyyyMMdd_HHmmss"));
+    QString filePath = QFileDialog::getSaveFileName(this, "Save PDF Report", defaultName, "PDF Files (*.pdf)");
+    if (filePath.isEmpty())
+        return;
+
+    /* --- Setup PDF writer (A4 landscape) --- */
+    QPdfWriter writer(filePath);
+    writer.setPageSize(QPageSize(QPageSize::A4));
+    writer.setPageOrientation(QPageLayout::Landscape);
+    writer.setResolution(300);  /* 300 DPI for crisp output */
+    writer.setPageMargins(QMarginsF(15, 15, 15, 15), QPageLayout::Millimeter);
+
+    QPainter painter(&writer);
+    if (!painter.isActive()) {
+        QMessageBox::warning(this, "PDF Error", "Failed to create PDF file.");
+        return;
+    }
+
+    int pageW = writer.width();
+    int pageH = writer.height();
+    int dpi = writer.resolution();
+
+    /* Helper: mm to device units */
+    auto mm = [dpi](double millimeters) -> int { return (int)(millimeters * dpi / 25.4); };
+
+    /* ===== HEADER: Logo + Title ===== */
+    int headerY = 0;
+
+    /* Load logo from embedded resource */
+    QPixmap logo(":/packetcircle/PacketCircle.png");
+    int logoH = mm(18);
+    if (!logo.isNull()) {
+        QPixmap scaled = logo.scaledToHeight(logoH, Qt::SmoothTransformation);
+        painter.drawPixmap(0, headerY, scaled);
+        /* Title to the right of the logo */
+        int textX = scaled.width() + mm(4);
+        QFont titleFont("Helvetica", 28, QFont::Bold);
+        painter.setFont(titleFont);
+        painter.setPen(Qt::black);
+        painter.drawText(textX, headerY, pageW - textX, logoH, Qt::AlignVCenter | Qt::AlignLeft, "PacketCircle Report");
+    } else {
+        /* No logo — just title */
+        QFont titleFont("Helvetica", 28, QFont::Bold);
+        painter.setFont(titleFont);
+        painter.setPen(Qt::black);
+        painter.drawText(0, headerY, pageW, logoH, Qt::AlignVCenter | Qt::AlignLeft, "PacketCircle Report");
+    }
+
+    headerY += logoH + mm(3);
+
+    /* Thin separator line */
+    painter.setPen(QPen(QColor(180, 180, 180), mm(0.3)));
+    painter.drawLine(0, headerY, pageW, headerY);
+    headerY += mm(4);
+
+    /* ===== INTRO TEXT ===== */
+    QFont introFont("Helvetica", 10);
+    painter.setFont(introFont);
+    painter.setPen(Qt::black);
+
+    QString intro = QString(
+        "This report was generated by the PacketCircle Wireshark plugin on %1. "
+        "It visualizes the top %2 communication pairs from the analysed capture, "
+        "sorted by %3. The circle diagram on the left shows network endpoints as nodes "
+        "with connections colored by protocol. The table on the right lists each "
+        "directional IP pair with packet and byte counts."
+    ).arg(QDateTime::currentDateTime().toString("yyyy-MM-dd HH:mm:ss"))
+     .arg(m_topN)
+     .arg(m_useBytes ? "byte volume" : "packet count");
+
+    QRect introRect(0, headerY, pageW, mm(30));
+    QRect introBound;
+    painter.drawText(introRect, Qt::AlignLeft | Qt::TextWordWrap, intro, &introBound);
+    headerY = introBound.bottom() + mm(5);
+
+    /* ===== MAIN CONTENT: Circle (left) + IP Pair List (right) ===== */
+    int footerH = mm(8);  /* Reserve space for footer */
+    int contentH = pageH - headerY - footerH;
+    int circleW = (int)(pageW * 0.62);
+    int listX = circleW + mm(3);
+    int listW = pageW - listX;
+
+    /* --- Render Circle visualization with PDF-optimized colors --- */
+    if (m_circleWidget) {
+        /* Render at high resolution with white background and dark colors */
+        int renderSize = 2000;  /* Large render for crisp output */
+        QPixmap circlePixmap = m_circleWidget->renderForPDF(renderSize, renderSize);
+        if (!circlePixmap.isNull()) {
+            /* Scale to fit the left area while keeping aspect ratio */
+            QPixmap scaled = circlePixmap.scaled(circleW, contentH, Qt::KeepAspectRatio, Qt::SmoothTransformation);
+            /* Center vertically in the left area */
+            int cy = headerY + (contentH - scaled.height()) / 2;
+            painter.drawPixmap(0, cy, scaled);
+        }
+    }
+
+    /* --- Render IP Pair List as a table --- */
+    QFont tableHeaderFont("Helvetica", 9, QFont::Bold);
+    QFont tableFont("Courier", 8);
+    QFontMetrics thfm(tableHeaderFont, &writer);
+    QFontMetrics tfm(tableFont, &writer);
+    int rowH = tfm.height() + mm(1.5);
+    int tableY = headerY;
+
+    /* Column widths — account for left padding mm(1) so columns fit within listW */
+    int tablePad = mm(1);
+    int usableW = listW - tablePad - mm(1);  /* left pad + right pad */
+    int colSrc = (int)(usableW * 0.28);
+    int colDst = (int)(usableW * 0.28);
+    int colPkts = (int)(usableW * 0.20);
+    int colBytes = usableW - colSrc - colDst - colPkts;
+
+    /* Draw table header background */
+    painter.setPen(Qt::NoPen);
+    painter.setBrush(QColor(60, 60, 60));
+    int headerRowH = thfm.height() + mm(2);
+    painter.drawRect(listX, tableY, listW, headerRowH);
+
+    /* Draw table header text */
+    painter.setPen(Qt::white);
+    painter.setFont(tableHeaderFont);
+    int tx = listX + mm(1);
+    int textVCenter = tableY + (headerRowH - thfm.height()) / 2;
+    painter.drawText(tx, textVCenter, colSrc, headerRowH, Qt::AlignVCenter, "Source");
+    tx += colSrc;
+    painter.drawText(tx, textVCenter, colDst, headerRowH, Qt::AlignVCenter, "Destination");
+    tx += colDst;
+    painter.drawText(tx, textVCenter, colPkts, headerRowH, Qt::AlignVCenter | Qt::AlignRight, "Packets");
+    tx += colPkts;
+    painter.drawText(tx, textVCenter, colBytes, headerRowH, Qt::AlignVCenter | Qt::AlignRight, "Bytes");
+
+    tableY += headerRowH;
+
+    /* Draw data rows from pair list */
+    painter.setFont(tableFont);
+    int rowCount = 0;
+    int tableBottom = headerY + contentH;  /* Don't grow past the footer area */
+    int maxRows = (tableBottom - tableY) / rowH;
+
+    for (int i = 0; i < m_pairListWidget->count() && rowCount < maxRows; i++) {
+        QListWidgetItem *item = m_pairListWidget->item(i);
+        if (!item)
+            continue;
+
+        comm_pair_t *pair = (comm_pair_t *)item->data(Qt::UserRole).value<void*>();
+        if (!pair)
+            continue;
+
+        /* Alternating row background */
+        if (rowCount % 2 == 0) {
+            painter.setPen(Qt::NoPen);
+            painter.setBrush(QColor(240, 240, 240));
+            painter.drawRect(listX, tableY, listW, rowH);
+        }
+
+        painter.setPen(Qt::black);
+        tx = listX + mm(1);
+        /* Use resolved names in the PDF table for display */
+        QString src = pair->resolved_src ? QString::fromUtf8(pair->resolved_src) : QString::fromUtf8(pair->src_addr);
+        QString dst = pair->resolved_dst ? QString::fromUtf8(pair->resolved_dst) : QString::fromUtf8(pair->dst_addr);
+        painter.drawText(tx, tableY, colSrc, rowH, Qt::AlignVCenter, src);
+        tx += colSrc;
+        painter.drawText(tx, tableY, colDst, rowH, Qt::AlignVCenter, dst);
+        tx += colDst;
+        painter.drawText(tx, tableY, colPkts - mm(1), rowH, Qt::AlignVCenter | Qt::AlignRight,
+                         QString::number(pair->packet_count));
+        tx += colPkts;
+        painter.drawText(tx, tableY, colBytes - mm(1), rowH, Qt::AlignVCenter | Qt::AlignRight,
+                         QString::number(pair->byte_count));
+
+        tableY += rowH;
+        rowCount++;
+    }
+
+    /* Table border */
+    painter.setPen(QPen(QColor(180, 180, 180), mm(0.2)));
+    painter.setBrush(Qt::NoBrush);
+    painter.drawRect(listX, headerY, listW, tableY - headerY);
+
+    /* ===== FOOTER ===== */
+    QFont footerFont("Helvetica", 7);
+    painter.setFont(footerFont);
+    painter.setPen(QColor(140, 140, 140));
+    QFontMetrics ffm(footerFont, &writer);
+    int footerTextH = ffm.height();
+    painter.drawText(0, pageH - footerTextH - mm(1), pageW, footerTextH, Qt::AlignCenter,
+QString("Generated by PacketCircle v.0.4.0 — %1")
+                         .arg(QDateTime::currentDateTime().toString("yyyy-MM-dd HH:mm:ss")));
+
+    painter.end();
+
+    QMessageBox::information(this, "PDF Saved", QString("Report saved to:\n%1").arg(filePath));
+}
+
+void MainWindow::onReloadDataClicked()
+{
+    qDebug() << "MainWindow::onReloadDataClicked: Reloading data";
+    /* Call the bridge function to reload data from current capture file */
+    circle_vis_reload_data();
+}
+
+void MainWindow::updateSearchBarForMode()
+{
+    if (!m_searchLabel || !m_searchLineEdit) return;
+
+    if (m_useMAC) {
+        m_searchLabel->setText("Search MAC");
+        m_searchLineEdit->setPlaceholderText("Partial MAC (e.g., aa:bb or 00:1a:2b)");
+    } else {
+        m_searchLabel->setText("Search");
+        m_searchLineEdit->setPlaceholderText("IP, CIDR, or port (e.g., 10.0.0.0/24, TCP 443, UDP 53)");
+    }
+    /* Clear current search when switching modes */
+    m_searchLineEdit->clear();
+}
+
+bool MainWindow::isMACAddress(const QString &address)
+{
+    QStringList parts = address.split(':');
+    if (parts.size() != 6) return false;
+    for (const QString &p : parts) {
+        if (p.length() != 2) return false;
+    }
+    return true;
+}
+
+/* Truncate a display string to a maximum character count, keeping
+ * the beginning and end visible with "..." in between.
+ * E.g. "very-long-hostname.example.com" → "very-l...le.com" */
+static QString truncateDisplayName(const QString &name, int maxChars)
+{
+    if (name.length() <= maxChars || maxChars < 8)
+        return name;
+    int keepEnd = qMax(4, maxChars / 3);
+    int keepStart = maxChars - keepEnd - 3;  /* 3 for "..." */
+    if (keepStart < 3) keepStart = 3;
+    return name.left(keepStart) + "..." + name.right(keepEnd);
+}
+
+void MainWindow::refreshPairListText()
+{
+    if (!m_pairListWidget || m_pairListWidget->count() == 0)
+        return;
+
+    /* Determine available width for text */
+    int listWidth = m_pairListWidget->viewport()->width();
+    QFontMetrics fm(m_pairListWidget->font());
+
+    /* Reserve space for checkbox (~30px) + arrow " → " + safety margin */
+    int reservedPx = fm.horizontalAdvance(" \xE2\x86\x92 ") + 50;
+    int availablePx = listWidth - reservedPx;
+    if (availablePx < 100) availablePx = 100;
+
+    /* Calculate max characters that fit for each address column (half each) */
+    int charWidth = fm.horizontalAdvance('W');  /* use a wide char for safety */
+    if (charWidth < 1) charWidth = 8;
+    int maxCharsPerAddr = (availablePx / 2) / charWidth;
+    if (maxCharsPerAddr < 8) maxCharsPerAddr = 8;
+
+    /* Build display strings for each item — apply truncation and measure for alignment */
+    struct DisplayEntry {
+        QString src;
+        QString dst;
+    };
+    QVector<DisplayEntry> entries(m_pairListWidget->count());
+    guint max_src_len = 0, max_dst_len = 0;
+
+    for (int i = 0; i < m_pairListWidget->count(); i++) {
+        QListWidgetItem *item = m_pairListWidget->item(i);
+        comm_pair_t *pair = static_cast<comm_pair_t*>(item->data(Qt::UserRole).value<void*>());
+        if (!pair || !pair->src_addr || !pair->dst_addr) continue;
+
+        /* Use resolved names for display */
+        QString src = pair->resolved_src ? QString::fromUtf8(pair->resolved_src) : QString::fromUtf8(pair->src_addr);
+        QString dst = pair->resolved_dst ? QString::fromUtf8(pair->resolved_dst) : QString::fromUtf8(pair->dst_addr);
+
+        /* Apply IPv6/MAC truncation first — skip in Wi-Fi mode to show full MACs */
+        if (!m_wifiMode) {
+            src = truncateIPv6Address(src);
+            dst = truncateIPv6Address(dst);
+        }
+
+        /* Then truncate long names (hostnames, etc.) to fit the available width */
+        src = truncateDisplayName(src, maxCharsPerAddr);
+        dst = truncateDisplayName(dst, maxCharsPerAddr);
+
+        entries[i].src = src;
+        entries[i].dst = dst;
+        if ((guint)src.length() > max_src_len) max_src_len = (guint)src.length();
+        if ((guint)dst.length() > max_dst_len) max_dst_len = (guint)dst.length();
+    }
+
+    /* Update each item's text with aligned columns */
+    for (int i = 0; i < m_pairListWidget->count(); i++) {
+        QListWidgetItem *item = m_pairListWidget->item(i);
+        if (entries[i].src.isEmpty() && entries[i].dst.isEmpty()) continue;
+        QString src = entries[i].src.leftJustified(max_src_len, ' ');
+        QString dst = entries[i].dst.leftJustified(max_dst_len, ' ');
+        item->setText(QString("%1 \xE2\x86\x92 %2").arg(src).arg(dst));
+    }
+}
+
+QString MainWindow::truncateIPv6Address(const QString &address)
+{
+    /* Check if this is an IPv6 address (contains colons, not just dots) */
+    if (!address.contains(':')) {
+        /* IPv4 address - return as is */
+        return address;
+    }
+
+    /* Check if this is a MAC address (exactly 6 groups of 2 hex chars, e.g., aa:bb:cc:dd:ee:ff) */
+    QStringList mac_parts = address.split(':');
+    if (mac_parts.size() == 6) {
+        bool is_mac = true;
+        for (const QString &p : mac_parts) {
+            if (p.length() != 2) { is_mac = false; break; }
+        }
+        if (is_mac) {
+            /* MAC address - abbreviate to first:...:last */
+            return QString("%1:..:%2").arg(mac_parts.first()).arg(mac_parts.last());
+        }
+    }
+    
+    /* IPv6 address - extract first 4 hex digits and last 4 hex digits */
+    /* Remove any leading/trailing brackets (e.g., [2001:db8::1]) */
+    QString addr = address;
+    if (addr.startsWith('[') && addr.endsWith(']')) {
+        addr = addr.mid(1, addr.length() - 2);
+    }
+    
+    /* Split by colons to get hex groups */
+    QStringList parts = addr.split(':');
+    if (parts.isEmpty()) {
+        return address;  /* Invalid format, return original */
+    }
+    
+    /* Get first group (first 4 hex digits) */
+    QString first = parts.first();
+    /* Get last group (last 4 hex digits) */
+    QString last = parts.last();
+    
+    /* Handle compressed IPv6 (::) - if last part is empty, look for last non-empty */
+    if (last.isEmpty() && parts.size() > 1) {
+        for (qsizetype i = parts.size() - 1; i >= 0; i--) {
+            if (!parts[i].isEmpty()) {
+                last = parts[i];
+                break;
+            }
+        }
+    }
+    
+    /* Limit to 4 hex digits each */
+    if (first.length() > 4) {
+        first = first.left(4);
+    }
+    if (last.length() > 4) {
+        last = last.right(4);
+    }
+    
+    /* Return truncated format: first4:...:last4 */
+    return QString("%1:...:%2").arg(first).arg(last);
+}
+
+/* Extract raw MAC from a possibly resolved address like "Cisco_a9:38:40 (00:1b:2b:a9:38:40)" */
+static QString stripResolvedAddr(const QString &addr)
+{
+    /* If it contains "(xx:xx:xx:xx:xx:xx)" or "(x.x.x.x)", grab inside parens */
+    qsizetype lp = addr.lastIndexOf('(');
+    qsizetype rp = addr.lastIndexOf(')');
+    if (lp >= 0 && rp > lp + 1) {
+        return addr.mid(lp + 1, rp - lp - 1);
+    }
+    return addr.trimmed();
+}
+
+QString MainWindow::createFilterString()
+{
+    QList<comm_pair_t*> active_pairs = getActivePairsForFilter();
+    if (active_pairs.isEmpty())
+        return QString();
+
+    QStringList filters;
+    for (comm_pair_t *pair : active_pairs) {
+        QString src = stripResolvedAddr(QString::fromUtf8(pair->src_addr));
+        QString dst = stripResolvedAddr(QString::fromUtf8(pair->dst_addr));
+
+        if (m_wifiMode) {
+            filters << QString("(wlan.addr == %1 && wlan.addr == %2)")
+                       .arg(src).arg(dst);
+        } else if (m_useMAC) {
+            filters << QString("(eth.src == %1 && eth.dst == %2)")
+                       .arg(src).arg(dst);
+        } else {
+            filters << QString("(ip.src == %1 && ip.dst == %2)")
+                       .arg(src).arg(dst);
+        }
+    }
+    return filters.join(" || ");
+}
+
+QList<comm_pair_t*> MainWindow::getActivePairsForFilter() const
+{
+    if (!m_selectedPairs.isEmpty()) {
+        return m_selectedPairs;
+    }
+
+    QList<comm_pair_t*> active_pairs;
+    if (!m_pairListWidget)
+        return active_pairs;
+
+    for (int i = 0; i < m_pairListWidget->count(); i++) {
+        QListWidgetItem *list_item = m_pairListWidget->item(i);
+        if (!list_item)
+            continue;
+        if (list_item->checkState() != Qt::Checked)
+            continue;
+        comm_pair_t *pair = (comm_pair_t *)list_item->data(Qt::UserRole).value<void*>();
+        if (pair) {
+            active_pairs.append(pair);
+        }
+    }
+
+    return active_pairs;
+}
+
+void MainWindow::onPairListBlinkTimer()
+{
+    m_pairListBlinkState = !m_pairListBlinkState;
+    if (m_highlightedPairItems.isEmpty()) {
+        m_pairListBlinkTimer->stop();
+        return;
+    }
+
+    for (int idx : m_highlightedPairItems) {
+        QListWidgetItem *item = m_pairListWidget->item(idx);
+        if (!item) continue;
+
+        if (m_pairListBlinkState) {
+            /* Blink ON: bright red background + white text (matches circle) */
+            item->setBackground(QBrush(QColor(255, 0, 0)));
+            item->setForeground(QBrush(QColor(255, 255, 255)));
+            QFont f = item->font();
+            f.setBold(true);
+            item->setFont(f);
+        } else {
+            /* Blink OFF: restore normal appearance */
+            item->setBackground(QBrush());
+            item->setForeground(QBrush());
+            QFont f = item->font();
+            f.setBold(false);
+            item->setFont(f);
+        }
+    }
+}
+
+void MainWindow::applySearchFilter(const QString &query)
+{
+    QString trimmed = query.trimmed();
+    QSet<QString> highlighted_labels;
+
+    /* Clear old highlights and stop blink timer */
+    m_highlightedPairItems.clear();
+    if (m_pairListBlinkTimer->isActive()) {
+        m_pairListBlinkTimer->stop();
+    }
+    m_pairListBlinkState = false;
+
+    if (trimmed.isEmpty()) {
+        if (m_circleWidget) {
+            m_circleWidget->setHighlightedLabels(highlighted_labels);
+        }
+        if (m_pairListWidget) {
+            for (int i = 0; i < m_pairListWidget->count(); i++) {
+                QListWidgetItem *list_item = m_pairListWidget->item(i);
+                if (list_item) {
+                    list_item->setBackground(QBrush());
+                    list_item->setForeground(QBrush());
+                    QFont f = list_item->font();
+                    f.setBold(false);
+                    list_item->setFont(f);
+                }
+            }
+        }
+        return;
+    }
+
+    /* --- Wi-Fi keyword searches: signal quality + AP highlight --- */
+    bool is_signal_search = false;
+    bool is_ap_search = false;
+    int signal_rssi_min = 0, signal_rssi_max = 0;  /* inclusive range for average RSSI */
+    if (m_wifiMode) {
+        QString lower = trimmed.toLower();
+        if (lower == "excellent") {
+            is_signal_search = true; signal_rssi_min = -55; signal_rssi_max = 0;
+        } else if (lower == "good") {
+            is_signal_search = true; signal_rssi_min = -65; signal_rssi_max = -56;
+        } else if (lower == "fair") {
+            is_signal_search = true; signal_rssi_min = -75; signal_rssi_max = -66;
+        } else if (lower == "poor") {
+            is_signal_search = true; signal_rssi_min = -200; signal_rssi_max = -76;
+        } else if (lower == "ap" || lower == "accesspoint" || lower == "accesspoints" || lower == "bssid") {
+            is_ap_search = true;
+        }
+    }
+
+    /* --- Detect port search: "TCP <port>" or "UDP <port>" --- */
+    bool is_port_search = false;
+    bool port_search_tcp = false;
+    bool port_search_udp = false;
+    guint16 port_search_num = 0;
+
+    if (!is_signal_search && !is_ap_search) {
+        /* Accept e.g. "TCP 443", "udp 53", "tcp23", "UDP53" */
+        QRegularExpression portRx("^(tcp|udp)\\s*(\\d+)$", QRegularExpression::CaseInsensitiveOption);
+        QRegularExpressionMatch portMatch = portRx.match(trimmed);
+        if (portMatch.hasMatch()) {
+            QString proto = portMatch.captured(1).toUpper();
+            bool ok = false;
+            int portVal = portMatch.captured(2).toInt(&ok);
+            if (ok && portVal > 0 && portVal <= 65535) {
+                is_port_search = true;
+                port_search_num = (guint16)portVal;
+                port_search_tcp = (proto == "TCP");
+                port_search_udp = (proto == "UDP");
+            }
+        }
+    }
+
+    /* --- Detect protocol category search: "TCP", "UDP", "ARP", etc. --- */
+    bool is_category_search = false;
+    QStringList category_protocols;  /* protocols belonging to the matched category */
+
+    if (!is_port_search && !is_signal_search && !is_ap_search && !m_wifiMode) {
+        struct { const char *name; QStringList protocols; } cats[] = {
+            {"ARP",            QStringList() << "ARP" << "RARP"},
+            {"ICMP",           QStringList() << "ICMP" << "ICMPv6"},
+            {"TCP",            QStringList() << "TCP"},
+            {"UDP",            QStringList() << "UDP"},
+            {"Infrastructure", QStringList() << "OSPF" << "BGP" << "RIP" << "RIPv2" << "EIGRP"
+                                             << "ISIS" << "IS-IS" << "IGMP" << "IGMPv2" << "IGMPv3"
+                                             << "PIM" << "VRRP" << "HSRP" << "SCTP" << "DCCP"},
+            {"Unknown",        QStringList() << "Unknown" << "IP" << "IPv4" << "IPv6" << "Ethernet"}
+        };
+        QString lower = trimmed.toLower();
+        for (int c = 0; c < 6; c++) {
+            if (lower == QString(cats[c].name).toLower()) {
+                is_category_search = true;
+                category_protocols = cats[c].protocols;
+                break;
+            }
+        }
+    }
+
+    bool is_cidr = !is_port_search && !is_signal_search && !is_ap_search && !is_category_search && trimmed.contains('/') && parse_cidr(trimmed, nullptr, nullptr);
+
+    if (m_pairListWidget) {
+        for (int i = 0; i < m_pairListWidget->count(); i++) {
+            QListWidgetItem *list_item = m_pairListWidget->item(i);
+            if (!list_item)
+                continue;
+            comm_pair_t *pair = (comm_pair_t *)list_item->data(Qt::UserRole).value<void*>();
+            if (!pair || !pair->src_addr || !pair->dst_addr) {
+                list_item->setBackground(QBrush());
+                continue;
+            }
+
+            bool match = false;
+
+            if (is_ap_search) {
+                /* AP search: highlight every BSSID (dst_addr in station→BSSID pairs) */
+                if (pair->is_wifi && pair->wifi_bssid) {
+                    match = true;
+                    /* Only highlight the BSSID node, not the station */
+                    highlighted_labels.insert(QString::fromUtf8(pair->wifi_bssid));
+                }
+            } else if (is_signal_search) {
+                /* Signal quality search: match Wi-Fi pairs by average RSSI bin */
+                if (pair->is_wifi && pair->rssi_count > 0) {
+                    int avg = (int)(pair->rssi_sum / (gint32)pair->rssi_count);
+                    if (signal_rssi_max == 0) {
+                        /* "excellent": >= -55 (open-ended upper bound) */
+                        match = (avg >= signal_rssi_min);
+                    } else {
+                        match = (avg >= signal_rssi_min && avg <= signal_rssi_max);
+                    }
+                }
+                if (match) {
+                    highlighted_labels.insert(QString::fromUtf8(pair->src_addr));
+                    highlighted_labels.insert(QString::fromUtf8(pair->dst_addr));
+                }
+            } else if (is_category_search) {
+                /* Category search: match pairs whose top_protocol belongs to the category */
+                if (pair->top_protocol) {
+                    QString proto = QString::fromUtf8(pair->top_protocol);
+                    if (category_protocols.contains(proto, Qt::CaseInsensitive))
+                        match = true;
+                }
+                /* For TCP/UDP categories, also match pairs with has_tcp/has_udp flags */
+                if (category_protocols.contains("TCP") && pair->has_tcp)
+                    match = true;
+                if (category_protocols.contains("UDP") && pair->has_udp)
+                    match = true;
+
+                if (match) {
+                    highlighted_labels.insert(QString::fromUtf8(pair->src_addr));
+                    highlighted_labels.insert(QString::fromUtf8(pair->dst_addr));
+                }
+            } else if (is_port_search) {
+                /* Port search: check this pair's dst_ports (and reverse pair's) */
+                auto checkPorts = [&](comm_pair_t *p) -> bool {
+                    if (!p || !p->dst_ports) return false;
+                    gpointer port_key = GUINT_TO_POINTER((guint)port_search_num);
+                    port_stats_t *ps = (port_stats_t *)g_hash_table_lookup(p->dst_ports, port_key);
+                    if (!ps) return false;
+                    if (port_search_tcp && ps->is_tcp) return true;
+                    if (port_search_udp && ps->is_udp) return true;
+                    return false;
+                };
+
+                match = checkPorts(pair);
+
+                /* Also check the reverse pair (B→A for the same port) */
+                if (!match && m_analysisResult && m_analysisResult->pairs) {
+                    for (GList *gl = m_analysisResult->pairs; gl; gl = gl->next) {
+                        comm_pair_t *rp = (comm_pair_t *)gl->data;
+                        if (rp && rp != pair &&
+                            g_strcmp0(rp->src_addr, pair->dst_addr) == 0 &&
+                            g_strcmp0(rp->dst_addr, pair->src_addr) == 0) {
+                            match = checkPorts(rp);
+                            break;
+                        }
+                    }
+                }
+
+                if (match) {
+                    QString src = QString::fromUtf8(pair->src_addr);
+                    QString dst = QString::fromUtf8(pair->dst_addr);
+                    highlighted_labels.insert(src);
+                    highlighted_labels.insert(dst);
+                }
+            } else {
+                /* Address search (IP, MAC, CIDR) + Wi-Fi SSID/BSSID */
+                QString src = QString::fromUtf8(pair->src_addr);
+                QString dst = QString::fromUtf8(pair->dst_addr);
+
+                bool src_match = is_cidr ? ipv4_in_cidr(src, trimmed) : src.contains(trimmed, Qt::CaseInsensitive);
+                bool dst_match = is_cidr ? ipv4_in_cidr(dst, trimmed) : dst.contains(trimmed, Qt::CaseInsensitive);
+
+                /* In Wi-Fi mode, also match SSID and BSSID */
+                bool wifi_match = false;
+                if (m_wifiMode && pair->is_wifi) {
+                    if (pair->wifi_ssid && QString::fromUtf8(pair->wifi_ssid).contains(trimmed, Qt::CaseInsensitive))
+                        wifi_match = true;
+                    if (pair->wifi_bssid && QString::fromUtf8(pair->wifi_bssid).contains(trimmed, Qt::CaseInsensitive))
+                        wifi_match = true;
+                }
+
+                match = src_match || dst_match || wifi_match;
+
+                if (match) {
+                    if (src_match || wifi_match) highlighted_labels.insert(src);
+                    if (dst_match || wifi_match) highlighted_labels.insert(dst);
+                }
+            }
+
+            if (match) {
+                list_item->setBackground(QBrush(m_darkTheme ? QColor(120, 100, 30) : QColor(255, 248, 200)));
+                m_highlightedPairItems.append(i);
+            } else {
+                list_item->setBackground(QBrush());
+            }
+        }
+    }
+
+    /* Start blink timer if we have matches; enable/disable Select Results */
+    if (!m_highlightedPairItems.isEmpty()) {
+        m_pairListBlinkTimer->start(500);
+        m_selectSearchBtn->setEnabled(true);
+    } else {
+        m_selectSearchBtn->setEnabled(false);
+    }
+
+    if (m_circleWidget) {
+        m_circleWidget->setHighlightedLabels(highlighted_labels);
+    }
+}
+
+void MainWindow::onPairSelectionChanged(QList<comm_pair_t*> selected)
+{
+    m_selectedPairs = selected;
+    updateViews();
+}
+
+void MainWindow::onNodeVisibilityToggle(QList<comm_pair_t*> pairs, bool enable)
+{
+    if (!m_pairListWidget || pairs.isEmpty())
+        return;
+
+    QSet<comm_pair_t*> pair_set(pairs.begin(), pairs.end());
+
+    disconnect(m_pairListWidget, &QListWidget::itemChanged, this, &MainWindow::onPairListItemChanged);
+    for (int i = 0; i < m_pairListWidget->count(); i++) {
+        QListWidgetItem *list_item = m_pairListWidget->item(i);
+        if (!list_item)
+            continue;
+
+        comm_pair_t *pair = (comm_pair_t *)list_item->data(Qt::UserRole).value<void*>();
+        if (!pair)
+            continue;
+
+        if (pair_set.contains(pair)) {
+            list_item->setCheckState(enable ? Qt::Checked : Qt::Unchecked);
+        }
+    }
+    connect(m_pairListWidget, &QListWidget::itemChanged, this, &MainWindow::onPairListItemChanged);
+
+    syncTableCheckboxesFromPairList();
+    updateVisiblePairsFromWidgets();
+}
+
+void MainWindow::updateVisiblePairsFromWidgets()
+{
+    QSet<comm_pair_t*> visible_pairs;
+    
+    for (int i = 0; i < m_pairListWidget->count(); i++) {
+        QListWidgetItem *list_item = m_pairListWidget->item(i);
+        if (!list_item)
+            continue;
+        
+        /* Check checkbox state - linked pairs will have synced states */
+        if (list_item->checkState() == Qt::Checked) {
+            comm_pair_t *pair = (comm_pair_t *)list_item->data(Qt::UserRole).value<void*>();
+            if (pair) {
+                visible_pairs.insert(pair);
+            }
+        }
+    }
+    
+    /* Update circle widget with visible pairs */
+    if (m_circleWidget) {
+        m_circleWidget->setVisiblePairs(visible_pairs);
+    }
+}
+
+void MainWindow::onPairListItemChanged(QListWidgetItem *item)
+{
+    if (!item)
+        return;
+    
+    /* If this item is linked to another, handle bidirectional behavior */
+    if (m_linkedPairs.contains(item)) {
+        QListWidgetItem *linked_item = m_linkedPairs[item];
+        Qt::CheckState current_state = item->checkState();
+        Qt::CheckState linked_state = linked_item->checkState();
+        
+        /* Temporarily disconnect signal to prevent infinite loop */
+        disconnect(m_pairListWidget, &QListWidget::itemChanged, this, &MainWindow::onPairListItemChanged);
+        
+        /* Smart linking logic:
+         * - When DESELECTING: If both are selected, deselect both (linked behavior)
+         * - When SELECTING: If both are deselected, only select the clicked one (independent behavior)
+         * - If states differ, sync to current state (for Select All/None operations)
+         */
+        if (current_state == Qt::Unchecked) {
+            /* Deselecting: If linked is also checked, deselect it too */
+            if (linked_state == Qt::Checked) {
+                linked_item->setCheckState(Qt::Unchecked);
+            }
+        } else if (current_state == Qt::Checked) {
+            /* Selecting: Only sync if linked is also being selected (from Select All) */
+            /* Don't auto-select linked when user manually selects one direction */
+            /* This allows independent selection for filtering purposes */
+        }
+        
+        connect(m_pairListWidget, &QListWidget::itemChanged, this, &MainWindow::onPairListItemChanged);
+    }
+    
+    /* Sync table checkboxes to match */
+    syncTableCheckboxesFromPairList();
+    
+    /* Update visible pairs */
+    updateVisiblePairsFromWidgets();
+}
+
+void MainWindow::onTableCheckboxToggled(comm_pair_t *pair, bool checked)
+{
+    if (!pair || !m_pairListWidget)
+        return;
+    
+    /* Prevent recursive updates */
+    static bool syncing = false;
+    if (syncing)
+        return;
+    syncing = true;
+    
+    /* Find the matching pair list item and update its check state */
+    disconnect(m_pairListWidget, &QListWidget::itemChanged, this, &MainWindow::onPairListItemChanged);
+    
+    for (int i = 0; i < m_pairListWidget->count(); i++) {
+        QListWidgetItem *list_item = m_pairListWidget->item(i);
+        if (!list_item)
+            continue;
+        comm_pair_t *list_pair = (comm_pair_t *)list_item->data(Qt::UserRole).value<void*>();
+        if (list_pair == pair) {
+            list_item->setCheckState(checked ? Qt::Checked : Qt::Unchecked);
+            
+            /* Handle linked pair (bidirectional deselection) */
+            if (!checked && m_linkedPairs.contains(list_item)) {
+                QListWidgetItem *linked = m_linkedPairs[list_item];
+                linked->setCheckState(Qt::Unchecked);
+                /* Also uncheck the linked pair's table checkbox */
+                comm_pair_t *linked_pair = (comm_pair_t *)linked->data(Qt::UserRole).value<void*>();
+                if (linked_pair) {
+                    for (auto it = m_tableCheckboxes.begin(); it != m_tableCheckboxes.end(); ++it) {
+                        if (it.value() == linked_pair) {
+                            it.key()->setChecked(false);
+                            break;
+                        }
+                    }
+                }
+            }
+            break;
+        }
+    }
+    
+    connect(m_pairListWidget, &QListWidget::itemChanged, this, &MainWindow::onPairListItemChanged);
+    updateVisiblePairsFromWidgets();
+    
+    syncing = false;
+}
+
+void MainWindow::syncTableCheckboxesFromPairList()
+{
+    /* Sync table checkboxes to match pair list state */
+    for (auto it = m_tableCheckboxes.begin(); it != m_tableCheckboxes.end(); ++it) {
+        QCheckBox *checkbox = it.key();
+        comm_pair_t *pair = it.value();
+        
+        /* Find matching pair list item */
+        bool is_checked = false;
+        for (int i = 0; i < m_pairListWidget->count(); i++) {
+            QListWidgetItem *list_item = m_pairListWidget->item(i);
+            if (!list_item) continue;
+            comm_pair_t *list_pair = (comm_pair_t *)list_item->data(Qt::UserRole).value<void*>();
+            if (list_pair == pair) {
+                is_checked = (list_item->checkState() == Qt::Checked);
+                break;
+            }
+        }
+        
+        checkbox->blockSignals(true);
+        checkbox->setChecked(is_checked);
+        checkbox->blockSignals(false);
+    }
+}
+
+void MainWindow::onProtocolCheckboxToggled(const QString &protocol, bool checked)
+{
+    Q_UNUSED(protocol);
+    Q_UNUSED(checked);
+    
+    /* Build set of enabled protocols (only from enabled checkboxes) */
+    QSet<QString> enabled_protocols;
+    for (auto it = m_protocolCheckboxes.begin(); it != m_protocolCheckboxes.end(); ++it) {
+        QCheckBox *checkbox = it.value();
+        /* Only consider enabled checkboxes that are checked */
+        if (checkbox->isEnabled() && checkbox->isChecked()) {
+            enabled_protocols.insert(it.key());
+        }
+    }
+    
+    /* If all enabled protocols are checked, use empty set to show all (more efficient) */
+    guint enabled_count = 0;
+    guint checked_count = 0;
+    for (auto it = m_protocolCheckboxes.begin(); it != m_protocolCheckboxes.end(); ++it) {
+        if (it.value()->isEnabled()) {
+            enabled_count++;
+            if (it.value()->isChecked()) {
+                checked_count++;
+            }
+        }
+    }
+    if (enabled_count > 0 && checked_count == enabled_count) {
+        enabled_protocols.clear();  /* Empty set = show all */
+    }
+    
+    /* Update circle widget filter */
+    if (m_circleWidget) {
+        m_circleWidget->setProtocolFilter(enabled_protocols);
+    }
+}
+
+void MainWindow::onProtocolCategoryToggled(const QString &category, const QStringList &protocols, bool checked)
+{
+    Q_UNUSED(category);
+    Q_UNUSED(protocols);
+    Q_UNUSED(checked);
+    
+    /* Build set of enabled protocols from all categories */
+    QSet<QString> enabled_protocols;
+    for (auto it = m_protocolCheckboxes.begin(); it != m_protocolCheckboxes.end(); ++it) {
+        QCheckBox *checkbox = it.value();
+        /* Only consider enabled checkboxes that are checked */
+        if (checkbox->isEnabled() && checkbox->isChecked()) {
+            QString category_name = it.key();
+            /* Map category to its protocols */
+            if (category_name == "ARP") {
+                enabled_protocols.insert("ARP");
+                enabled_protocols.insert("RARP");
+            } else if (category_name == "ICMP") {
+                enabled_protocols.insert("ICMP");
+                enabled_protocols.insert("ICMPv6");
+            } else if (category_name == "TCP") {
+                enabled_protocols.insert("TCP");
+            } else if (category_name == "UDP") {
+                enabled_protocols.insert("UDP");
+            } else if (category_name == "Infrastructure") {
+                enabled_protocols.insert("OSPF");
+                enabled_protocols.insert("BGP");
+                enabled_protocols.insert("RIP");
+                enabled_protocols.insert("RIPv2");
+                enabled_protocols.insert("EIGRP");
+                enabled_protocols.insert("ISIS");
+                enabled_protocols.insert("IS-IS");
+                enabled_protocols.insert("IGMP");
+                enabled_protocols.insert("IGMPv2");
+                enabled_protocols.insert("IGMPv3");
+                enabled_protocols.insert("PIM");
+                enabled_protocols.insert("VRRP");
+                enabled_protocols.insert("HSRP");
+                enabled_protocols.insert("SCTP");
+                enabled_protocols.insert("DCCP");
+            } else if (category_name == "Unknown") {
+                enabled_protocols.insert("Unknown");
+                enabled_protocols.insert("IP");
+                enabled_protocols.insert("IPv4");
+                enabled_protocols.insert("IPv6");
+                enabled_protocols.insert("Ethernet");
+            }
+        }
+    }
+    
+    /* If all enabled categories are checked, use empty set to show all (more efficient) */
+    guint enabled_count = 0;
+    guint checked_count = 0;
+    for (auto it = m_protocolCheckboxes.begin(); it != m_protocolCheckboxes.end(); ++it) {
+        if (it.value()->isEnabled()) {
+            enabled_count++;
+            if (it.value()->isChecked()) {
+                checked_count++;
+            }
+        }
+    }
+    if (enabled_count > 0 && checked_count == enabled_count) {
+        enabled_protocols.clear();  /* Empty set = show all */
+    }
+    
+    /* Update circle widget filter */
+    if (m_circleWidget) {
+        m_circleWidget->setProtocolFilter(enabled_protocols);
+    }
+
+    /* Also sync pair list checkboxes to match the protocol filter.
+     * This lets the user select/deselect pairs by protocol category
+     * (e.g. uncheck TCP → unchecks all TCP pairs in the list).       */
+    if (m_pairListWidget) {
+        disconnect(m_pairListWidget, &QListWidget::itemChanged, this, &MainWindow::onPairListItemChanged);
+
+        QSet<QListWidgetItem*> processed;
+        for (int i = 0; i < m_pairListWidget->count(); i++) {
+            QListWidgetItem *item = m_pairListWidget->item(i);
+            if (!item || processed.contains(item))
+                continue;
+
+            comm_pair_t *pair = static_cast<comm_pair_t*>(item->data(Qt::UserRole).value<void*>());
+            bool matches = true;  /* default: show if no filter */
+            if (pair && !enabled_protocols.isEmpty()) {
+                matches = false;
+                if (pair->top_protocol) {
+                    QString proto = QString::fromUtf8(pair->top_protocol);
+                    if (enabled_protocols.contains(proto))
+                        matches = true;
+                }
+                /* Mixed TCP+UDP pairs match if either protocol is enabled */
+                if (pair->has_tcp && enabled_protocols.contains("TCP"))
+                    matches = true;
+                if (pair->has_udp && enabled_protocols.contains("UDP"))
+                    matches = true;
+            }
+
+            Qt::CheckState state = matches ? Qt::Checked : Qt::Unchecked;
+            item->setCheckState(state);
+            processed.insert(item);
+
+            /* Keep linked pair in sync */
+            if (m_linkedPairs.contains(item)) {
+                QListWidgetItem *linked = m_linkedPairs[item];
+                linked->setCheckState(state);
+                processed.insert(linked);
+            }
+        }
+
+        connect(m_pairListWidget, &QListWidget::itemChanged, this, &MainWindow::onPairListItemChanged);
+        syncTableCheckboxesFromPairList();
+        updateVisiblePairsFromWidgets();
+        if (m_circleWidget) {
+            m_circleWidget->update();
+        }
+    }
+}
+
+/* =====================================================
+ * ConnectionPopup implementation
+ * =====================================================
+ */
+
+static QString portServiceName(quint16 port)
+{
+    switch (port) {
+        case 20:   return "FTP-Data";
+        case 21:   return "FTP";
+        case 22:   return "SSH";
+        case 23:   return "Telnet";
+        case 25:   return "SMTP";
+        case 53:   return "DNS";
+        case 67: case 68: return "DHCP";
+        case 80:   return "HTTP";
+        case 88:   return "Kerberos";
+        case 110:  return "POP3";
+        case 123:  return "NTP";
+        case 135:  return "MS-RPC";
+        case 143:  return "IMAP";
+        case 161:  return "SNMP";
+        case 389:  return "LDAP";
+        case 443:  return "HTTPS";
+        case 445:  return "SMB";
+        case 993:  return "IMAPS";
+        case 995:  return "POP3S";
+        case 1433: return "MSSQL";
+        case 3306: return "MySQL";
+        case 3389: return "RDP";
+        case 5060: return "SIP";
+        case 5432: return "PostgreSQL";
+        case 5900: return "VNC";
+        case 8080: return "HTTP-Proxy";
+        case 8443: return "HTTPS-Alt";
+        default:   return QString::number(port);
+    }
+}
+
+ConnectionPopup::ConnectionPopup(comm_pair_t *pair, comm_pair_t *reversePair, gboolean useMAC, QWidget *parent)
+    : QWidget(parent, Qt::Popup | Qt::FramelessWindowHint)
+    , m_pair(pair)
+    , m_reversePair(reversePair)
+    , m_useMAC(useMAC)
+    , m_table(nullptr)
+    , m_wifiInfoEdit(nullptr)
+    , m_autoCloseTimer(nullptr)
+    , m_headerLabel(nullptr)
+    , m_contextMenuActive(false)
+{
+    /* NOTE: Do NOT use WA_DeleteOnClose here.  QMenu::exec() runs a nested
+     * event loop; if the auto-close timer fires during that loop and triggers
+     * deletion, the destructor runs while showContextMenu() is still on the
+     * call stack → use-after-free / SIGABRT.  Instead we use hide()+deleteLater()
+     * for safe deferred destruction.                                             */
+    setMouseTracking(true);
+
+    /* Styling — theme-aware */
+    bool dark = isDarkTheme();
+    if (dark) {
+        setStyleSheet(
+            "ConnectionPopup {"
+            "  background: #2b2b2b;"
+            "  border: 1px solid #555;"
+            "  border-radius: 6px;"
+            "}"
+        );
+    } else {
+        setStyleSheet(
+            "ConnectionPopup {"
+            "  background: #f8f8f8;"
+            "  border: 1px solid #b0b0b0;"
+            "  border-radius: 6px;"
+            "}"
+        );
+    }
+
+    QVBoxLayout *layout = new QVBoxLayout(this);
+    layout->setContentsMargins(8, 8, 8, 8);
+    layout->setSpacing(6);
+
+    /* Header: Source <-> Destination */
+    QString srcDisplay = pair->resolved_src ? QString::fromUtf8(pair->resolved_src) : QString::fromUtf8(pair->src_addr);
+    QString dstDisplay = pair->resolved_dst ? QString::fromUtf8(pair->resolved_dst) : QString::fromUtf8(pair->dst_addr);
+    if (dark) {
+        m_headerLabel = new QLabel(
+            QString("<b style='color:#e0e0e0;'>%1</b>"
+                    " <span style='color:#888;'>&harr;</span> "
+                    "<b style='color:#e0e0e0;'>%2</b>")
+                .arg(srcDisplay.toHtmlEscaped())
+                .arg(dstDisplay.toHtmlEscaped()),
+            this
+        );
+        m_headerLabel->setStyleSheet("QLabel { color: #e0e0e0; font-size: 12px; padding: 2px 0; }");
+    } else {
+        m_headerLabel = new QLabel(
+            QString("<b style='color:#222;'>%1</b>"
+                    " <span style='color:#888;'>&harr;</span> "
+                    "<b style='color:#222;'>%2</b>")
+                .arg(srcDisplay.toHtmlEscaped())
+                .arg(dstDisplay.toHtmlEscaped()),
+            this
+        );
+        m_headerLabel->setStyleSheet("QLabel { color: #222; font-size: 12px; padding: 2px 0; }");
+    }
+    m_headerLabel->setTextFormat(Qt::RichText);
+    layout->addWidget(m_headerLabel);
+
+    if (pair->is_wifi) {
+        /* ---- Wi-Fi mode: rich HTML info card instead of port table ---- */
+        m_wifiInfoEdit = new QTextEdit(this);
+        m_wifiInfoEdit->setReadOnly(true);
+        m_wifiInfoEdit->setContextMenuPolicy(Qt::CustomContextMenu);
+        connect(m_wifiInfoEdit, &QTextEdit::customContextMenuRequested,
+                this, &ConnectionPopup::showWifiContextMenu);
+        if (dark) {
+            m_wifiInfoEdit->setStyleSheet(
+                "QTextEdit {"
+                "  background: #333; color: #e0e0e0;"
+                "  border: none; font-size: 11px; padding: 4px;"
+                "}");
+        } else {
+            m_wifiInfoEdit->setStyleSheet(
+                "QTextEdit {"
+                "  background: #fff; color: #222;"
+                "  border: none; font-size: 11px; padding: 4px;"
+                "}");
+        }
+        layout->addWidget(m_wifiInfoEdit, 1);
+        populateWifiInfo();
+
+        /* "Apply Filter" button at the bottom */
+        QPushButton *filterBtn = new QPushButton("Apply Filter in Wireshark", this);
+        if (dark) {
+            filterBtn->setStyleSheet(
+                "QPushButton {"
+                "  background: #0078d4; color: white; border: none;"
+                "  border-radius: 4px; padding: 5px 12px; font-size: 11px; font-weight: bold;"
+                "}"
+                "QPushButton:hover { background: #1a8ae8; }");
+        } else {
+            filterBtn->setStyleSheet(
+                "QPushButton {"
+                "  background: #0078d4; color: white; border: none;"
+                "  border-radius: 4px; padding: 5px 12px; font-size: 11px; font-weight: bold;"
+                "}"
+                "QPushButton:hover { background: #1a8ae8; }");
+        }
+        connect(filterBtn, &QPushButton::clicked, this, &ConnectionPopup::applyWifiFilter);
+        layout->addWidget(filterBtn);
+
+        resize(420, 410);
+    } else {
+        /* ---- Standard mode: port/session table ---- */
+        m_table = new QTableWidget(this);
+        m_table->setColumnCount(5);
+        m_table->setHorizontalHeaderLabels(QStringList() << "Protocol" << "Port" << "Service" << "Packets" << "% of Total");
+        m_table->setSelectionBehavior(QAbstractItemView::SelectRows);
+        m_table->setEditTriggers(QAbstractItemView::NoEditTriggers);
+        m_table->setContextMenuPolicy(Qt::CustomContextMenu);
+        m_table->horizontalHeader()->setStretchLastSection(true);
+        m_table->verticalHeader()->setVisible(false);
+        m_table->setAlternatingRowColors(true);
+        m_table->setMouseTracking(true);
+
+        /* Theme-aware table styling */
+        if (dark) {
+            m_table->setStyleSheet(
+                "QTableWidget {"
+                "  background: #333;"
+                "  color: #e0e0e0;"
+                "  gridline-color: #555;"
+                "  border: none;"
+                "  font-size: 11px;"
+                "}"
+                "QTableWidget::item {"
+                "  padding: 4px 8px;"
+                "}"
+                "QTableWidget::item:alternate {"
+                "  background: #383838;"
+                "}"
+                "QTableWidget::item:hover {"
+                "  background: #e3f2fd;"
+                "  color: #111;"
+                "}"
+                "QTableWidget::item:selected {"
+                "  background: #0078d4;"
+                "  color: white;"
+                "}"
+                "QHeaderView::section {"
+                "  background: #3a3a3a;"
+                "  color: #ccc;"
+                "  border: 1px solid #555;"
+                "  padding: 4px;"
+                "  font-weight: bold;"
+                "  font-size: 10px;"
+                "}"
+            );
+        } else {
+            m_table->setStyleSheet(
+                "QTableWidget {"
+                "  background: #fff;"
+                "  color: #222;"
+                "  gridline-color: #d0d0d0;"
+                "  border: none;"
+                "  font-size: 11px;"
+                "}"
+                "QTableWidget::item {"
+                "  padding: 4px 8px;"
+                "}"
+                "QTableWidget::item:alternate {"
+                "  background: #f5f5f5;"
+                "}"
+                "QTableWidget::item:hover {"
+                "  background: #e3f2fd;"
+                "  color: #111;"
+                "}"
+                "QTableWidget::item:selected {"
+                "  background: #0078d4;"
+                "  color: white;"
+                "}"
+                "QHeaderView::section {"
+                "  background: #e8e8e8;"
+                "  color: #333;"
+                "  border: 1px solid #c0c0c0;"
+                "  padding: 4px;"
+                "  font-weight: bold;"
+                "  font-size: 10px;"
+                "}"
+            );
+        }
+
+        connect(m_table, &QTableWidget::customContextMenuRequested, this, &ConnectionPopup::showContextMenu);
+        layout->addWidget(m_table);
+        populateTable();
+
+        int rows = m_table->rowCount();
+        int tableHeight = qMin(rows * 30 + 40, 300);
+        resize(480, tableHeight + 60);
+    }
+
+    /* Auto-close timer: starts on leaveEvent, cancelled on enterEvent */
+    m_autoCloseTimer = new QTimer(this);
+    m_autoCloseTimer->setSingleShot(true);
+    m_autoCloseTimer->setInterval(1000);  /* 1 second grace period */
+    connect(m_autoCloseTimer, &QTimer::timeout, this, [this]() {
+        if (m_contextMenuActive) return;   /* Don't destroy while menu is open */
+        hide();
+        deleteLater();
+    });
+}
+
+ConnectionPopup::~ConnectionPopup()
+{
+}
+
+void ConnectionPopup::enterEvent(QEnterEvent *event)
+{
+    Q_UNUSED(event);
+    /* Cancel auto-close when mouse enters */
+    if (m_autoCloseTimer->isActive()) {
+        m_autoCloseTimer->stop();
+    }
+}
+
+void ConnectionPopup::leaveEvent(QEvent *event)
+{
+    Q_UNUSED(event);
+    /* Don't start auto-close when mouse moves to the context menu */
+    if (m_contextMenuActive) return;
+    m_autoCloseTimer->start();
+}
+
+void ConnectionPopup::populateTable()
+{
+    if (!m_pair)
+        return;
+
+    /* Merge port data from BOTH directions (A→B and B→A) so the popup
+     * shows a complete picture regardless of which directional pair was
+     * picked by the click-hit-test.  We use a QMap keyed by port number
+     * so that identical ports from both directions are combined.          */
+    struct MergedPort {
+        quint64 packets = 0;
+        bool isTcp = false;
+        bool isUdp = false;
+    };
+    QMap<quint16, MergedPort> merged;
+    guint64 totalPackets = m_pair->packet_count;
+    if (m_reversePair)
+        totalPackets += m_reversePair->packet_count;
+
+    /* Helper lambda: iterate one pair's dst_ports into 'merged' */
+    auto mergePorts = [&](comm_pair_t *p) {
+        if (!p || !p->dst_ports) return;
+        GHashTableIter port_iter;
+        gpointer port_key, port_value;
+        g_hash_table_iter_init(&port_iter, p->dst_ports);
+        while (g_hash_table_iter_next(&port_iter, &port_key, &port_value)) {
+            quint16 port = (quint16)GPOINTER_TO_UINT(port_key);
+            port_stats_t *ps = (port_stats_t *)port_value;
+            if (!ps || port == 0 || ps->count == 0) continue;
+
+            MergedPort &mp = merged[port];
+            mp.packets += ps->count;
+            if (ps->is_tcp) mp.isTcp = true;
+            if (ps->is_udp) mp.isUdp = true;
+        }
+    };
+
+    mergePorts(m_pair);
+    mergePorts(m_reversePair);
+
+    /* Build PortEntry list from merged map */
+    struct PortEntry {
+        QString protocol;
+        quint16 port;
+        quint64 packets;
+        bool isTcp;
+        bool isUdp;
+    };
+    QList<PortEntry> entries;
+
+    for (auto it = merged.constBegin(); it != merged.constEnd(); ++it) {
+        const MergedPort &mp = it.value();
+        QString proto;
+        if (mp.isTcp && mp.isUdp) {
+            proto = "TCP+UDP";
+        } else if (mp.isTcp) {
+            proto = "TCP";
+        } else if (mp.isUdp) {
+            proto = "UDP";
+        } else {
+            proto = "-";
+        }
+
+        PortEntry entry;
+        entry.protocol = proto;
+        entry.port = it.key();
+        entry.packets = mp.packets;
+        entry.isTcp = mp.isTcp;
+        entry.isUdp = mp.isUdp;
+        entries.append(entry);
+    }
+
+    /* Sort by packet count descending */
+    std::sort(entries.begin(), entries.end(), [](const PortEntry &a, const PortEntry &b) {
+        return a.packets > b.packets;
+    });
+
+    /* Populate table */
+    m_table->setRowCount(static_cast<int>(entries.size()));
+    m_rowData.clear();
+
+    for (int i = 0; i < entries.size(); i++) {
+        const PortEntry &e = entries[i];
+
+        /* Store row data for context menu (includes per-port protocol) */
+        RowData rd;
+        rd.protocol = e.protocol;
+        rd.port = e.port;
+        rd.packets = e.packets;
+        rd.isTcp = e.isTcp;
+        rd.isUdp = e.isUdp;
+        m_rowData.append(rd);
+
+        m_table->setItem(i, 0, new QTableWidgetItem(e.protocol));
+        m_table->setItem(i, 1, new QTableWidgetItem(QString::number(e.port)));
+        m_table->setItem(i, 2, new QTableWidgetItem(portServiceName(e.port)));
+
+        QTableWidgetItem *pktItem = new QTableWidgetItem(QString::number(e.packets));
+        pktItem->setTextAlignment(Qt::AlignRight | Qt::AlignVCenter);
+        m_table->setItem(i, 3, pktItem);
+
+        double pct = totalPackets > 0 ? (100.0 * e.packets / totalPackets) : 0;
+        QTableWidgetItem *pctItem = new QTableWidgetItem(QString::number(pct, 'f', 1) + "%");
+        pctItem->setTextAlignment(Qt::AlignRight | Qt::AlignVCenter);
+        m_table->setItem(i, 4, pctItem);
+    }
+
+    /* Adjust column widths */
+    m_table->setColumnWidth(0, 70);
+    m_table->setColumnWidth(1, 70);
+    m_table->setColumnWidth(2, 100);
+    m_table->setColumnWidth(3, 70);
+}
+
+/* ------------------------------------------------------------------ */
+/* Wi-Fi info card (replaces port table for 802.11 pairs)             */
+/* ------------------------------------------------------------------ */
+
+QString ConnectionPopup::wifiPhyName(guint8 phy)
+{
+    switch (phy) {
+    case 1:  return "802.11 (FHSS)";
+    case 2:  return "802.11 (IR)";
+    case 3:  return "802.11 (DSSS)";
+    case 4:  return "802.11b (HR-DSSS)";
+    case 5:  return "802.11a (OFDM)";
+    case 6:  return "802.11g (ERP)";
+    case 7:  return "802.11n (HT)";
+    case 8:  return "802.11ac (VHT)";
+    case 9:  return "802.11ax (HE)";
+    case 10: return "802.11be (EHT)";
+    default: return QString();
+    }
+}
+
+QString ConnectionPopup::wifiReasonCodeText(guint16 reason)
+{
+    switch (reason) {
+    case 1:  return "Unspecified reason";
+    case 2:  return "Previous authentication no longer valid";
+    case 3:  return "Station leaving / has left";
+    case 4:  return "Disassociated due to inactivity";
+    case 5:  return "AP unable to handle all associated STAs";
+    case 6:  return "Class 2 frame from non-authenticated STA";
+    case 7:  return "Class 3 frame from non-associated STA";
+    case 8:  return "Station leaving / has left BSS";
+    case 9:  return "STA requesting (re)assoc not authenticated";
+    case 10: return "Disassociated: power capability unacceptable";
+    case 11: return "Disassociated: supported channels unacceptable";
+    case 12: return "Disassociated: BSS transition management";
+    case 13: return "Invalid information element";
+    case 14: return "MIC failure";
+    case 15: return "4-way handshake timeout";
+    case 16: return "Group key handshake timeout";
+    case 17: return "IE in 4-way handshake different from (re)assoc";
+    case 18: return "Invalid group cipher";
+    case 19: return "Invalid pairwise cipher";
+    case 20: return "Invalid AKMP";
+    case 23: return "IEEE 802.1X authentication failed";
+    case 24: return "Cipher suite rejected (security policy)";
+    case 34: return "Disassociated: TDLS direct-link teardown";
+    case 39: return "Disassociated: peer STA not in OBSS";
+    case 45: return "Peer STA not a TDLS peer STA";
+    case 46: return "Unspecified QoS-related reason";
+    default:
+        if (reason == 0) return QString();
+        return QString("Reason %1").arg(reason);
+    }
+}
+
+void ConnectionPopup::populateWifiInfo()
+{
+    if (!m_pair || !m_wifiInfoEdit)
+        return;
+
+    bool dark = isDarkTheme();
+    QString headingColor = dark ? "#90caf9" : "#1565c0";
+    QString textColor    = dark ? "#e0e0e0" : "#222";
+    QString dimColor     = dark ? "#999"    : "#666";
+    QString valColor     = dark ? "#c8e6c9" : "#1b5e20";
+    QString warnColor    = dark ? "#ffcc80" : "#e65100";
+    QString alertColor   = dark ? "#ef9a9a" : "#b71c1c";
+
+    /* Merge stats from both directions */
+    comm_pair_t *p = m_pair;
+    comm_pair_t *rp = m_reversePair;
+    guint64 totalFrames = p->packet_count + (rp ? rp->packet_count : 0);
+    guint64 totalBytes  = p->byte_count   + (rp ? rp->byte_count   : 0);
+    guint32 totalRetries = p->retry_count  + (rp ? rp->retry_count  : 0);
+
+    /* RSSI: prefer the pair that has samples */
+    gint32 rssiSum   = p->rssi_sum   + (rp ? rp->rssi_sum   : 0);
+    guint32 rssiCount = p->rssi_count + (rp ? rp->rssi_count : 0);
+    gint16 rssiMin = p->rssi_count ? p->rssi_min : 0;
+    gint16 rssiMax = p->rssi_count ? p->rssi_max : 0;
+    if (rp && rp->rssi_count) {
+        if (!p->rssi_count || rp->rssi_min < rssiMin) rssiMin = rp->rssi_min;
+        if (!p->rssi_count || rp->rssi_max > rssiMax) rssiMax = rp->rssi_max;
+    }
+
+    /* Frame type totals from both directions */
+    guint32 mgmt = p->mgmt_frame_count + (rp ? rp->mgmt_frame_count : 0);
+    guint32 ctrl = p->ctrl_frame_count + (rp ? rp->ctrl_frame_count : 0);
+    guint32 data = p->data_frame_count + (rp ? rp->data_frame_count : 0);
+
+    /* Management subtypes */
+    guint32 beacons    = p->beacon_count      + (rp ? rp->beacon_count      : 0);
+    guint32 probeReqs  = p->probe_req_count   + (rp ? rp->probe_req_count   : 0);
+    guint32 probeResps = p->probe_resp_count  + (rp ? rp->probe_resp_count  : 0);
+    guint32 auths      = p->auth_count        + (rp ? rp->auth_count        : 0);
+    guint32 deauths    = p->deauth_count      + (rp ? rp->deauth_count      : 0);
+    guint32 assocReqs  = p->assoc_req_count   + (rp ? rp->assoc_req_count   : 0);
+    guint32 assocResps = p->assoc_resp_count  + (rp ? rp->assoc_resp_count  : 0);
+    guint32 reassocReqs= p->reassoc_req_count + (rp ? rp->reassoc_req_count : 0);
+    guint32 disassocs  = p->disassoc_count    + (rp ? rp->disassoc_count    : 0);
+
+    /* Reason codes (prefer non-zero) */
+    guint16 deauthReason  = p->deauth_reason  ? p->deauth_reason  : (rp ? rp->deauth_reason  : 0);
+    guint16 disassocReason= p->disassoc_reason? p->disassoc_reason: (rp ? rp->disassoc_reason : 0);
+
+    /* Build HTML */
+    QString html = QString("<div style='color:%1; font-size:11px;'>").arg(textColor);
+
+    /* ---- Network Identity ---- */
+    html += QString("<h3 style='color:%1; margin:4px 0 2px 0; font-size:13px;'>Network</h3>").arg(headingColor);
+    html += "<table cellpadding='2'>";
+    if (p->wifi_ssid) {
+        html += QString("<tr><td style='color:%1;'>SSID:</td>"
+                        "<td style='color:%2;'><b>%3</b></td></tr>")
+                    .arg(dimColor).arg(valColor)
+                    .arg(QString::fromUtf8(p->wifi_ssid).toHtmlEscaped());
+    }
+    if (p->wifi_bssid) {
+        html += QString("<tr><td style='color:%1;'>BSSID:</td>"
+                        "<td style='font-family:monospace;'>%2</td></tr>")
+                    .arg(dimColor)
+                    .arg(QString::fromUtf8(p->wifi_bssid).toHtmlEscaped());
+    }
+    if (p->wifi_channel > 0) {
+        html += QString("<tr><td style='color:%1;'>Channel:</td>"
+                        "<td><b>%2</b></td></tr>")
+                    .arg(dimColor).arg(p->wifi_channel);
+    }
+    QString phyName = wifiPhyName(p->wifi_phy);
+    if (phyName.isEmpty() && rp) phyName = wifiPhyName(rp->wifi_phy);
+    if (!phyName.isEmpty()) {
+        html += QString("<tr><td style='color:%1;'>Standard:</td>"
+                        "<td><b>%2</b></td></tr>")
+                    .arg(dimColor).arg(phyName.toHtmlEscaped());
+    }
+    html += "</table>";
+
+    /* ---- Signal Quality ---- */
+    if (rssiCount > 0) {
+        int avgRSSI = (int)(rssiSum / (gint32)rssiCount);
+        QString quality;
+        QString qualColor;
+        if (avgRSSI >= -55) {
+            quality = "Excellent"; qualColor = dark ? "#81c784" : "#2e7d32";
+        } else if (avgRSSI >= -65) {
+            quality = "Good"; qualColor = dark ? "#aed581" : "#558b2f";
+        } else if (avgRSSI >= -75) {
+            quality = "Fair"; qualColor = warnColor;
+        } else {
+            quality = "Poor"; qualColor = alertColor;
+        }
+        html += QString("<h3 style='color:%1; margin:8px 0 2px 0; font-size:13px;'>Signal</h3>").arg(headingColor);
+        html += "<table cellpadding='2'>";
+        html += QString("<tr><td style='color:%1;'>Quality:</td>"
+                        "<td style='color:%2; font-weight:bold;'>%3</td></tr>")
+                    .arg(dimColor).arg(qualColor).arg(quality);
+        html += QString("<tr><td style='color:%1;'>Average RSSI:</td>"
+                        "<td><b>%2 dBm</b></td></tr>")
+                    .arg(dimColor).arg(avgRSSI);
+        html += QString("<tr><td style='color:%1;'>Range:</td>"
+                        "<td>%2 to %3 dBm (%4 samples)</td></tr>")
+                    .arg(dimColor).arg(rssiMin).arg(rssiMax).arg(rssiCount);
+        html += "</table>";
+    }
+
+    /* ---- Traffic Statistics ---- */
+    html += QString("<h3 style='color:%1; margin:8px 0 2px 0; font-size:13px;'>Traffic</h3>").arg(headingColor);
+    html += "<table cellpadding='2'>";
+    html += QString("<tr><td style='color:%1;'>Frames:</td>"
+                    "<td><b>%2</b></td></tr>")
+                .arg(dimColor).arg(totalFrames);
+    /* Format bytes nicely */
+    QString bytesStr;
+    if (totalBytes >= 1048576)
+        bytesStr = QString("%1 MB").arg(totalBytes / 1048576.0, 0, 'f', 1);
+    else if (totalBytes >= 1024)
+        bytesStr = QString("%1 KB").arg(totalBytes / 1024.0, 0, 'f', 1);
+    else
+        bytesStr = QString("%1 B").arg(totalBytes);
+    html += QString("<tr><td style='color:%1;'>Bytes:</td>"
+                    "<td><b>%2</b></td></tr>")
+                .arg(dimColor).arg(bytesStr);
+    if (totalRetries > 0) {
+        double retryPct = totalFrames > 0 ? (100.0 * totalRetries / totalFrames) : 0;
+        QString retryColor = (retryPct > 10.0) ? alertColor : ((retryPct > 5.0) ? warnColor : textColor);
+        html += QString("<tr><td style='color:%1;'>Retries:</td>"
+                        "<td style='color:%2;'><b>%3</b> (%4%)</td></tr>")
+                    .arg(dimColor).arg(retryColor)
+                    .arg(totalRetries)
+                    .arg(QString::number(retryPct, 'f', 1));
+    }
+    html += "</table>";
+
+    /* ---- Frame Type Breakdown ---- */
+    if (mgmt + ctrl + data > 0) {
+        html += QString("<h3 style='color:%1; margin:8px 0 2px 0; font-size:13px;'>Frame Types</h3>").arg(headingColor);
+        html += "<table cellpadding='2'>";
+        if (data > 0)
+            html += QString("<tr><td style='color:%1;'>Data:</td><td><b>%2</b></td></tr>").arg(dimColor).arg(data);
+        if (mgmt > 0)
+            html += QString("<tr><td style='color:%1;'>Management:</td><td><b>%2</b></td></tr>").arg(dimColor).arg(mgmt);
+        if (ctrl > 0)
+            html += QString("<tr><td style='color:%1;'>Control:</td><td><b>%2</b></td></tr>").arg(dimColor).arg(ctrl);
+        html += "</table>";
+    }
+
+    /* ---- Management Events ---- */
+    bool hasMgmtEvents = (beacons || probeReqs || probeResps || auths || deauths ||
+                          assocReqs || assocResps || reassocReqs || disassocs);
+    if (hasMgmtEvents) {
+        html += QString("<h3 style='color:%1; margin:8px 0 2px 0; font-size:13px;'>Management Events</h3>").arg(headingColor);
+        html += "<table cellpadding='2'>";
+        if (beacons > 0)
+            html += QString("<tr><td style='color:%1;'>Beacons:</td><td>%2</td></tr>").arg(dimColor).arg(beacons);
+        if (probeReqs > 0)
+            html += QString("<tr><td style='color:%1;'>Probe Requests:</td><td>%2</td></tr>").arg(dimColor).arg(probeReqs);
+        if (probeResps > 0)
+            html += QString("<tr><td style='color:%1;'>Probe Responses:</td><td>%2</td></tr>").arg(dimColor).arg(probeResps);
+        if (assocReqs > 0)
+            html += QString("<tr><td style='color:%1;'>Association Req:</td><td>%2</td></tr>").arg(dimColor).arg(assocReqs);
+        if (assocResps > 0)
+            html += QString("<tr><td style='color:%1;'>Association Resp:</td><td>%2</td></tr>").arg(dimColor).arg(assocResps);
+        if (reassocReqs > 0)
+            html += QString("<tr><td style='color:%1;'>Reassociation Req:</td><td>%2</td></tr>").arg(dimColor).arg(reassocReqs);
+        if (auths > 0)
+            html += QString("<tr><td style='color:%1;'>Authentication:</td><td>%2</td></tr>").arg(dimColor).arg(auths);
+        if (deauths > 0) {
+            QString reasonText = wifiReasonCodeText(deauthReason);
+            QString extra = reasonText.isEmpty() ? "" : QString(" &mdash; <i>%1</i>").arg(reasonText.toHtmlEscaped());
+            html += QString("<tr><td style='color:%1;'>Deauthentication:</td>"
+                            "<td style='color:%2;'><b>%3</b>%4</td></tr>")
+                        .arg(dimColor).arg(alertColor).arg(deauths).arg(extra);
+        }
+        if (disassocs > 0) {
+            QString reasonText = wifiReasonCodeText(disassocReason);
+            QString extra = reasonText.isEmpty() ? "" : QString(" &mdash; <i>%1</i>").arg(reasonText.toHtmlEscaped());
+            html += QString("<tr><td style='color:%1;'>Disassociation:</td>"
+                            "<td style='color:%2;'><b>%3</b>%4</td></tr>")
+                        .arg(dimColor).arg(warnColor).arg(disassocs).arg(extra);
+        }
+        html += "</table>";
+    }
+
+    html += "</div>";
+    m_wifiInfoEdit->setHtml(html);
+}
+
+void ConnectionPopup::showWifiContextMenu(const QPoint &pos)
+{
+    QMenu menu;  /* NOT parented to 'this' — must stay stack-safe when
+                   plugin_if_apply_filter re-enters the event loop and
+                   triggers our deferred destruction.                    */
+    if (isDarkTheme()) {
+        menu.setStyleSheet(
+            "QMenu {"
+            "  background: #2b2b2b; color: #e0e0e0;"
+            "  border: 1px solid #555; padding: 4px;"
+            "}"
+            "QMenu::item { padding: 6px 20px; }"
+            "QMenu::item:selected { background: #0078d4; color: white; }"
+        );
+    }
+
+    QAction *filterAction = menu.addAction("Apply Wi-Fi Filter in Wireshark");
+
+    m_contextMenuActive = true;
+    m_autoCloseTimer->stop();
+
+    QAction *selected = menu.exec(m_wifiInfoEdit->mapToGlobal(pos));
+    m_contextMenuActive = false;
+
+    if (selected == filterAction) {
+        applyWifiFilter();
+    } else {
+        m_autoCloseTimer->start();
+    }
+}
+
+/* Extract the raw MAC address from a possibly-resolved string.
+ * Wireshark's label_value() can return forms like:
+ *   "Cisco_a9:38:40 (00:1b:2b:a9:38:40)"   →  00:1b:2b:a9:38:40
+ *   "Broadcast (ff:ff:ff:ff:ff:ff)"           →  ff:ff:ff:ff:ff:ff
+ *   "00:1b:2b:a9:38:40"                      →  00:1b:2b:a9:38:40  (already raw)
+ */
+static QString extractRawMAC(const QString &addr)
+{
+    /* If the string contains "(xx:xx:xx:xx:xx:xx)", grab the MAC from inside */
+    static QRegularExpression re("\\(([0-9a-fA-F]{2}(?::[0-9a-fA-F]{2}){5})\\)");
+    QRegularExpressionMatch m = re.match(addr);
+    if (m.hasMatch())
+        return m.captured(1);
+    /* Already a bare MAC or something else — return as-is */
+    return addr.trimmed();
+}
+
+void ConnectionPopup::applyWifiFilter()
+{
+    if (!m_pair) return;
+    QString src = extractRawMAC(QString::fromUtf8(m_pair->src_addr));
+    QString dst = extractRawMAC(QString::fromUtf8(m_pair->dst_addr));
+    QString filter = QString("(wlan.addr == %1 && wlan.addr == %2)").arg(src).arg(dst);
+    QByteArray fb = filter.toUtf8();
+    QPointer<ConnectionPopup> guard(this);
+    plugin_if_apply_filter(fb.constData(), true);
+    if (!guard) return;   /* destroyed during event-loop re-entry */
+    hide();
+    deleteLater();
+}
+
+void ConnectionPopup::showContextMenu(const QPoint &pos)
+{
+    int row = m_table->rowAt(pos.y());
+    if (row < 0 || row >= m_rowData.size())
+        return;
+
+    m_table->selectRow(row);
+
+    QMenu menu;  /* NOT parented to 'this' — must stay stack-safe when
+                   plugin_if_apply_filter re-enters the event loop and
+                   triggers our deferred destruction.                    */
+    if (isDarkTheme()) {
+        menu.setStyleSheet(
+            "QMenu {"
+            "  background: #2b2b2b;"
+            "  color: #e0e0e0;"
+            "  border: 1px solid #555;"
+            "  padding: 4px;"
+            "}"
+            "QMenu::item {"
+            "  padding: 6px 20px;"
+            "}"
+            "QMenu::item:selected {"
+            "  background: #0078d4;"
+            "  color: white;"
+            "}"
+            "QMenu::item:disabled {"
+            "  color: #666;"
+            "}"
+        );
+    }
+    /* Light theme: no custom stylesheet — use native platform menu */
+
+    QAction *filterAction = menu.addAction("Apply Filter in Wireshark");
+    QAction *followAction = menu.addAction("Follow TCP Stream");
+    menu.addSeparator();
+    QAction *throughputAction = menu.addAction("TCP Throughput Graph");
+    QAction *rttAction = menu.addAction("TCP Round-Trip Time Graph");
+    menu.addSeparator();
+    QAction *tlsInfoAction = menu.addAction("TLS Information");
+    QAction *httpInfoAction = menu.addAction("HTTP Information");
+    QAction *smbInfoAction = menu.addAction("SMB / DCE-RPC Information");
+    QAction *krbInfoAction = menu.addAction("Kerberos Information");
+    QAction *emailInfoAction = menu.addAction("Email Protocol Information");
+    QAction *sqlInfoAction = menu.addAction("SQL Database Information");
+    QAction *voipInfoAction = menu.addAction("VoIP / SIP Information");
+
+    /* Disable TCP-only actions for non-TCP rows */
+    const RowData &rd = m_rowData[row];
+    bool isTCP = rd.isTcp;
+    followAction->setEnabled(isTCP);
+    throughputAction->setEnabled(isTCP);
+    rttAction->setEnabled(isTCP);
+    if (!isTCP) {
+        followAction->setText("Follow TCP Stream (TCP only)");
+        throughputAction->setText("TCP Throughput Graph (TCP only)");
+        rttAction->setText("TCP Round-Trip Time Graph (TCP only)");
+    }
+
+    /* TLS Information: enabled for TCP or UDP on port 443 */
+    bool tlsCandidate = (rd.isTcp || rd.isUdp) && rd.port == 443;
+    tlsInfoAction->setEnabled(tlsCandidate);
+    if (!tlsCandidate) {
+        tlsInfoAction->setText("TLS Information (port 443 only)");
+    }
+
+    /* HTTP Information: enabled for TCP on port 80 */
+    bool httpCandidate = rd.isTcp && rd.port == 80;
+    httpInfoAction->setEnabled(httpCandidate);
+    if (!httpCandidate) {
+        httpInfoAction->setText("HTTP Information (port 80 only)");
+    }
+
+    /* SMB / DCE-RPC Information: enabled for TCP on port 445, 139, or 135 */
+    bool smbCandidate = rd.isTcp && (rd.port == 445 || rd.port == 139 || rd.port == 135);
+    smbInfoAction->setEnabled(smbCandidate);
+    if (!smbCandidate) {
+        smbInfoAction->setText("SMB / DCE-RPC Information (port 445/139/135 only)");
+    } else if (rd.port == 135) {
+        smbInfoAction->setText("DCE/RPC Information");
+    } else {
+        smbInfoAction->setText("SMB Information");
+    }
+
+    /* Kerberos Information: enabled for TCP or UDP on port 88 */
+    bool krbCandidate = (rd.isTcp || rd.isUdp) && rd.port == 88;
+    krbInfoAction->setEnabled(krbCandidate);
+    if (!krbCandidate) {
+        krbInfoAction->setText("Kerberos Information (port 88 only)");
+    }
+
+    /* Email Protocol Information: SMTP(25/587/465), IMAP(143/993), POP3(110/995) */
+    bool emailCandidate = rd.isTcp &&
+        (rd.port == 25  || rd.port == 587 || rd.port == 465 ||
+         rd.port == 143 || rd.port == 993 ||
+         rd.port == 110 || rd.port == 995);
+    emailInfoAction->setEnabled(emailCandidate);
+    if (!emailCandidate) {
+        emailInfoAction->setText("Email Protocol Information (SMTP/IMAP/POP3)");
+    } else if (rd.port == 25 || rd.port == 587 || rd.port == 465) {
+        emailInfoAction->setText("SMTP Information");
+    } else if (rd.port == 143 || rd.port == 993) {
+        emailInfoAction->setText("IMAP Information");
+    } else {
+        emailInfoAction->setText("POP3 Information");
+    }
+
+    /* SQL Database Information: MSSQL(1433), MySQL(3306), PostgreSQL(5432) */
+    bool sqlCandidate = rd.isTcp &&
+        (rd.port == 1433 || rd.port == 3306 || rd.port == 5432);
+    sqlInfoAction->setEnabled(sqlCandidate);
+    if (!sqlCandidate) {
+        sqlInfoAction->setText("SQL Database Information (port 1433/3306/5432)");
+    } else if (rd.port == 1433) {
+        sqlInfoAction->setText("MSSQL / TDS Information");
+    } else if (rd.port == 3306) {
+        sqlInfoAction->setText("MySQL / MariaDB Information");
+    } else {
+        sqlInfoAction->setText("PostgreSQL Information");
+    }
+
+    /* VoIP / SIP Information: SIP(5060/5061) */
+    bool voipCandidate = (rd.isTcp || rd.isUdp) &&
+        (rd.port == 5060 || rd.port == 5061);
+    voipInfoAction->setEnabled(voipCandidate);
+    if (!voipCandidate) {
+        voipInfoAction->setText("VoIP / SIP Information (port 5060/5061)");
+    } else if (rd.port == 5061) {
+        voipInfoAction->setText("SIP / TLS Information");
+    } else {
+        voipInfoAction->setText("SIP / VoIP Information");
+    }
+
+    /* Guard: prevent auto-close timer
+     * while QMenu::exec()'s nested event loop is running.                  */
+    m_contextMenuActive = true;
+    m_autoCloseTimer->stop();
+
+    QAction *selected = menu.exec(m_table->viewport()->mapToGlobal(pos));
+
+    m_contextMenuActive = false;
+
+    if (selected == filterAction) {
+        applyFilterForRow(row);
+    } else if (selected == followAction) {
+        followTCPStreamForRow(row);
+    } else if (selected == throughputAction) {
+        openTcpStreamGraph(row, "Throughput");
+    } else if (selected == rttAction) {
+        openTcpStreamGraph(row, "Round Trip Time");
+    } else if (selected == tlsInfoAction) {
+        showTlsInfoForRow(row);
+    } else if (selected == httpInfoAction) {
+        showHttpInfoForRow(row);
+    } else if (selected == smbInfoAction) {
+        showSmbInfoForRow(row);
+    } else if (selected == krbInfoAction) {
+        showKerberosInfoForRow(row);
+    } else if (selected == emailInfoAction) {
+        showEmailInfoForRow(row);
+    } else if (selected == sqlInfoAction) {
+        showSqlInfoForRow(row);
+    } else if (selected == voipInfoAction) {
+        showVoipInfoForRow(row);
+    } else {
+        /* User dismissed without selecting; restart auto-close */
+        m_autoCloseTimer->start();
+    }
+}
+
+QString ConnectionPopup::buildFilterForRow(int row)
+{
+    if (row < 0 || row >= m_rowData.size() || !m_pair)
+        return QString();
+
+    const RowData &rd = m_rowData[row];
+    
+    /* Always use raw addresses for filter construction.
+     * extractRawMAC() strips resolved names like "Cisco_a9:38:40 (00:1b:2b:...)" */
+    QString src = extractRawMAC(QString::fromUtf8(m_pair->src_addr));
+    QString dst = extractRawMAC(QString::fromUtf8(m_pair->dst_addr));
+
+    /* Detect address type from format rather than trusting m_useMAC flag.
+     * MAC addresses look like xx:xx:xx:xx:xx:xx (6 colon-separated groups).
+     * This prevents using eth.addr with IP addresses or vice versa.        */
+    bool looksLikeMAC = (src.count(':') == 5 && dst.count(':') == 5);
+
+    /* Build address clause using bidirectional matching */
+    QString addrFilter;
+    if (looksLikeMAC) {
+        addrFilter = QString("eth.addr == %1 && eth.addr == %2").arg(src).arg(dst);
+    } else {
+        addrFilter = QString("ip.addr == %1 && ip.addr == %2").arg(src).arg(dst);
+    }
+
+    /* Build port clause using per-port protocol info for accuracy.
+     * When both TCP and UDP were observed on the same port, include both. */
+    QString portFilter;
+    if (rd.isTcp && rd.isUdp) {
+        portFilter = QString("(tcp.port == %1 || udp.port == %1)").arg(rd.port);
+    } else if (rd.isTcp) {
+        portFilter = QString("tcp.port == %1").arg(rd.port);
+    } else if (rd.isUdp) {
+        portFilter = QString("udp.port == %1").arg(rd.port);
+    } else {
+        /* Unknown transport — just filter by addresses */
+        return QString("(%1)").arg(addrFilter);
+    }
+
+    return QString("(%1 && %2)").arg(addrFilter).arg(portFilter);
+}
+
+void ConnectionPopup::applyFilterForRow(int row)
+{
+    QString filter = buildFilterForRow(row);
+    if (filter.isEmpty())
+        return;
+
+    QByteArray filterBytes = filter.toUtf8();
+    QPointer<ConnectionPopup> guard(this);
+    plugin_if_apply_filter(filterBytes.constData(), true);
+    if (!guard) return;   /* destroyed during event-loop re-entry */
+    hide();
+    deleteLater();
+}
+
+void ConnectionPopup::followTCPStreamForRow(int row)
+{
+    if (row < 0 || row >= m_rowData.size() || !m_pair)
+        return;
+
+    const RowData &rd = m_rowData[row];
+    if (!rd.isTcp)
+        return;
+
+    /* Step 1: Apply a narrowing filter so Wireshark selects the right TCP
+     * conversation.  This ensures the "current packet" belongs to the
+     * desired stream when we subsequently trigger Follow TCP Stream.       */
+    QString filter = buildFilterForRow(row);
+    if (filter.isEmpty()) return;
+    QByteArray filterBytes = filter.toUtf8();
+    QPointer<ConnectionPopup> guard(this);
+    plugin_if_apply_filter(filterBytes.constData(), true);
+
+    /* Step 2: After a brief delay (letting the filter take effect and
+     * Wireshark select the first matching packet), programmatically trigger
+     * the "Follow TCP Stream" menu action inside Wireshark's main window.  */
+    QTimer::singleShot(400, qApp, []() {
+        for (QWidget *w : QApplication::topLevelWidgets()) {
+            QMainWindow *mainWin = qobject_cast<QMainWindow *>(w);
+            if (!mainWin || !mainWin->menuBar()) continue;
+
+            /* Walk the menu bar: look for a "Follow" submenu (under Analyze) */
+            for (QAction *topAction : mainWin->menuBar()->actions()) {
+                QMenu *topMenu = topAction->menu();
+                if (!topMenu) continue;
+
+                for (QAction *midAction : topMenu->actions()) {
+                    QMenu *subMenu = midAction->menu();
+                    if (!subMenu) continue;
+                    if (!subMenu->title().contains("Follow", Qt::CaseInsensitive))
+                        continue;
+
+                    /* Found the "Follow" submenu — look for TCP Stream */
+                    for (QAction *followAction : subMenu->actions()) {
+                        if (followAction->text().contains("TCP Stream", Qt::CaseInsensitive) &&
+                            followAction->isEnabled()) {
+                            followAction->trigger();
+                            return;
+                        }
+                    }
+                }
+            }
+        }
+    });
+
+    if (!guard) return;   /* destroyed during event-loop re-entry */
+    hide();
+    deleteLater();
+}
+
+void ConnectionPopup::openTcpStreamGraph(int row, const QString &graphName)
+{
+    if (row < 0 || row >= m_rowData.size() || !m_pair)
+        return;
+
+    const RowData &rd = m_rowData[row];
+    if (!rd.isTcp)
+        return;
+
+    /* Step 1: Apply a narrowing filter so Wireshark selects a packet from
+     * the desired TCP stream.                                              */
+    QString filter = buildFilterForRow(row);
+    if (filter.isEmpty()) return;
+    QByteArray filterBytes = filter.toUtf8();
+    QPointer<ConnectionPopup> guard(this);
+    plugin_if_apply_filter(filterBytes.constData(), true);
+
+    /* Step 2: After a brief delay, walk Wireshark's menu bar to find
+     * Statistics → TCP Stream Graphs → <graphName> and trigger it.         */
+    QString target = graphName;
+    QTimer::singleShot(400, qApp, [target]() {
+        for (QWidget *w : QApplication::topLevelWidgets()) {
+            QMainWindow *mainWin = qobject_cast<QMainWindow *>(w);
+            if (!mainWin || !mainWin->menuBar()) continue;
+
+            for (QAction *topAction : mainWin->menuBar()->actions()) {
+                QMenu *topMenu = topAction->menu();
+                if (!topMenu) continue;
+
+                /* Look for the "TCP Stream Graphs" submenu */
+                for (QAction *midAction : topMenu->actions()) {
+                    QMenu *subMenu = midAction->menu();
+                    if (!subMenu) continue;
+                    if (!subMenu->title().contains("TCP Stream Graphs", Qt::CaseInsensitive))
+                        continue;
+
+                    /* Found — look for the specific graph action */
+                    for (QAction *graphAction : subMenu->actions()) {
+                        if (graphAction->text().contains(target, Qt::CaseInsensitive) &&
+                            graphAction->isEnabled()) {
+                            graphAction->trigger();
+                            return;
+                        }
+                    }
+                }
+            }
+        }
+    });
+
+    if (!guard) return;   /* destroyed during event-loop re-entry */
+    hide();
+    deleteLater();
+}
+
+/* ------------------------------------------------------------------ */
+/* Custom widget that draws a sorry smiley face                       */
+/* ------------------------------------------------------------------ */
+class SorrySmileyWidget : public QWidget
+{
+public:
+    explicit SorrySmileyWidget(QWidget *parent = nullptr) : QWidget(parent) {
+        setMinimumSize(120, 120);
+        setSizePolicy(QSizePolicy::Fixed, QSizePolicy::Fixed);
+    }
+protected:
+    void paintEvent(QPaintEvent *) override {
+        QPainter p(this);
+        p.setRenderHint(QPainter::Antialiasing);
+        int sz = qMin(width(), height());
+        int cx = width() / 2, cy = height() / 2;
+        int r = sz / 2 - 4;
+
+        /* Face circle */
+        p.setPen(QPen(QColor("#c0930a"), 3));
+        p.setBrush(QColor("#fdd835"));
+        p.drawEllipse(QPoint(cx, cy), r, r);
+
+        /* Eyes — slightly sad, looking down */
+        int eyeY = cy - r / 4;
+        int eyeSpacing = r / 3;
+        p.setPen(Qt::NoPen);
+        p.setBrush(QColor("#5d4037"));
+        p.drawEllipse(QPoint(cx - eyeSpacing, eyeY), r / 8, r / 6);
+        p.drawEllipse(QPoint(cx + eyeSpacing, eyeY), r / 8, r / 6);
+
+        /* Frown — arc curving upward (sad mouth) */
+        p.setPen(QPen(QColor("#5d4037"), 3, Qt::SolidLine, Qt::RoundCap));
+        p.setBrush(Qt::NoBrush);
+        QRect mouthRect(cx - r / 3, cy + r / 6, r * 2 / 3, r / 2);
+        p.drawArc(mouthRect, 20 * 16, 140 * 16);
+    }
+};
+
+/* ------------------------------------------------------------------ */
+/* TLS Information dialog                                             */
+/* ------------------------------------------------------------------ */
+void ConnectionPopup::showTlsInfoForRow(int row)
+{
+    if (row < 0 || row >= m_rowData.size() || !m_pair)
+        return;
+
+    /* Obtain the current capture file from Wireshark */
+    capture_file *cf = (capture_file *)plugin_if_get_capture_file(
+        extract_capture_file, NULL);
+
+    if (!cf) {
+        QMessageBox::warning(this, "TLS Information",
+            "No capture file is currently loaded in Wireshark.");
+        return;
+    }
+
+    /* Determine addresses for the analysis */
+    QString src = QString::fromUtf8(m_pair->src_addr);
+    QString dst = QString::fromUtf8(m_pair->dst_addr);
+    bool looksLikeMAC = (src.count(':') == 5 && dst.count(':') == 5);
+    const RowData &rd = m_rowData[row];
+
+    /* Run the TLS analysis */
+    tls_info_t *tls = packet_analyzer_extract_tls_info(
+        cf,
+        m_pair->src_addr,
+        m_pair->dst_addr,
+        rd.port,
+        looksLikeMAC ? TRUE : FALSE);
+
+    /* Build the dialog */
+    bool dark = isDarkTheme();
+    QDialog *dlg = new QDialog(nullptr);
+    dlg->setWindowTitle("TLS Information");
+    dlg->setAttribute(Qt::WA_DeleteOnClose);
+    dlg->setMinimumSize(520, 400);
+    dlg->resize(620, 520);
+    dlg->setSizeGripEnabled(true);
+
+    QVBoxLayout *mainLayout = new QVBoxLayout(dlg);
+    mainLayout->setContentsMargins(16, 16, 16, 16);
+    mainLayout->setSpacing(12);
+
+    if (!tls || !tls->found) {
+        /* ---- No TLS data: show sorry smiley ---- */
+        mainLayout->addStretch(1);
+
+        SorrySmileyWidget *smiley = new SorrySmileyWidget(dlg);
+        smiley->setFixedSize(140, 140);
+        QHBoxLayout *smileyRow = new QHBoxLayout;
+        smileyRow->addStretch(1);
+        smileyRow->addWidget(smiley);
+        smileyRow->addStretch(1);
+        mainLayout->addLayout(smileyRow);
+
+        QLabel *sorryLabel = new QLabel(
+            "Sorry, no TLS Handshakes in the buffer", dlg);
+        sorryLabel->setAlignment(Qt::AlignCenter);
+        sorryLabel->setStyleSheet(
+            QString("font-size: 16px; font-weight: bold; color: %1; padding: 12px;")
+                .arg(dark ? "#e0e0e0" : "#333"));
+        mainLayout->addWidget(sorryLabel);
+
+        /* Diagnostic detail so the user (or developer) can see what was tried */
+        QString addrField = looksLikeMAC ? "eth.addr" : "ip.addr";
+        QString filterUsed = QString("%1 == %2 && %1 == %3 && tcp.port == %4")
+            .arg(addrField).arg(src).arg(dst).arg(rd.port);
+        QString diagText = QString(
+            "<div style='text-align:center; color:%1; font-size:12px; padding:8px;'>"
+            "Filter: <span style='font-family:monospace;'>%2</span><br>"
+            "Packets matched: <b>%3</b> &nbsp;|&nbsp; "
+            "Handshake messages: <b>%4</b>"
+            "</div>")
+            .arg(dark ? "#888" : "#999")
+            .arg(filterUsed.toHtmlEscaped())
+            .arg(tls ? tls->matched_packets : 0)
+            .arg(tls ? tls->handshake_count : 0);
+        QLabel *diagLabel = new QLabel(diagText, dlg);
+        diagLabel->setAlignment(Qt::AlignCenter);
+        diagLabel->setTextFormat(Qt::RichText);
+        mainLayout->addWidget(diagLabel);
+
+        mainLayout->addStretch(1);
+    } else {
+        /* ---- Build rich HTML content ---- */
+        QString html;
+        QString headingColor = dark ? "#90caf9" : "#1565c0";
+        QString textColor    = dark ? "#e0e0e0" : "#222";
+        QString dimColor     = dark ? "#999"    : "#666";
+        QString valColor     = dark ? "#c8e6c9" : "#1b5e20";
+
+        html += QString("<div style='color:%1;'>").arg(textColor);
+
+        /* Connection header */
+        html += QString("<h3 style='color:%1; margin-bottom:4px;'>Connection</h3>").arg(headingColor);
+        html += QString("<table cellpadding='3'>"
+                        "<tr><td style='color:%1;'>Endpoints:</td>"
+                        "<td><b>%2</b> &#8596; <b>%3</b></td></tr>"
+                        "<tr><td style='color:%1;'>Port:</td>"
+                        "<td><b>%4</b></td></tr>"
+                        "<tr><td style='color:%1;'>Handshake packets:</td>"
+                        "<td><b>%5</b></td></tr>"
+                        "</table><br>")
+                    .arg(dimColor)
+                    .arg(src.toHtmlEscaped())
+                    .arg(dst.toHtmlEscaped())
+                    .arg(rd.port)
+                    .arg(tls->handshake_count);
+
+        /* TLS Handshake info */
+        html += QString("<h3 style='color:%1; margin-bottom:4px;'>TLS Handshake</h3>").arg(headingColor);
+        html += "<table cellpadding='3'>";
+        if (tls->sni) {
+            html += QString("<tr><td style='color:%1;'>Server Name (SNI):</td>"
+                            "<td style='color:%2;'><b>%3</b></td></tr>")
+                        .arg(dimColor).arg(valColor)
+                        .arg(QString::fromUtf8(tls->sni).toHtmlEscaped());
+        }
+        if (tls->version) {
+            html += QString("<tr><td style='color:%1;'>Version:</td>"
+                            "<td><b>%2</b></td></tr>")
+                        .arg(dimColor)
+                        .arg(QString::fromUtf8(tls->version).toHtmlEscaped());
+        }
+        if (tls->cipher_suite) {
+            html += QString("<tr><td style='color:%1;'>Cipher Suite:</td>"
+                            "<td><b>%2</b></td></tr>")
+                        .arg(dimColor)
+                        .arg(QString::fromUtf8(tls->cipher_suite).toHtmlEscaped());
+        }
+        if (tls->alpn) {
+            html += QString("<tr><td style='color:%1;'>ALPN:</td>"
+                            "<td><b>%2</b></td></tr>")
+                        .arg(dimColor)
+                        .arg(QString::fromUtf8(tls->alpn).toHtmlEscaped());
+        }
+        if (tls->sig_algorithm) {
+            html += QString("<tr><td style='color:%1;'>Signature Algorithm:</td>"
+                            "<td><b>%2</b></td></tr>")
+                        .arg(dimColor)
+                        .arg(QString::fromUtf8(tls->sig_algorithm).toHtmlEscaped());
+        }
+        html += "</table><br>";
+
+        /* Fingerprints (JA4 / JA4S) — only shown when available */
+        if (tls->ja4 || tls->ja4s) {
+            html += QString("<h3 style='color:%1; margin-bottom:4px;'>Fingerprints</h3>").arg(headingColor);
+            html += "<table cellpadding='3'>";
+            if (tls->ja4) {
+                html += QString("<tr><td style='color:%1;'>JA4 (Client):</td>"
+                                "<td style='font-family:monospace;'><b>%2</b></td></tr>")
+                            .arg(dimColor)
+                            .arg(QString::fromUtf8(tls->ja4).toHtmlEscaped());
+            }
+            if (tls->ja4s) {
+                html += QString("<tr><td style='color:%1;'>JA4S (Server):</td>"
+                                "<td style='font-family:monospace;'><b>%2</b></td></tr>")
+                            .arg(dimColor)
+                            .arg(QString::fromUtf8(tls->ja4s).toHtmlEscaped());
+            }
+            html += "</table><br>";
+        }
+
+        /* Certificates */
+        if (tls->certificates) {
+            html += QString("<h3 style='color:%1; margin-bottom:4px;'>Certificates</h3>").arg(headingColor);
+            int certNum = 0;
+            for (GList *cl = tls->certificates; cl; cl = cl->next) {
+                tls_cert_info_t *cert = (tls_cert_info_t *)cl->data;
+                certNum++;
+                if (!cert) continue;
+
+                QString certLabel = (certNum == 1) ? "Server Certificate"
+                    : QString("Certificate #%1 (CA / Intermediate)").arg(certNum);
+                html += QString("<h4 style='color:%1; margin:6px 0 2px 0;'>%2</h4>")
+                            .arg(headingColor).arg(certLabel);
+                html += "<table cellpadding='3'>";
+
+                if (cert->subject_cn) {
+                    html += QString("<tr><td style='color:%1;'>Subject CN:</td>"
+                                    "<td style='color:%2;'><b>%3</b></td></tr>")
+                                .arg(dimColor).arg(valColor)
+                                .arg(QString::fromUtf8(cert->subject_cn).toHtmlEscaped());
+                }
+                if (cert->issuer_cn) {
+                    html += QString("<tr><td style='color:%1;'>Issuer:</td>"
+                                    "<td><b>%2</b></td></tr>")
+                                .arg(dimColor)
+                                .arg(QString::fromUtf8(cert->issuer_cn).toHtmlEscaped());
+                }
+                if (cert->serial_number) {
+                    html += QString("<tr><td style='color:%1;'>Serial Number:</td>"
+                                    "<td style='font-family:monospace;'>%2</td></tr>")
+                                .arg(dimColor)
+                                .arg(QString::fromUtf8(cert->serial_number).toHtmlEscaped());
+                }
+                if (cert->not_before) {
+                    html += QString("<tr><td style='color:%1;'>Valid From:</td>"
+                                    "<td><b>%2</b></td></tr>")
+                                .arg(dimColor)
+                                .arg(QString::fromUtf8(cert->not_before).toHtmlEscaped());
+                }
+                if (cert->not_after) {
+                    html += QString("<tr><td style='color:%1;'>Valid Until:</td>"
+                                    "<td><b>%2</b></td></tr>")
+                                .arg(dimColor)
+                                .arg(QString::fromUtf8(cert->not_after).toHtmlEscaped());
+                }
+                html += "</table>";
+
+                /* SAN DNS names */
+                if (cert->san_dns_names) {
+                    html += QString("<div style='margin:4px 0 0 8px;'>"
+                                    "<span style='color:%1;'>Subject Alternative Names:</span><br>")
+                                .arg(dimColor);
+                    for (GList *sl = cert->san_dns_names; sl; sl = sl->next) {
+                        const gchar *dns = (const gchar *)sl->data;
+                        if (dns) {
+                            html += QString("&nbsp;&nbsp;&#8226; <b>%1</b><br>")
+                                        .arg(QString::fromUtf8(dns).toHtmlEscaped());
+                        }
+                    }
+                    html += "</div>";
+                }
+            }
+        }
+
+        html += "</div>";
+
+        QTextEdit *textEdit = new QTextEdit(dlg);
+        textEdit->setReadOnly(true);
+        textEdit->setHtml(html);
+        if (dark) {
+            textEdit->setStyleSheet(
+                "QTextEdit {"
+                "  background: #1e1e1e;"
+                "  color: #e0e0e0;"
+                "  border: 1px solid #444;"
+                "  border-radius: 4px;"
+                "  padding: 8px;"
+                "}");
+        } else {
+            textEdit->setStyleSheet(
+                "QTextEdit {"
+                "  background: #fafafa;"
+                "  color: #222;"
+                "  border: 1px solid #ccc;"
+                "  border-radius: 4px;"
+                "  padding: 8px;"
+                "}");
+        }
+        mainLayout->addWidget(textEdit);
+    }
+
+    /* Close button */
+    QHBoxLayout *btnRow = new QHBoxLayout;
+    btnRow->addStretch(1);
+    QPushButton *closeBtn = new QPushButton("Close", dlg);
+    closeBtn->setFixedWidth(100);
+    if (dark) {
+        closeBtn->setStyleSheet(
+            "QPushButton {"
+            "  background: #444; color: #e0e0e0; border: 1px solid #666;"
+            "  border-radius: 4px; padding: 6px 16px; font-weight: bold;"
+            "}"
+            "QPushButton:hover { background: #555; }");
+    } else {
+        closeBtn->setStyleSheet(
+            "QPushButton {"
+            "  background: #e0e0e0; color: #222; border: 1px solid #aaa;"
+            "  border-radius: 4px; padding: 6px 16px; font-weight: bold;"
+            "}"
+            "QPushButton:hover { background: #d0d0d0; }");
+    }
+    QObject::connect(closeBtn, &QPushButton::clicked, dlg, &QDialog::accept);
+    btnRow->addWidget(closeBtn);
+    btnRow->addStretch(1);
+    mainLayout->addLayout(btnRow);
+
+    /* Clean up TLS info after dialog closes */
+    packet_analyzer_free_tls_info(tls);
+
+    /* Close the popup first, then show the dialog */
+    hide();
+    deleteLater();
+
+    dlg->exec();
+}
+
+/* ------------------------------------------------------------------ */
+/* HTTP Information dialog                                             */
+/* ------------------------------------------------------------------ */
+void ConnectionPopup::showHttpInfoForRow(int row)
+{
+    if (row < 0 || row >= m_rowData.size() || !m_pair)
+        return;
+
+    capture_file *cf = (capture_file *)plugin_if_get_capture_file(
+        extract_capture_file, NULL);
+
+    if (!cf) {
+        QMessageBox::warning(this, "HTTP Information",
+            "No capture file is currently loaded in Wireshark.");
+        return;
+    }
+
+    QString src = QString::fromUtf8(m_pair->src_addr);
+    QString dst = QString::fromUtf8(m_pair->dst_addr);
+    bool looksLikeMAC = (src.count(':') == 5 && dst.count(':') == 5);
+    const RowData &rd = m_rowData[row];
+
+    http_info_t *http = packet_analyzer_extract_http_info(
+        cf,
+        m_pair->src_addr,
+        m_pair->dst_addr,
+        rd.port,
+        looksLikeMAC ? TRUE : FALSE);
+
+    bool dark = isDarkTheme();
+    QDialog *dlg = new QDialog(nullptr);
+    dlg->setWindowTitle("HTTP Information");
+    dlg->setAttribute(Qt::WA_DeleteOnClose);
+    dlg->setMinimumSize(560, 420);
+    dlg->resize(680, 560);
+    dlg->setSizeGripEnabled(true);
+
+    QVBoxLayout *mainLayout = new QVBoxLayout(dlg);
+    mainLayout->setContentsMargins(16, 16, 16, 16);
+    mainLayout->setSpacing(12);
+
+    if (!http || !http->found) {
+        /* ---- No HTTP data: show sorry smiley ---- */
+        mainLayout->addStretch(1);
+
+        SorrySmileyWidget *smiley = new SorrySmileyWidget(dlg);
+        smiley->setFixedSize(140, 140);
+        QHBoxLayout *smileyRow = new QHBoxLayout;
+        smileyRow->addStretch(1);
+        smileyRow->addWidget(smiley);
+        smileyRow->addStretch(1);
+        mainLayout->addLayout(smileyRow);
+
+        QLabel *sorryLabel = new QLabel(
+            "Sorry, no HTTP traffic found in the buffer", dlg);
+        sorryLabel->setAlignment(Qt::AlignCenter);
+        sorryLabel->setStyleSheet(
+            QString("font-size: 16px; font-weight: bold; color: %1; padding: 12px;")
+                .arg(dark ? "#e0e0e0" : "#333"));
+        mainLayout->addWidget(sorryLabel);
+
+        QString diagText = QString(
+            "<div style='text-align:center; color:%1; font-size:12px; padding:8px;'>"
+            "Packets matched: <b>%2</b> &nbsp;|&nbsp; "
+            "Requests: <b>%3</b> &nbsp;|&nbsp; Responses: <b>%4</b>"
+            "</div>")
+            .arg(dark ? "#888" : "#999")
+            .arg(http ? http->matched_packets : 0)
+            .arg(http ? http->request_count : 0)
+            .arg(http ? http->response_count : 0);
+        QLabel *diagLabel = new QLabel(diagText, dlg);
+        diagLabel->setAlignment(Qt::AlignCenter);
+        diagLabel->setTextFormat(Qt::RichText);
+        mainLayout->addWidget(diagLabel);
+
+        mainLayout->addStretch(1);
+    } else {
+        /* ---- Build rich HTML content ---- */
+        QString html;
+        QString headingColor = dark ? "#90caf9" : "#1565c0";
+        QString textColor    = dark ? "#e0e0e0" : "#222";
+        QString dimColor     = dark ? "#999"    : "#666";
+        QString valColor     = dark ? "#c8e6c9" : "#1b5e20";
+
+        html += QString("<div style='color:%1;'>").arg(textColor);
+
+        /* Connection header */
+        html += QString("<h3 style='color:%1; margin-bottom:4px;'>Connection</h3>").arg(headingColor);
+        html += QString("<table cellpadding='3'>"
+                        "<tr><td style='color:%1;'>Endpoints:</td>"
+                        "<td><b>%2</b> &#8596; <b>%3</b></td></tr>"
+                        "<tr><td style='color:%1;'>Port:</td>"
+                        "<td><b>%4</b></td></tr>"
+                        "<tr><td style='color:%1;'>Packets matched:</td>"
+                        "<td><b>%5</b></td></tr>"
+                        "<tr><td style='color:%1;'>Requests / Responses:</td>"
+                        "<td><b>%6</b> / <b>%7</b></td></tr>"
+                        "</table><br>")
+                    .arg(dimColor)
+                    .arg(src.toHtmlEscaped())
+                    .arg(dst.toHtmlEscaped())
+                    .arg(rd.port)
+                    .arg(http->matched_packets)
+                    .arg(http->request_count)
+                    .arg(http->response_count);
+
+        /* Hosts */
+        if (http->hosts) {
+            html += QString("<h3 style='color:%1; margin-bottom:4px;'>Host(s)</h3>").arg(headingColor);
+            for (GList *l = http->hosts; l; l = l->next) {
+                const gchar *h = (const gchar *)l->data;
+                if (h) html += QString("&nbsp;&nbsp;&#8226; <b style='color:%1;'>%2</b><br>")
+                                   .arg(valColor).arg(QString::fromUtf8(h).toHtmlEscaped());
+            }
+            html += "<br>";
+        }
+
+        /* User-Agents */
+        if (http->user_agents) {
+            html += QString("<h3 style='color:%1; margin-bottom:4px;'>User-Agent(s)</h3>").arg(headingColor);
+            for (GList *l = http->user_agents; l; l = l->next) {
+                const gchar *ua = (const gchar *)l->data;
+                if (ua) html += QString("&nbsp;&nbsp;&#8226; %1<br>")
+                                    .arg(QString::fromUtf8(ua).toHtmlEscaped());
+            }
+            html += "<br>";
+        }
+
+        /* Servers */
+        if (http->servers) {
+            html += QString("<h3 style='color:%1; margin-bottom:4px;'>Server(s)</h3>").arg(headingColor);
+            for (GList *l = http->servers; l; l = l->next) {
+                const gchar *sv = (const gchar *)l->data;
+                if (sv) html += QString("&nbsp;&nbsp;&#8226; <b>%1</b><br>")
+                                    .arg(QString::fromUtf8(sv).toHtmlEscaped());
+            }
+            html += "<br>";
+        }
+
+        /* Response Codes */
+        if (http->status_codes && g_hash_table_size(http->status_codes) > 0) {
+            html += QString("<h3 style='color:%1; margin-bottom:4px;'>Response Status Codes</h3>").arg(headingColor);
+            html += "<table cellpadding='3'>";
+            GHashTableIter iter;
+            gpointer key, value;
+            g_hash_table_iter_init(&iter, http->status_codes);
+            while (g_hash_table_iter_next(&iter, &key, &value)) {
+                const gchar *code = (const gchar *)key;
+                guint count = GPOINTER_TO_UINT(value);
+                /* Color-code: 2xx green, 3xx blue, 4xx orange, 5xx red */
+                QString codeColor = valColor;
+                if (code && code[0] == '3') codeColor = dark ? "#90caf9" : "#1565c0";
+                else if (code && code[0] == '4') codeColor = dark ? "#ffcc80" : "#e65100";
+                else if (code && code[0] == '5') codeColor = dark ? "#ef9a9a" : "#b71c1c";
+                html += QString("<tr><td style='color:%1; font-weight:bold; font-size:14px;'>%2</td>"
+                                "<td style='color:%3;'>&#215; %4</td></tr>")
+                            .arg(codeColor)
+                            .arg(QString::fromUtf8(code).toHtmlEscaped())
+                            .arg(dimColor)
+                            .arg(count);
+            }
+            html += "</table><br>";
+        }
+
+        /* Content-Types */
+        if (http->content_types) {
+            html += QString("<h3 style='color:%1; margin-bottom:4px;'>Content Types</h3>").arg(headingColor);
+            for (GList *l = http->content_types; l; l = l->next) {
+                const gchar *ct = (const gchar *)l->data;
+                if (ct) html += QString("&nbsp;&nbsp;&#8226; <span style='font-family:monospace;'>%1</span><br>")
+                                    .arg(QString::fromUtf8(ct).toHtmlEscaped());
+            }
+            html += "<br>";
+        }
+
+        /* Requests */
+        if (http->requests) {
+            html += QString("<h3 style='color:%1; margin-bottom:4px;'>Requests (%2)</h3>")
+                        .arg(headingColor).arg(http->request_count);
+            html += "<table cellpadding='2' style='font-size:12px;'>";
+            int reqNum = 0;
+            for (GList *l = http->requests; l; l = l->next) {
+                http_request_entry_t *req = (http_request_entry_t *)l->data;
+                if (!req) continue;
+                reqNum++;
+                if (reqNum > 50) {
+                    html += QString("<tr><td colspan='3' style='color:%1;'>"
+                                    "... and %2 more requests</td></tr>")
+                                .arg(dimColor).arg(http->request_count - 50);
+                    break;
+                }
+                html += QString("<tr>"
+                                "<td style='color:%1; font-weight:bold;'>%2</td>"
+                                "<td style='font-family:monospace;'>%3</td>"
+                                "<td style='color:%4;'>%5</td>"
+                                "</tr>")
+                            .arg(valColor)
+                            .arg(req->method ? QString::fromUtf8(req->method).toHtmlEscaped() : "")
+                            .arg(req->uri ? QString::fromUtf8(req->uri).toHtmlEscaped() : "")
+                            .arg(dimColor)
+                            .arg(req->host ? QString::fromUtf8(req->host).toHtmlEscaped() : "");
+            }
+            html += "</table>";
+        }
+
+        html += "</div>";
+
+        QTextEdit *textEdit = new QTextEdit(dlg);
+        textEdit->setReadOnly(true);
+        textEdit->setHtml(html);
+        if (dark) {
+            textEdit->setStyleSheet(
+                "QTextEdit {"
+                "  background: #1e1e1e;"
+                "  color: #e0e0e0;"
+                "  border: 1px solid #444;"
+                "  border-radius: 4px;"
+                "  padding: 8px;"
+                "}");
+        } else {
+            textEdit->setStyleSheet(
+                "QTextEdit {"
+                "  background: #fafafa;"
+                "  color: #222;"
+                "  border: 1px solid #ccc;"
+                "  border-radius: 4px;"
+                "  padding: 8px;"
+                "}");
+        }
+        mainLayout->addWidget(textEdit);
+    }
+
+    /* Close button */
+    QHBoxLayout *btnRow = new QHBoxLayout;
+    btnRow->addStretch(1);
+    QPushButton *closeBtn = new QPushButton("Close", dlg);
+    closeBtn->setFixedWidth(100);
+    if (dark) {
+        closeBtn->setStyleSheet(
+            "QPushButton {"
+            "  background: #444; color: #e0e0e0; border: 1px solid #666;"
+            "  border-radius: 4px; padding: 6px 16px; font-weight: bold;"
+            "}"
+            "QPushButton:hover { background: #555; }");
+    } else {
+        closeBtn->setStyleSheet(
+            "QPushButton {"
+            "  background: #e0e0e0; color: #222; border: 1px solid #aaa;"
+            "  border-radius: 4px; padding: 6px 16px; font-weight: bold;"
+            "}"
+            "QPushButton:hover { background: #d0d0d0; }");
+    }
+    QObject::connect(closeBtn, &QPushButton::clicked, dlg, &QDialog::accept);
+    btnRow->addWidget(closeBtn);
+    btnRow->addStretch(1);
+    mainLayout->addLayout(btnRow);
+
+    packet_analyzer_free_http_info(http);
+
+    hide();
+    deleteLater();
+
+    dlg->exec();
+}
+
+/* ------------------------------------------------------------------ */
+/* SMB / CIFS Information dialog                                       */
+/* ------------------------------------------------------------------ */
+
+/* Map well-known DCE/RPC interface UUIDs to human-readable service names */
+static QString dcerpcServiceName(const QString &uuid)
+{
+    static const struct { const char *uuid; const char *name; } known[] = {
+        { "4b324fc8-1670-01d3-1278-5a47bf6ee188", "srvsvc (Server Service)" },
+        { "12345778-1234-abcd-ef00-0123456789ac", "samr (Security Account Manager)" },
+        { "12345778-1234-abcd-ef00-0123456789ab", "lsarpc (Local Security Authority)" },
+        { "338cd001-2244-31f1-aaaa-900038001003", "winreg (Remote Registry)" },
+        { "367abb81-9844-35f1-ad32-98f038001003", "svcctl (Service Control Manager)" },
+        { "12345678-1234-abcd-ef00-01234567cffb", "wkssvc (Workstation Service)" },
+        { "e1af8308-5d1f-11c9-91a4-08002b14a0fa", "epmapper (Endpoint Mapper)" },
+        { "3919286a-b10c-11d0-9ba8-00c04fd92ef5", "dssetup (Active Directory Setup)" },
+        { "12345678-1234-abcd-ef00-0123456789ab", "spoolss (Print Spooler)" },
+        { "6bffd098-a112-3610-9833-46c3f87e345a", "wkssvc (Workstation Service v1)" },
+        { "4fc742e0-4a10-11cf-8273-00aa004ae673", "dfsnm (DFS Namespace)" },
+        { "1ff70682-0a51-30e8-076d-740be8cee98b", "atsvc (Task Scheduler)" },
+        { "86d35949-83c9-4044-b424-db363231fd0c", "ITaskSchedulerService" },
+        { NULL, NULL }
+    };
+    QString lower = uuid.trimmed().toLower();
+    for (int i = 0; known[i].uuid; i++) {
+        if (lower == QString::fromLatin1(known[i].uuid))
+            return QString::fromLatin1(known[i].name);
+    }
+    return uuid;   /* unknown — show raw UUID */
+}
+
+void ConnectionPopup::showSmbInfoForRow(int row)
+{
+    if (row < 0 || row >= m_rowData.size() || !m_pair)
+        return;
+
+    const RowData &rd = m_rowData[row];
+
+    capture_file *cf = (capture_file *)plugin_if_get_capture_file(
+        extract_capture_file, NULL);
+
+    if (!cf) {
+        QMessageBox::warning(this, (rd.port == 135) ? "DCE/RPC Information" : "SMB Information",
+            "No capture file is currently loaded in Wireshark.");
+        return;
+    }
+
+    QString src = QString::fromUtf8(m_pair->src_addr);
+    QString dst = QString::fromUtf8(m_pair->dst_addr);
+    bool looksLikeMAC = (src.count(':') == 5 && dst.count(':') == 5);
+
+    smb_info_t *smb = packet_analyzer_extract_smb_info(
+        cf,
+        m_pair->src_addr,
+        m_pair->dst_addr,
+        rd.port,
+        looksLikeMAC ? TRUE : FALSE);
+
+    bool dark = isDarkTheme();
+    QString dlgTitle = (rd.port == 135) ? "DCE/RPC Information" : "SMB Information";
+    QDialog *dlg = new QDialog(nullptr);
+    dlg->setWindowTitle(dlgTitle);
+    dlg->setAttribute(Qt::WA_DeleteOnClose);
+    dlg->setMinimumSize(560, 420);
+    dlg->resize(680, 580);
+    dlg->setSizeGripEnabled(true);
+
+    QVBoxLayout *mainLayout = new QVBoxLayout(dlg);
+    mainLayout->setContentsMargins(16, 16, 16, 16);
+    mainLayout->setSpacing(12);
+
+    if (!smb || !smb->found) {
+        /* ---- No SMB data: show sorry smiley ---- */
+        mainLayout->addStretch(1);
+
+        SorrySmileyWidget *smiley = new SorrySmileyWidget(dlg);
+        smiley->setFixedSize(140, 140);
+        QHBoxLayout *smileyRow = new QHBoxLayout;
+        smileyRow->addStretch(1);
+        smileyRow->addWidget(smiley);
+        smileyRow->addStretch(1);
+        mainLayout->addLayout(smileyRow);
+
+        QString sorryMsg = (rd.port == 135)
+            ? "No DCE/RPC protocol data found in the buffer"
+            : "No SMB protocol data found in the buffer";
+        QLabel *sorryLabel = new QLabel(sorryMsg, dlg);
+        sorryLabel->setAlignment(Qt::AlignCenter);
+        sorryLabel->setStyleSheet(
+            QString("font-size: 16px; font-weight: bold; color: %1; padding: 12px;")
+                .arg(dark ? "#e0e0e0" : "#333"));
+        mainLayout->addWidget(sorryLabel);
+
+        QString diagText = QString(
+            "<div style='text-align:center; color:%1; font-size:12px; padding:8px;'>"
+            "Packets matched: <b>%2</b>"
+            "</div>")
+            .arg(dark ? "#888" : "#999")
+            .arg(smb ? smb->matched_packets : 0);
+        QLabel *diagLabel = new QLabel(diagText, dlg);
+        diagLabel->setAlignment(Qt::AlignCenter);
+        diagLabel->setTextFormat(Qt::RichText);
+        mainLayout->addWidget(diagLabel);
+
+        mainLayout->addStretch(1);
+    } else {
+        /* ---- Build rich HTML content ---- */
+        QString html;
+        QString headingColor = dark ? "#90caf9" : "#1565c0";
+        QString textColor    = dark ? "#e0e0e0" : "#222";
+        QString dimColor     = dark ? "#999"    : "#666";
+        QString valColor     = dark ? "#c8e6c9" : "#1b5e20";
+
+        html += QString("<div style='color:%1;'>").arg(textColor);
+
+        /* ---- Connection ---- */
+        html += QString("<h3 style='color:%1; margin-bottom:4px;'>Connection</h3>").arg(headingColor);
+        html += QString("<table cellpadding='3'>"
+                        "<tr><td style='color:%1;'>Endpoints:</td>"
+                        "<td><b>%2</b> &#8596; <b>%3</b></td></tr>"
+                        "<tr><td style='color:%1;'>Port:</td>"
+                        "<td><b>%4</b></td></tr>"
+                        "<tr><td style='color:%1;'>Packets matched:</td>"
+                        "<td><b>%5</b></td></tr>"
+                        "</table><br>")
+                    .arg(dimColor)
+                    .arg(src.toHtmlEscaped())
+                    .arg(dst.toHtmlEscaped())
+                    .arg(rd.port)
+                    .arg(smb->matched_packets);
+
+        /* ---- Protocol ---- */
+        bool hasProtoData = (smb->dialect || smb->native_os ||
+                             smb->is_smb2 || smb->dcerpc_interfaces ||
+                             g_hash_table_size(smb->cmd_counts) > 0);
+        html += QString("<h3 style='color:%1; margin-bottom:4px;'>Protocol</h3>").arg(headingColor);
+        html += "<table cellpadding='3'>";
+        if (hasProtoData) {
+            if (smb->dcerpc_interfaces && !smb->is_smb2 && !smb->dialect) {
+                html += QString("<tr><td style='color:%1;'>Type:</td>"
+                                "<td><b>DCE/RPC</b></td></tr>").arg(dimColor);
+            } else {
+                html += QString("<tr><td style='color:%1;'>Version:</td>"
+                                "<td><b>%2</b></td></tr>")
+                            .arg(dimColor)
+                            .arg(smb->is_smb2 ? "SMB2 / SMB3" : "SMB1 (CIFS)");
+            }
+        } else {
+            html += QString("<tr><td style='color:%1;'>Status:</td>"
+                            "<td><b>TCP only</b> — no SMB/DCE-RPC negotiation detected</td></tr>")
+                        .arg(dimColor);
+        }
+        if (smb->dialect) {
+            html += QString("<tr><td style='color:%1;'>Dialect:</td>"
+                            "<td style='color:%2;'><b>%3</b></td></tr>")
+                        .arg(dimColor).arg(valColor)
+                        .arg(QString::fromUtf8(smb->dialect).toHtmlEscaped());
+        }
+        if (smb->native_os) {
+            html += QString("<tr><td style='color:%1;'>Native OS:</td>"
+                            "<td><b>%2</b></td></tr>")
+                        .arg(dimColor)
+                        .arg(QString::fromUtf8(smb->native_os).toHtmlEscaped());
+        }
+        if (smb->native_lanman) {
+            html += QString("<tr><td style='color:%1;'>LAN Manager:</td>"
+                            "<td><b>%2</b></td></tr>")
+                        .arg(dimColor)
+                        .arg(QString::fromUtf8(smb->native_lanman).toHtmlEscaped());
+        }
+        html += "</table><br>";
+
+        /* ---- Authentication ---- */
+        if (smb->auth_username || smb->auth_domain ||
+            smb->auth_hostname || smb->target_name) {
+            html += QString("<h3 style='color:%1; margin-bottom:4px;'>Authentication</h3>").arg(headingColor);
+            html += "<table cellpadding='3'>";
+            if (smb->auth_username) {
+                html += QString("<tr><td style='color:%1;'>Username:</td>"
+                                "<td style='color:%2;'><b>%3</b></td></tr>")
+                            .arg(dimColor).arg(valColor)
+                            .arg(QString::fromUtf8(smb->auth_username).toHtmlEscaped());
+            }
+            if (smb->auth_domain) {
+                html += QString("<tr><td style='color:%1;'>Domain:</td>"
+                                "<td><b>%2</b></td></tr>")
+                            .arg(dimColor)
+                            .arg(QString::fromUtf8(smb->auth_domain).toHtmlEscaped());
+            }
+            if (smb->auth_hostname) {
+                html += QString("<tr><td style='color:%1;'>Hostname:</td>"
+                                "<td><b>%2</b></td></tr>")
+                            .arg(dimColor)
+                            .arg(QString::fromUtf8(smb->auth_hostname).toHtmlEscaped());
+            }
+            if (smb->target_name) {
+                html += QString("<tr><td style='color:%1;'>Target (Server):</td>"
+                                "<td><b>%2</b></td></tr>")
+                            .arg(dimColor)
+                            .arg(QString::fromUtf8(smb->target_name).toHtmlEscaped());
+            }
+            html += "</table><br>";
+        }
+
+        /* ---- Shares ---- */
+        if (smb->tree_paths) {
+            html += QString("<h3 style='color:%1; margin-bottom:4px;'>Shares</h3>").arg(headingColor);
+            for (GList *l = smb->tree_paths; l; l = l->next) {
+                const gchar *tp = (const gchar *)l->data;
+                if (tp) html += QString("&nbsp;&nbsp;&#8226; <b style='color:%1;'>%2</b><br>")
+                                    .arg(valColor).arg(QString::fromUtf8(tp).toHtmlEscaped());
+            }
+            html += "<br>";
+        }
+
+        /* ---- Named Pipes & DCE/RPC Services ---- */
+        if (smb->named_pipes || smb->dcerpc_interfaces) {
+            html += QString("<h3 style='color:%1; margin-bottom:4px;'>Named Pipes &amp; Services</h3>").arg(headingColor);
+            if (smb->named_pipes) {
+                html += QString("<div style='margin-bottom:4px;'>"
+                                "<span style='color:%1;'>Named Pipes:</span></div>")
+                            .arg(dimColor);
+                for (GList *l = smb->named_pipes; l; l = l->next) {
+                    const gchar *np = (const gchar *)l->data;
+                    if (np) html += QString("&nbsp;&nbsp;&#8226; <span style='font-family:monospace;'><b>%1</b></span><br>")
+                                        .arg(QString::fromUtf8(np).toHtmlEscaped());
+                }
+            }
+            if (smb->dcerpc_interfaces) {
+                html += QString("<div style='margin-top:6px; margin-bottom:4px;'>"
+                                "<span style='color:%1;'>DCE/RPC Interfaces:</span></div>")
+                            .arg(dimColor);
+                for (GList *l = smb->dcerpc_interfaces; l; l = l->next) {
+                    const gchar *iface = (const gchar *)l->data;
+                    if (iface) {
+                        QString resolved = dcerpcServiceName(QString::fromUtf8(iface));
+                        html += QString("&nbsp;&nbsp;&#8226; <b style='color:%1;'>%2</b><br>")
+                                    .arg(valColor).arg(resolved.toHtmlEscaped());
+                    }
+                }
+            }
+            html += "<br>";
+        }
+
+        /* ---- Files ---- */
+        if (smb->filenames) {
+            guint shown = g_list_length(smb->filenames);
+            QString fileHeading = (smb->filename_total > shown)
+                ? QString("Files (showing %1 of %2 unique)").arg(shown).arg(smb->filename_total)
+                : QString("Files (%1)").arg(shown);
+            html += QString("<h3 style='color:%1; margin-bottom:4px;'>%2</h3>")
+                        .arg(headingColor).arg(fileHeading);
+            int count = 0;
+            for (GList *l = smb->filenames; l; l = l->next) {
+                const gchar *fn = (const gchar *)l->data;
+                if (!fn) continue;
+                count++;
+                if (count > 50) {
+                    html += QString("<span style='color:%1;'>... and %2 more</span><br>")
+                                .arg(dimColor).arg(shown - 50);
+                    break;
+                }
+                html += QString("&nbsp;&nbsp;&#8226; <span style='font-family:monospace; font-size:12px;'>%1</span><br>")
+                            .arg(QString::fromUtf8(fn).toHtmlEscaped());
+            }
+            html += "<br>";
+        }
+
+        /* ---- Message Statistics ---- */
+        if (smb->cmd_counts && g_hash_table_size(smb->cmd_counts) > 0) {
+            html += QString("<h3 style='color:%1; margin-bottom:4px;'>Message Statistics</h3>").arg(headingColor);
+            html += "<table cellpadding='3'>";
+
+            /* Collect and sort by count descending */
+            GHashTableIter iter;
+            gpointer key, value;
+            QList<QPair<QString, guint>> cmdList;
+            g_hash_table_iter_init(&iter, smb->cmd_counts);
+            while (g_hash_table_iter_next(&iter, &key, &value)) {
+                cmdList.append(qMakePair(
+                    QString::fromUtf8((const gchar *)key),
+                    GPOINTER_TO_UINT(value)));
+            }
+            std::sort(cmdList.begin(), cmdList.end(),
+                      [](const QPair<QString,guint> &a, const QPair<QString,guint> &b) {
+                          return a.second > b.second;
+                      });
+
+            for (const auto &cmd : cmdList) {
+                html += QString("<tr><td style='color:%1;'><b>%2</b></td>"
+                                "<td style='color:%3;'>&#215; %4</td></tr>")
+                            .arg(valColor)
+                            .arg(cmd.first.toHtmlEscaped())
+                            .arg(dimColor)
+                            .arg(cmd.second);
+            }
+            html += "</table><br>";
+        }
+
+        html += "</div>";
+
+        QTextEdit *textEdit = new QTextEdit(dlg);
+        textEdit->setReadOnly(true);
+        textEdit->setHtml(html);
+        if (dark) {
+            textEdit->setStyleSheet(
+                "QTextEdit {"
+                "  background: #1e1e1e;"
+                "  color: #e0e0e0;"
+                "  border: 1px solid #444;"
+                "  border-radius: 4px;"
+                "  padding: 8px;"
+                "}");
+        } else {
+            textEdit->setStyleSheet(
+                "QTextEdit {"
+                "  background: #fafafa;"
+                "  color: #222;"
+                "  border: 1px solid #ccc;"
+                "  border-radius: 4px;"
+                "  padding: 8px;"
+                "}");
+        }
+        mainLayout->addWidget(textEdit);
+    }
+
+    /* Close button */
+    QHBoxLayout *btnRow = new QHBoxLayout;
+    btnRow->addStretch(1);
+    QPushButton *closeBtn = new QPushButton("Close", dlg);
+    closeBtn->setFixedWidth(100);
+    if (dark) {
+        closeBtn->setStyleSheet(
+            "QPushButton {"
+            "  background: #444; color: #e0e0e0; border: 1px solid #666;"
+            "  border-radius: 4px; padding: 6px 16px; font-weight: bold;"
+            "}"
+            "QPushButton:hover { background: #555; }");
+    } else {
+        closeBtn->setStyleSheet(
+            "QPushButton {"
+            "  background: #e0e0e0; color: #222; border: 1px solid #aaa;"
+            "  border-radius: 4px; padding: 6px 16px; font-weight: bold;"
+            "}"
+            "QPushButton:hover { background: #d0d0d0; }");
+    }
+    QObject::connect(closeBtn, &QPushButton::clicked, dlg, &QDialog::accept);
+    btnRow->addWidget(closeBtn);
+    btnRow->addStretch(1);
+    mainLayout->addLayout(btnRow);
+
+    packet_analyzer_free_smb_info(smb);
+
+    hide();
+    deleteLater();
+
+    dlg->exec();
+}
+
+/* ------------------------------------------------------------------ */
+/* Kerberos Information dialog                                          */
+/* ------------------------------------------------------------------ */
+
+/* Return TRUE if the etype label looks like a weak cipher (RC4, DES, etc.) */
+static bool isWeakKerberosEtype(const QString &label)
+{
+    QString lower = label.toLower();
+    return lower.contains("rc4") ||
+           lower.contains("arcfour") ||
+           lower.contains("des-cbc") ||
+           lower.contains("des3");
+}
+
+void ConnectionPopup::showKerberosInfoForRow(int row)
+{
+    if (row < 0 || row >= m_rowData.size() || !m_pair)
+        return;
+
+    const RowData &rd = m_rowData[row];
+
+    capture_file *cf = (capture_file *)plugin_if_get_capture_file(
+        extract_capture_file, NULL);
+
+    if (!cf) {
+        QMessageBox::warning(this, "Kerberos Information",
+            "No capture file is currently loaded in Wireshark.");
+        return;
+    }
+
+    QString src = QString::fromUtf8(m_pair->src_addr);
+    QString dst = QString::fromUtf8(m_pair->dst_addr);
+    bool looksLikeMAC = (src.count(':') == 5 && dst.count(':') == 5);
+
+    kerberos_info_t *krb = packet_analyzer_extract_kerberos_info(
+        cf,
+        m_pair->src_addr,
+        m_pair->dst_addr,
+        rd.port,
+        looksLikeMAC ? TRUE : FALSE);
+
+    bool dark = isDarkTheme();
+    QDialog *dlg = new QDialog(nullptr);
+    dlg->setWindowTitle("Kerberos Information");
+    dlg->setAttribute(Qt::WA_DeleteOnClose);
+    dlg->setMinimumSize(560, 420);
+    dlg->resize(680, 600);
+    dlg->setSizeGripEnabled(true);
+
+    QVBoxLayout *mainLayout = new QVBoxLayout(dlg);
+    mainLayout->setContentsMargins(16, 16, 16, 16);
+    mainLayout->setSpacing(12);
+
+    if (!krb || !krb->found) {
+        /* ---- No Kerberos data: show sorry smiley ---- */
+        mainLayout->addStretch(1);
+
+        SorrySmileyWidget *smiley = new SorrySmileyWidget(dlg);
+        smiley->setFixedSize(140, 140);
+        QHBoxLayout *smileyRow = new QHBoxLayout;
+        smileyRow->addStretch(1);
+        smileyRow->addWidget(smiley);
+        smileyRow->addStretch(1);
+        mainLayout->addLayout(smileyRow);
+
+        QLabel *sorryLabel = new QLabel(
+            "No Kerberos protocol data found in the buffer", dlg);
+        sorryLabel->setAlignment(Qt::AlignCenter);
+        sorryLabel->setStyleSheet(
+            QString("font-size: 16px; font-weight: bold; color: %1; padding: 12px;")
+                .arg(dark ? "#e0e0e0" : "#333"));
+        mainLayout->addWidget(sorryLabel);
+
+        QString diagText = QString(
+            "<div style='text-align:center; color:%1; font-size:12px; padding:8px;'>"
+            "Packets matched: <b>%2</b>"
+            "</div>")
+            .arg(dark ? "#888" : "#999")
+            .arg(krb ? krb->matched_packets : 0);
+        QLabel *diagLabel = new QLabel(diagText, dlg);
+        diagLabel->setAlignment(Qt::AlignCenter);
+        diagLabel->setTextFormat(Qt::RichText);
+        mainLayout->addWidget(diagLabel);
+
+        mainLayout->addStretch(1);
+    } else {
+        /* ---- Build rich HTML content ---- */
+        QString html;
+        QString headingColor = dark ? "#90caf9" : "#1565c0";
+        QString textColor    = dark ? "#e0e0e0" : "#222";
+        QString dimColor     = dark ? "#999"    : "#666";
+        QString valColor     = dark ? "#c8e6c9" : "#1b5e20";
+        QString warnColor    = dark ? "#ffab91" : "#bf360c";
+
+        html += QString("<div style='color:%1;'>").arg(textColor);
+
+        /* ---- Connection ---- */
+        html += QString("<h3 style='color:%1; margin-bottom:4px;'>Connection</h3>").arg(headingColor);
+        html += QString("<table cellpadding='3'>"
+                        "<tr><td style='color:%1;'>Endpoints:</td>"
+                        "<td><b>%2</b> &#8596; <b>%3</b></td></tr>"
+                        "<tr><td style='color:%1;'>Port:</td>"
+                        "<td><b>%4</b> (%5)</td></tr>"
+                        "<tr><td style='color:%1;'>Packets matched:</td>"
+                        "<td><b>%6</b></td></tr>"
+                        "</table><br>")
+                    .arg(dimColor)
+                    .arg(src.toHtmlEscaped())
+                    .arg(dst.toHtmlEscaped())
+                    .arg(rd.port)
+                    .arg(rd.isTcp ? "TCP" : "UDP")
+                    .arg(krb->matched_packets);
+
+        /* ---- Realm ---- */
+        if (krb->realm || krb->client_realm) {
+            html += QString("<h3 style='color:%1; margin-bottom:4px;'>Realm</h3>").arg(headingColor);
+            html += "<table cellpadding='3'>";
+            if (krb->realm) {
+                html += QString("<tr><td style='color:%1;'>Realm:</td>"
+                                "<td style='color:%2;'><b>%3</b></td></tr>")
+                            .arg(dimColor).arg(valColor)
+                            .arg(QString::fromUtf8(krb->realm).toHtmlEscaped());
+            }
+            if (krb->client_realm && g_strcmp0(krb->client_realm, krb->realm) != 0) {
+                html += QString("<tr><td style='color:%1;'>Client Realm:</td>"
+                                "<td style='color:%2;'><b>%3</b></td></tr>")
+                            .arg(dimColor).arg(valColor)
+                            .arg(QString::fromUtf8(krb->client_realm).toHtmlEscaped());
+            }
+            html += "</table><br>";
+        }
+
+        /* ---- Message Statistics ---- */
+        if (krb->msg_type_counts && g_hash_table_size(krb->msg_type_counts) > 0) {
+            html += QString("<h3 style='color:%1; margin-bottom:4px;'>Message Types</h3>").arg(headingColor);
+            html += "<table cellpadding='3'>";
+
+            GHashTableIter iter;
+            gpointer key, value;
+            QList<QPair<QString, guint>> msgList;
+            g_hash_table_iter_init(&iter, krb->msg_type_counts);
+            while (g_hash_table_iter_next(&iter, &key, &value)) {
+                msgList.append(qMakePair(
+                    QString::fromUtf8((const gchar *)key),
+                    GPOINTER_TO_UINT(value)));
+            }
+            std::sort(msgList.begin(), msgList.end(),
+                      [](const QPair<QString,guint> &a, const QPair<QString,guint> &b) {
+                          return a.second > b.second;
+                      });
+
+            for (const auto &msg : msgList) {
+                html += QString("<tr><td style='color:%1;'><b>%2</b></td>"
+                                "<td style='color:%3;'>&#215; %4</td></tr>")
+                            .arg(valColor)
+                            .arg(msg.first.toHtmlEscaped())
+                            .arg(dimColor)
+                            .arg(msg.second);
+            }
+            html += "</table><br>";
+        }
+
+        /* ---- Client Principals ---- */
+        if (krb->client_names) {
+            html += QString("<h3 style='color:%1; margin-bottom:4px;'>Client Principals</h3>").arg(headingColor);
+            for (GList *l = krb->client_names; l; l = l->next) {
+                const gchar *cn = (const gchar *)l->data;
+                if (cn) html += QString("&nbsp;&nbsp;&#8226; <b style='color:%1;'>%2</b><br>")
+                                    .arg(valColor).arg(QString::fromUtf8(cn).toHtmlEscaped());
+            }
+            html += "<br>";
+        }
+
+        /* ---- Service Principals ---- */
+        if (krb->service_names) {
+            html += QString("<h3 style='color:%1; margin-bottom:4px;'>Service Principals</h3>").arg(headingColor);
+            for (GList *l = krb->service_names; l; l = l->next) {
+                const gchar *sn = (const gchar *)l->data;
+                if (sn) html += QString("&nbsp;&nbsp;&#8226; <b style='color:%1;'>%2</b><br>")
+                                    .arg(valColor).arg(QString::fromUtf8(sn).toHtmlEscaped());
+            }
+            html += "<br>";
+        }
+
+        /* ---- Encryption Types ---- */
+        if (krb->encryption_types) {
+            html += QString("<h3 style='color:%1; margin-bottom:4px;'>Encryption Types</h3>").arg(headingColor);
+            bool hasWeak = false;
+            for (GList *l = krb->encryption_types; l; l = l->next) {
+                const gchar *et = (const gchar *)l->data;
+                if (!et) continue;
+                QString etStr = QString::fromUtf8(et);
+                bool weak = isWeakKerberosEtype(etStr);
+                if (weak) hasWeak = true;
+                QString color = weak ? warnColor : valColor;
+                QString suffix = weak ? " &#9888; <i>weak</i>" : "";
+                html += QString("&nbsp;&nbsp;&#8226; <b style='color:%1;'>%2</b>%3<br>")
+                            .arg(color).arg(etStr.toHtmlEscaped()).arg(suffix);
+            }
+            if (hasWeak) {
+                html += QString("<div style='margin-top:4px; color:%1; font-size:11px;'>"
+                                "&#9888; Weak encryption detected — consider enforcing AES-only policy"
+                                "</div>")
+                            .arg(warnColor);
+            }
+            html += "<br>";
+        }
+
+        /* ---- Errors ---- */
+        if ((krb->error_counts && g_hash_table_size(krb->error_counts) > 0) ||
+            krb->error_texts) {
+            html += QString("<h3 style='color:%1; margin-bottom:4px;'>Errors</h3>").arg(headingColor);
+
+            if (krb->error_counts && g_hash_table_size(krb->error_counts) > 0) {
+                html += "<table cellpadding='3'>";
+
+                GHashTableIter iter;
+                gpointer key, value;
+                QList<QPair<QString, guint>> errList;
+                g_hash_table_iter_init(&iter, krb->error_counts);
+                while (g_hash_table_iter_next(&iter, &key, &value)) {
+                    errList.append(qMakePair(
+                        QString::fromUtf8((const gchar *)key),
+                        GPOINTER_TO_UINT(value)));
+                }
+                std::sort(errList.begin(), errList.end(),
+                          [](const QPair<QString,guint> &a, const QPair<QString,guint> &b) {
+                              return a.second > b.second;
+                          });
+
+                for (const auto &e : errList) {
+                    html += QString("<tr><td style='color:%1;'><b>%2</b></td>"
+                                    "<td style='color:%3;'>&#215; %4</td></tr>")
+                                .arg(warnColor)
+                                .arg(e.first.toHtmlEscaped())
+                                .arg(dimColor)
+                                .arg(e.second);
+                }
+                html += "</table>";
+            }
+
+            if (krb->error_texts) {
+                html += QString("<div style='margin-top:6px;'>"
+                                "<span style='color:%1;'>Error Text:</span></div>")
+                            .arg(dimColor);
+                for (GList *l = krb->error_texts; l; l = l->next) {
+                    const gchar *et = (const gchar *)l->data;
+                    if (et) html += QString("&nbsp;&nbsp;&#8226; <i>%1</i><br>")
+                                        .arg(QString::fromUtf8(et).toHtmlEscaped());
+                }
+            }
+            html += "<br>";
+        }
+
+        html += "</div>";
+
+        QTextEdit *textEdit = new QTextEdit(dlg);
+        textEdit->setReadOnly(true);
+        textEdit->setHtml(html);
+        if (dark) {
+            textEdit->setStyleSheet(
+                "QTextEdit {"
+                "  background: #1e1e1e;"
+                "  color: #e0e0e0;"
+                "  border: 1px solid #444;"
+                "  border-radius: 4px;"
+                "  padding: 8px;"
+                "}");
+        } else {
+            textEdit->setStyleSheet(
+                "QTextEdit {"
+                "  background: #fafafa;"
+                "  color: #222;"
+                "  border: 1px solid #ccc;"
+                "  border-radius: 4px;"
+                "  padding: 8px;"
+                "}");
+        }
+        mainLayout->addWidget(textEdit);
+    }
+
+    /* Close button */
+    QHBoxLayout *btnRow = new QHBoxLayout;
+    btnRow->addStretch(1);
+    QPushButton *closeBtn = new QPushButton("Close", dlg);
+    closeBtn->setFixedWidth(100);
+    if (dark) {
+        closeBtn->setStyleSheet(
+            "QPushButton {"
+            "  background: #444; color: #e0e0e0; border: 1px solid #666;"
+            "  border-radius: 4px; padding: 6px 16px; font-weight: bold;"
+            "}"
+            "QPushButton:hover { background: #555; }");
+    } else {
+        closeBtn->setStyleSheet(
+            "QPushButton {"
+            "  background: #e0e0e0; color: #222; border: 1px solid #aaa;"
+            "  border-radius: 4px; padding: 6px 16px; font-weight: bold;"
+            "}"
+            "QPushButton:hover { background: #d0d0d0; }");
+    }
+    QObject::connect(closeBtn, &QPushButton::clicked, dlg, &QDialog::accept);
+    btnRow->addWidget(closeBtn);
+    btnRow->addStretch(1);
+    mainLayout->addLayout(btnRow);
+
+    packet_analyzer_free_kerberos_info(krb);
+
+    hide();
+    deleteLater();
+
+    dlg->exec();
+}
+
+/* ------------------------------------------------------------------ */
+/* Email Protocol Information dialog (SMTP / IMAP / POP3)               */
+/* ------------------------------------------------------------------ */
+
+static QString emailProtocolName(quint16 port)
+{
+    switch (port) {
+    case 25:  return "SMTP";
+    case 587: return "SMTP (Submission)";
+    case 465: return "SMTPS";
+    case 143: return "IMAP";
+    case 993: return "IMAPS";
+    case 110: return "POP3";
+    case 995: return "POP3S";
+    default:  return "Email";
+    }
+}
+
+static QString emailDialogTitle(quint16 port)
+{
+    switch (port) {
+    case 25: case 587: case 465: return "SMTP Information";
+    case 143: case 993:          return "IMAP Information";
+    case 110: case 995:          return "POP3 Information";
+    default:                     return "Email Protocol Information";
+    }
+}
+
+void ConnectionPopup::showEmailInfoForRow(int row)
+{
+    if (row < 0 || row >= m_rowData.size() || !m_pair)
+        return;
+
+    const RowData &rd = m_rowData[row];
+
+    capture_file *cf = (capture_file *)plugin_if_get_capture_file(
+        extract_capture_file, NULL);
+
+    QString dlgTitle = emailDialogTitle(rd.port);
+
+    if (!cf) {
+        QMessageBox::warning(this, dlgTitle,
+            "No capture file is currently loaded in Wireshark.");
+        return;
+    }
+
+    QString src = QString::fromUtf8(m_pair->src_addr);
+    QString dst = QString::fromUtf8(m_pair->dst_addr);
+    bool looksLikeMAC = (src.count(':') == 5 && dst.count(':') == 5);
+
+    email_info_t *em = packet_analyzer_extract_email_info(
+        cf,
+        m_pair->src_addr,
+        m_pair->dst_addr,
+        rd.port,
+        looksLikeMAC ? TRUE : FALSE);
+
+    bool dark = isDarkTheme();
+    QDialog *dlg = new QDialog(nullptr);
+    dlg->setWindowTitle(dlgTitle);
+    dlg->setAttribute(Qt::WA_DeleteOnClose);
+    dlg->setMinimumSize(560, 420);
+    dlg->resize(700, 620);
+    dlg->setSizeGripEnabled(true);
+
+    QVBoxLayout *mainLayout = new QVBoxLayout(dlg);
+    mainLayout->setContentsMargins(16, 16, 16, 16);
+    mainLayout->setSpacing(12);
+
+    if (!em || !em->found) {
+        /* ---- No data: show sorry smiley ---- */
+        mainLayout->addStretch(1);
+
+        SorrySmileyWidget *smiley = new SorrySmileyWidget(dlg);
+        smiley->setFixedSize(140, 140);
+        QHBoxLayout *smileyRow = new QHBoxLayout;
+        smileyRow->addStretch(1);
+        smileyRow->addWidget(smiley);
+        smileyRow->addStretch(1);
+        mainLayout->addLayout(smileyRow);
+
+        QLabel *sorryLabel = new QLabel(
+            QString("No %1 protocol data found in the buffer")
+                .arg(emailProtocolName(rd.port)), dlg);
+        sorryLabel->setAlignment(Qt::AlignCenter);
+        sorryLabel->setStyleSheet(
+            QString("font-size: 16px; font-weight: bold; color: %1; padding: 12px;")
+                .arg(dark ? "#e0e0e0" : "#333"));
+        mainLayout->addWidget(sorryLabel);
+
+        QString diagText = QString(
+            "<div style='text-align:center; color:%1; font-size:12px; padding:8px;'>"
+            "Packets matched: <b>%2</b>"
+            "</div>")
+            .arg(dark ? "#888" : "#999")
+            .arg(em ? em->matched_packets : 0);
+        QLabel *diagLabel = new QLabel(diagText, dlg);
+        diagLabel->setAlignment(Qt::AlignCenter);
+        diagLabel->setTextFormat(Qt::RichText);
+        mainLayout->addWidget(diagLabel);
+
+        mainLayout->addStretch(1);
+    } else {
+        /* ---- Build rich HTML content ---- */
+        QString html;
+        QString headingColor = dark ? "#90caf9" : "#1565c0";
+        QString textColor    = dark ? "#e0e0e0" : "#222";
+        QString dimColor     = dark ? "#999"    : "#666";
+        QString valColor     = dark ? "#c8e6c9" : "#1b5e20";
+
+        html += QString("<div style='color:%1;'>").arg(textColor);
+
+        /* ---- Connection ---- */
+        html += QString("<h3 style='color:%1; margin-bottom:4px;'>Connection</h3>").arg(headingColor);
+        html += QString("<table cellpadding='3'>"
+                        "<tr><td style='color:%1;'>Protocol:</td>"
+                        "<td><b>%2</b></td></tr>"
+                        "<tr><td style='color:%1;'>Endpoints:</td>"
+                        "<td><b>%3</b> &#8596; <b>%4</b></td></tr>"
+                        "<tr><td style='color:%1;'>Port:</td>"
+                        "<td><b>%5</b></td></tr>"
+                        "<tr><td style='color:%1;'>Packets matched:</td>"
+                        "<td><b>%6</b></td></tr>"
+                        "</table><br>")
+                    .arg(dimColor)
+                    .arg(emailProtocolName(rd.port))
+                    .arg(src.toHtmlEscaped())
+                    .arg(dst.toHtmlEscaped())
+                    .arg(rd.port)
+                    .arg(em->matched_packets);
+
+        /* ---- Authentication ---- */
+        if (em->auth_username) {
+            html += QString("<h3 style='color:%1; margin-bottom:4px;'>Authentication</h3>").arg(headingColor);
+            html += QString("<table cellpadding='3'>"
+                            "<tr><td style='color:%1;'>Username:</td>"
+                            "<td style='color:%2;'><b>%3</b></td></tr>"
+                            "</table><br>")
+                        .arg(dimColor).arg(valColor)
+                        .arg(QString::fromUtf8(em->auth_username).toHtmlEscaped());
+        }
+
+        /* ---- SMTP Envelope (MAIL FROM / RCPT TO / EHLO) ---- */
+        if (em->ehlo_domains) {
+            html += QString("<h3 style='color:%1; margin-bottom:4px;'>Client Identity</h3>").arg(headingColor);
+            for (GList *l = em->ehlo_domains; l; l = l->next) {
+                const gchar *d = (const gchar *)l->data;
+                if (d) html += QString("&nbsp;&nbsp;EHLO <b style='color:%1;'>%2</b><br>")
+                                    .arg(valColor).arg(QString::fromUtf8(d).toHtmlEscaped());
+            }
+            html += "<br>";
+        }
+
+        if (em->mail_from || em->rcpt_to) {
+            html += QString("<h3 style='color:%1; margin-bottom:4px;'>Envelope</h3>").arg(headingColor);
+            if (em->mail_from) {
+                for (GList *l = em->mail_from; l; l = l->next) {
+                    const gchar *mf = (const gchar *)l->data;
+                    if (mf) html += QString("&nbsp;&nbsp;MAIL <b style='color:%1;'>%2</b><br>")
+                                        .arg(valColor).arg(QString::fromUtf8(mf).toHtmlEscaped());
+                }
+            }
+            if (em->rcpt_to) {
+                for (GList *l = em->rcpt_to; l; l = l->next) {
+                    const gchar *rt = (const gchar *)l->data;
+                    if (rt) html += QString("&nbsp;&nbsp;RCPT <b style='color:%1;'>%2</b><br>")
+                                        .arg(valColor).arg(QString::fromUtf8(rt).toHtmlEscaped());
+                }
+            }
+            html += "<br>";
+        }
+
+        /* ---- IMAP Folders ---- */
+        if (em->folders) {
+            html += QString("<h3 style='color:%1; margin-bottom:4px;'>Mailbox Folders</h3>").arg(headingColor);
+            for (GList *l = em->folders; l; l = l->next) {
+                const gchar *f = (const gchar *)l->data;
+                if (f) html += QString("&nbsp;&nbsp;&#8226; <b style='color:%1;'>%2</b><br>")
+                                    .arg(valColor).arg(QString::fromUtf8(f).toHtmlEscaped());
+            }
+            html += "<br>";
+        }
+
+        /* ---- Message Headers (from IMF) ---- */
+        bool hasIMF = (em->from_addrs || em->to_addrs || em->subjects ||
+                       em->user_agents || em->content_types);
+        if (hasIMF) {
+            html += QString("<h3 style='color:%1; margin-bottom:4px;'>Message Headers</h3>").arg(headingColor);
+            html += "<table cellpadding='3'>";
+            if (em->from_addrs) {
+                for (GList *l = em->from_addrs; l; l = l->next) {
+                    const gchar *a = (const gchar *)l->data;
+                    if (a) html += QString("<tr><td style='color:%1;'>From:</td>"
+                                           "<td style='color:%2;'><b>%3</b></td></tr>")
+                                       .arg(dimColor).arg(valColor)
+                                       .arg(QString::fromUtf8(a).toHtmlEscaped());
+                }
+            }
+            if (em->to_addrs) {
+                for (GList *l = em->to_addrs; l; l = l->next) {
+                    const gchar *a = (const gchar *)l->data;
+                    if (a) html += QString("<tr><td style='color:%1;'>To:</td>"
+                                           "<td><b>%2</b></td></tr>")
+                                       .arg(dimColor)
+                                       .arg(QString::fromUtf8(a).toHtmlEscaped());
+                }
+            }
+            html += "</table>";
+
+            if (em->subjects) {
+                html += QString("<div style='margin-top:6px;'>"
+                                "<span style='color:%1;'>Subjects:</span></div>")
+                            .arg(dimColor);
+                int count = 0;
+                for (GList *l = em->subjects; l; l = l->next) {
+                    const gchar *s = (const gchar *)l->data;
+                    if (!s) continue;
+                    count++;
+                    if (count > 30) {
+                        guint total = g_list_length(em->subjects);
+                        html += QString("<span style='color:%1;'>... and %2 more</span><br>")
+                                    .arg(dimColor).arg(total - 30);
+                        break;
+                    }
+                    html += QString("&nbsp;&nbsp;&#8226; <i>%1</i><br>")
+                                .arg(QString::fromUtf8(s).toHtmlEscaped());
+                }
+            }
+
+            if (em->user_agents) {
+                html += QString("<div style='margin-top:6px;'>"
+                                "<span style='color:%1;'>User-Agent:</span></div>")
+                            .arg(dimColor);
+                for (GList *l = em->user_agents; l; l = l->next) {
+                    const gchar *ua = (const gchar *)l->data;
+                    if (ua) html += QString("&nbsp;&nbsp;&#8226; <span style='font-family:monospace; font-size:12px;'>%1</span><br>")
+                                        .arg(QString::fromUtf8(ua).toHtmlEscaped());
+                }
+            }
+
+            if (em->content_types) {
+                html += QString("<div style='margin-top:6px;'>"
+                                "<span style='color:%1;'>Content-Types:</span></div>")
+                            .arg(dimColor);
+                for (GList *l = em->content_types; l; l = l->next) {
+                    const gchar *ct = (const gchar *)l->data;
+                    if (ct) html += QString("&nbsp;&nbsp;&#8226; <span style='font-family:monospace; font-size:12px;'>%1</span><br>")
+                                        .arg(QString::fromUtf8(ct).toHtmlEscaped());
+                }
+            }
+            html += "<br>";
+        }
+
+        /* ---- Command Statistics ---- */
+        if (em->cmd_counts && g_hash_table_size(em->cmd_counts) > 0) {
+            html += QString("<h3 style='color:%1; margin-bottom:4px;'>Commands</h3>").arg(headingColor);
+            html += "<table cellpadding='3'>";
+
+            GHashTableIter iter;
+            gpointer key, value;
+            QList<QPair<QString, guint>> cmdList;
+            g_hash_table_iter_init(&iter, em->cmd_counts);
+            while (g_hash_table_iter_next(&iter, &key, &value)) {
+                cmdList.append(qMakePair(
+                    QString::fromUtf8((const gchar *)key),
+                    GPOINTER_TO_UINT(value)));
+            }
+            std::sort(cmdList.begin(), cmdList.end(),
+                      [](const QPair<QString,guint> &a, const QPair<QString,guint> &b) {
+                          return a.second > b.second;
+                      });
+
+            for (const auto &cmd : cmdList) {
+                html += QString("<tr><td style='color:%1;'><b>%2</b></td>"
+                                "<td style='color:%3;'>&#215; %4</td></tr>")
+                            .arg(valColor)
+                            .arg(cmd.first.toHtmlEscaped())
+                            .arg(dimColor)
+                            .arg(cmd.second);
+            }
+            html += "</table><br>";
+        }
+
+        /* ---- Response Statistics ---- */
+        if (em->response_counts && g_hash_table_size(em->response_counts) > 0) {
+            html += QString("<h3 style='color:%1; margin-bottom:4px;'>Responses</h3>").arg(headingColor);
+            html += "<table cellpadding='3'>";
+
+            GHashTableIter iter;
+            gpointer key, value;
+            QList<QPair<QString, guint>> rspList;
+            g_hash_table_iter_init(&iter, em->response_counts);
+            while (g_hash_table_iter_next(&iter, &key, &value)) {
+                rspList.append(qMakePair(
+                    QString::fromUtf8((const gchar *)key),
+                    GPOINTER_TO_UINT(value)));
+            }
+            std::sort(rspList.begin(), rspList.end(),
+                      [](const QPair<QString,guint> &a, const QPair<QString,guint> &b) {
+                          return a.second > b.second;
+                      });
+
+            for (const auto &rsp : rspList) {
+                html += QString("<tr><td style='color:%1;'><b>%2</b></td>"
+                                "<td style='color:%3;'>&#215; %4</td></tr>")
+                            .arg(valColor)
+                            .arg(rsp.first.toHtmlEscaped())
+                            .arg(dimColor)
+                            .arg(rsp.second);
+            }
+            html += "</table><br>";
+        }
+
+        html += "</div>";
+
+        QTextEdit *textEdit = new QTextEdit(dlg);
+        textEdit->setReadOnly(true);
+        textEdit->setHtml(html);
+        if (dark) {
+            textEdit->setStyleSheet(
+                "QTextEdit {"
+                "  background: #1e1e1e;"
+                "  color: #e0e0e0;"
+                "  border: 1px solid #444;"
+                "  border-radius: 4px;"
+                "  padding: 8px;"
+                "}");
+        } else {
+            textEdit->setStyleSheet(
+                "QTextEdit {"
+                "  background: #fafafa;"
+                "  color: #222;"
+                "  border: 1px solid #ccc;"
+                "  border-radius: 4px;"
+                "  padding: 8px;"
+                "}");
+        }
+        mainLayout->addWidget(textEdit);
+    }
+
+    /* Close button */
+    QHBoxLayout *btnRow = new QHBoxLayout;
+    btnRow->addStretch(1);
+    QPushButton *closeBtn = new QPushButton("Close", dlg);
+    closeBtn->setFixedWidth(100);
+    if (dark) {
+        closeBtn->setStyleSheet(
+            "QPushButton {"
+            "  background: #444; color: #e0e0e0; border: 1px solid #666;"
+            "  border-radius: 4px; padding: 6px 16px; font-weight: bold;"
+            "}"
+            "QPushButton:hover { background: #555; }");
+    } else {
+        closeBtn->setStyleSheet(
+            "QPushButton {"
+            "  background: #e0e0e0; color: #222; border: 1px solid #aaa;"
+            "  border-radius: 4px; padding: 6px 16px; font-weight: bold;"
+            "}"
+            "QPushButton:hover { background: #d0d0d0; }");
+    }
+    QObject::connect(closeBtn, &QPushButton::clicked, dlg, &QDialog::accept);
+    btnRow->addWidget(closeBtn);
+    btnRow->addStretch(1);
+    mainLayout->addLayout(btnRow);
+
+    packet_analyzer_free_email_info(em);
+
+    hide();
+    deleteLater();
+
+    dlg->exec();
+}
+
+/* ------------------------------------------------------------------ */
+/* SQL Database Information Dialog                                       */
+/* ------------------------------------------------------------------ */
+
+static QString sqlDialogTitle(quint16 port)
+{
+    switch (port) {
+    case 1433: return "MSSQL / TDS Information";
+    case 3306: return "MySQL / MariaDB Information";
+    case 5432: return "PostgreSQL Information";
+    default:   return "SQL Database Information";
+    }
+}
+
+static QString sqlProtocolName(quint16 port)
+{
+    switch (port) {
+    case 1433: return "MSSQL";
+    case 3306: return "MySQL";
+    case 5432: return "PostgreSQL";
+    default:   return "SQL";
+    }
+}
+
+/* Helper: render a hash table of string→count as a sorted HTML table */
+static QString renderHashCountTable(GHashTable *ht, const QString &headingColor,
+                                    const QString &valColor, const QString &dimColor,
+                                    const QString &title)
+{
+    if (!ht || g_hash_table_size(ht) == 0) return QString();
+
+    QString html;
+    html += QString("<h3 style='color:%1; margin-bottom:4px;'>%2</h3>").arg(headingColor).arg(title);
+    html += "<table cellpadding='3'>";
+
+    GHashTableIter iter;
+    gpointer key, value;
+    QList<QPair<QString, guint>> list;
+    g_hash_table_iter_init(&iter, ht);
+    while (g_hash_table_iter_next(&iter, &key, &value)) {
+        list.append(qMakePair(
+            QString::fromUtf8((const gchar *)key),
+            GPOINTER_TO_UINT(value)));
+    }
+    std::sort(list.begin(), list.end(),
+              [](const QPair<QString,guint> &a, const QPair<QString,guint> &b) {
+                  return a.second > b.second;
+              });
+
+    for (const auto &item : list) {
+        html += QString("<tr><td style='color:%1;'><b>%2</b></td>"
+                        "<td style='color:%3;'>&#215; %4</td></tr>")
+                    .arg(valColor)
+                    .arg(item.first.toHtmlEscaped())
+                    .arg(dimColor)
+                    .arg(item.second);
+    }
+    html += "</table><br>";
+    return html;
+}
+
+/* Helper: create a standard info dialog shell (returns mainLayout) */
+static QDialog* createInfoDialog(const QString &title, bool dark __attribute__((unused)), QVBoxLayout **outLayout)
+{
+    QDialog *dlg = new QDialog(nullptr);
+    dlg->setWindowTitle(title);
+    dlg->setAttribute(Qt::WA_DeleteOnClose);
+    dlg->setMinimumSize(560, 420);
+    dlg->resize(700, 620);
+    dlg->setSizeGripEnabled(true);
+
+    QVBoxLayout *mainLayout = new QVBoxLayout(dlg);
+    mainLayout->setContentsMargins(16, 16, 16, 16);
+    mainLayout->setSpacing(12);
+    *outLayout = mainLayout;
+    return dlg;
+}
+
+/* Helper: add sorry-smiley "no data" placeholder */
+static void addSorryPlaceholder(QVBoxLayout *mainLayout, QDialog *dlg, bool dark,
+                                 const QString &protocolName, guint32 matchedPackets)
+{
+    mainLayout->addStretch(1);
+
+    SorrySmileyWidget *smiley = new SorrySmileyWidget(dlg);
+    smiley->setFixedSize(140, 140);
+    QHBoxLayout *smileyRow = new QHBoxLayout;
+    smileyRow->addStretch(1);
+    smileyRow->addWidget(smiley);
+    smileyRow->addStretch(1);
+    mainLayout->addLayout(smileyRow);
+
+    QLabel *sorryLabel = new QLabel(
+        QString("No %1 protocol data found in the buffer").arg(protocolName), dlg);
+    sorryLabel->setAlignment(Qt::AlignCenter);
+    sorryLabel->setStyleSheet(
+        QString("font-size: 16px; font-weight: bold; color: %1; padding: 12px;")
+            .arg(dark ? "#e0e0e0" : "#333"));
+    mainLayout->addWidget(sorryLabel);
+
+    QString diagText = QString(
+        "<div style='text-align:center; color:%1; font-size:12px; padding:8px;'>"
+        "Packets matched: <b>%2</b>"
+        "</div>")
+        .arg(dark ? "#888" : "#999")
+        .arg(matchedPackets);
+    QLabel *diagLabel = new QLabel(diagText, dlg);
+    diagLabel->setAlignment(Qt::AlignCenter);
+    diagLabel->setTextFormat(Qt::RichText);
+    mainLayout->addWidget(diagLabel);
+
+    mainLayout->addStretch(1);
+}
+
+/* Helper: add styled QTextEdit with HTML content */
+static void addHtmlTextEdit(QVBoxLayout *mainLayout, QDialog *dlg, bool dark, const QString &html)
+{
+    QTextEdit *textEdit = new QTextEdit(dlg);
+    textEdit->setReadOnly(true);
+    textEdit->setHtml(html);
+    if (dark) {
+        textEdit->setStyleSheet(
+            "QTextEdit {"
+            "  background: #1e1e1e;"
+            "  color: #e0e0e0;"
+            "  border: 1px solid #444;"
+            "  border-radius: 4px;"
+            "  padding: 8px;"
+            "}");
+    } else {
+        textEdit->setStyleSheet(
+            "QTextEdit {"
+            "  background: #fafafa;"
+            "  color: #222;"
+            "  border: 1px solid #ccc;"
+            "  border-radius: 4px;"
+            "  padding: 8px;"
+            "}");
+    }
+    mainLayout->addWidget(textEdit);
+}
+
+/* Helper: add Close button row */
+static void addCloseButton(QVBoxLayout *mainLayout, QDialog *dlg, bool dark)
+{
+    QHBoxLayout *btnRow = new QHBoxLayout;
+    btnRow->addStretch(1);
+    QPushButton *closeBtn = new QPushButton("Close", dlg);
+    closeBtn->setFixedWidth(100);
+    if (dark) {
+        closeBtn->setStyleSheet(
+            "QPushButton {"
+            "  background: #444; color: #e0e0e0; border: 1px solid #666;"
+            "  border-radius: 4px; padding: 6px 16px; font-weight: bold;"
+            "}"
+            "QPushButton:hover { background: #555; }");
+    } else {
+        closeBtn->setStyleSheet(
+            "QPushButton {"
+            "  background: #e0e0e0; color: #222; border: 1px solid #aaa;"
+            "  border-radius: 4px; padding: 6px 16px; font-weight: bold;"
+            "}"
+            "QPushButton:hover { background: #d0d0d0; }");
+    }
+    QObject::connect(closeBtn, &QPushButton::clicked, dlg, &QDialog::accept);
+    btnRow->addWidget(closeBtn);
+    btnRow->addStretch(1);
+    mainLayout->addLayout(btnRow);
+}
+
+void ConnectionPopup::showSqlInfoForRow(int row)
+{
+    if (row < 0 || row >= m_rowData.size() || !m_pair)
+        return;
+
+    const RowData &rd = m_rowData[row];
+
+    capture_file *cf = (capture_file *)plugin_if_get_capture_file(
+        extract_capture_file, NULL);
+
+    QString dlgTitle = sqlDialogTitle(rd.port);
+
+    if (!cf) {
+        QMessageBox::warning(this, dlgTitle,
+            "No capture file is currently loaded in Wireshark.");
+        return;
+    }
+
+    QString src = QString::fromUtf8(m_pair->src_addr);
+    QString dst = QString::fromUtf8(m_pair->dst_addr);
+    bool looksLikeMAC = (src.count(':') == 5 && dst.count(':') == 5);
+
+    sql_info_t *sq = packet_analyzer_extract_sql_info(
+        cf, m_pair->src_addr, m_pair->dst_addr,
+        rd.port, looksLikeMAC ? TRUE : FALSE);
+
+    bool dark = isDarkTheme();
+    QVBoxLayout *mainLayout;
+    QDialog *dlg = createInfoDialog(dlgTitle, dark, &mainLayout);
+
+    if (!sq || !sq->found) {
+        addSorryPlaceholder(mainLayout, dlg, dark,
+                            sqlProtocolName(rd.port),
+                            sq ? sq->matched_packets : 0);
+    } else {
+        QString html;
+        QString headingColor = dark ? "#90caf9" : "#1565c0";
+        QString textColor    = dark ? "#e0e0e0" : "#222";
+        QString dimColor     = dark ? "#999"    : "#666";
+        QString valColor     = dark ? "#c8e6c9" : "#1b5e20";
+
+        html += QString("<div style='color:%1;'>").arg(textColor);
+
+        /* ---- Connection ---- */
+        html += QString("<h3 style='color:%1; margin-bottom:4px;'>Connection</h3>").arg(headingColor);
+        html += QString("<table cellpadding='3'>"
+                        "<tr><td style='color:%1;'>Database Type:</td>"
+                        "<td><b>%2</b></td></tr>"
+                        "<tr><td style='color:%1;'>Endpoints:</td>"
+                        "<td><b>%3</b> &#8596; <b>%4</b></td></tr>"
+                        "<tr><td style='color:%1;'>Port:</td>"
+                        "<td><b>%5</b></td></tr>"
+                        "<tr><td style='color:%1;'>Packets matched:</td>"
+                        "<td><b>%6</b></td></tr>")
+                    .arg(dimColor)
+                    .arg(sq->db_type ? QString::fromUtf8(sq->db_type) : sqlProtocolName(rd.port))
+                    .arg(src.toHtmlEscaped())
+                    .arg(dst.toHtmlEscaped())
+                    .arg(rd.port)
+                    .arg(sq->matched_packets);
+
+        if (sq->version)
+            html += QString("<tr><td style='color:%1;'>Server Version:</td>"
+                            "<td style='color:%2;'><b>%3</b></td></tr>")
+                        .arg(dimColor).arg(valColor)
+                        .arg(QString::fromUtf8(sq->version).toHtmlEscaped());
+        if (sq->server_name)
+            html += QString("<tr><td style='color:%1;'>Server Name:</td>"
+                            "<td style='color:%2;'><b>%3</b></td></tr>")
+                        .arg(dimColor).arg(valColor)
+                        .arg(QString::fromUtf8(sq->server_name).toHtmlEscaped());
+        html += "</table><br>";
+
+        /* ---- Authentication ---- */
+        if (sq->username || sq->database || sq->app_name || sq->client_name || sq->auth_plugin) {
+            html += QString("<h3 style='color:%1; margin-bottom:4px;'>Session</h3>").arg(headingColor);
+            html += "<table cellpadding='3'>";
+            if (sq->username)
+                html += QString("<tr><td style='color:%1;'>Username:</td>"
+                                "<td style='color:%2;'><b>%3</b></td></tr>")
+                            .arg(dimColor).arg(valColor)
+                            .arg(QString::fromUtf8(sq->username).toHtmlEscaped());
+            if (sq->database)
+                html += QString("<tr><td style='color:%1;'>Database:</td>"
+                                "<td style='color:%2;'><b>%3</b></td></tr>")
+                            .arg(dimColor).arg(valColor)
+                            .arg(QString::fromUtf8(sq->database).toHtmlEscaped());
+            if (sq->app_name)
+                html += QString("<tr><td style='color:%1;'>Application:</td>"
+                                "<td><b>%2</b></td></tr>")
+                            .arg(dimColor)
+                            .arg(QString::fromUtf8(sq->app_name).toHtmlEscaped());
+            if (sq->client_name)
+                html += QString("<tr><td style='color:%1;'>Client Host:</td>"
+                                "<td><b>%2</b></td></tr>")
+                            .arg(dimColor)
+                            .arg(QString::fromUtf8(sq->client_name).toHtmlEscaped());
+            if (sq->auth_plugin)
+                html += QString("<tr><td style='color:%1;'>Auth Method:</td>"
+                                "<td><b>%2</b></td></tr>")
+                            .arg(dimColor)
+                            .arg(QString::fromUtf8(sq->auth_plugin).toHtmlEscaped());
+            html += "</table><br>";
+        }
+
+        /* ---- Queries ---- */
+        if (sq->queries) {
+            html += QString("<h3 style='color:%1; margin-bottom:4px;'>Queries (%2 total)</h3>")
+                        .arg(headingColor).arg(sq->query_total);
+            int count = 0;
+            for (GList *l = sq->queries; l; l = l->next) {
+                const gchar *q = (const gchar *)l->data;
+                if (!q) continue;
+                count++;
+                if (count > 30) {
+                    guint total = g_list_length(sq->queries);
+                    html += QString("<span style='color:%1;'>... and %2 more unique queries</span><br>")
+                                .arg(dimColor).arg(total - 30);
+                    break;
+                }
+                QString qStr = QString::fromUtf8(q).toHtmlEscaped();
+                if (qStr.length() > 200) qStr = qStr.left(200) + "...";
+                html += QString("<div style='font-family:monospace; font-size:11px; "
+                                "margin:2px 0; padding:3px; background:%1; border-radius:3px;'>%2</div>")
+                            .arg(dark ? "#2a2a2a" : "#f0f0f0")
+                            .arg(qStr);
+            }
+            html += "<br>";
+        }
+
+        /* ---- Errors ---- */
+        if (sq->error_messages) {
+            html += QString("<h3 style='color:%1; margin-bottom:2px;'>Errors</h3>"
+                            "<div style='color:%2; font-size:10px; margin-bottom:6px;'>"
+                            "Server error messages found in the captured traffic</div>")
+                        .arg(dark ? "#ef9a9a" : "#c62828")
+                        .arg(dimColor);
+            for (GList *l = sq->error_messages; l; l = l->next) {
+                const gchar *e = (const gchar *)l->data;
+                if (e) html += QString("&nbsp;&nbsp;&#8226; <span style='color:%1;'>%2</span><br>")
+                                    .arg(dark ? "#ef9a9a" : "#c62828")
+                                    .arg(QString::fromUtf8(e).toHtmlEscaped());
+            }
+            html += "<br>";
+        }
+
+        /* ---- PostgreSQL Parameters ---- */
+        if (sq->pg_params && g_hash_table_size(sq->pg_params) > 0) {
+            html += QString("<h3 style='color:%1; margin-bottom:4px;'>Server Parameters</h3>").arg(headingColor);
+            html += "<table cellpadding='3'>";
+            GHashTableIter iter;
+            gpointer key, value;
+            g_hash_table_iter_init(&iter, sq->pg_params);
+            while (g_hash_table_iter_next(&iter, &key, &value)) {
+                html += QString("<tr><td style='color:%1;'>%2</td>"
+                                "<td style='color:%3;'><b>%4</b></td></tr>")
+                            .arg(dimColor)
+                            .arg(QString::fromUtf8((const gchar *)key).toHtmlEscaped())
+                            .arg(valColor)
+                            .arg(QString::fromUtf8((const gchar *)value).toHtmlEscaped());
+            }
+            html += "</table><br>";
+        }
+
+        /* ---- Command Statistics ---- */
+        html += renderHashCountTable(sq->cmd_counts, headingColor, valColor, dimColor, "Commands");
+
+        /* ---- Response Statistics ---- */
+        html += renderHashCountTable(sq->response_counts, headingColor, valColor, dimColor, "Responses");
+
+        html += "</div>";
+
+        addHtmlTextEdit(mainLayout, dlg, dark, html);
+    }
+
+    addCloseButton(mainLayout, dlg, dark);
+
+    packet_analyzer_free_sql_info(sq);
+
+    hide();
+    deleteLater();
+
+    dlg->exec();
+}
+
+/* ------------------------------------------------------------------ */
+/* VoIP / SIP Information Dialog                                         */
+/* ------------------------------------------------------------------ */
+
+void ConnectionPopup::showVoipInfoForRow(int row)
+{
+    if (row < 0 || row >= m_rowData.size() || !m_pair)
+        return;
+
+    const RowData &rd = m_rowData[row];
+
+    capture_file *cf = (capture_file *)plugin_if_get_capture_file(
+        extract_capture_file, NULL);
+
+    QString dlgTitle = (rd.port == 5061) ? "SIP / TLS Information" : "SIP / VoIP Information";
+
+    if (!cf) {
+        QMessageBox::warning(this, dlgTitle,
+            "No capture file is currently loaded in Wireshark.");
+        return;
+    }
+
+    QString src = QString::fromUtf8(m_pair->src_addr);
+    QString dst = QString::fromUtf8(m_pair->dst_addr);
+    bool looksLikeMAC = (src.count(':') == 5 && dst.count(':') == 5);
+
+    voip_info_t *vi = packet_analyzer_extract_voip_info(
+        cf, m_pair->src_addr, m_pair->dst_addr,
+        rd.port, looksLikeMAC ? TRUE : FALSE);
+
+    bool dark = isDarkTheme();
+    QVBoxLayout *mainLayout;
+    QDialog *dlg = createInfoDialog(dlgTitle, dark, &mainLayout);
+
+    if (!vi || !vi->found) {
+        addSorryPlaceholder(mainLayout, dlg, dark,
+                            "SIP/VoIP",
+                            vi ? vi->matched_packets : 0);
+    } else {
+        QString html;
+        QString headingColor = dark ? "#90caf9" : "#1565c0";
+        QString textColor    = dark ? "#e0e0e0" : "#222";
+        QString dimColor     = dark ? "#999"    : "#666";
+        QString valColor     = dark ? "#c8e6c9" : "#1b5e20";
+
+        html += QString("<div style='color:%1;'>").arg(textColor);
+
+        /* ---- Connection ---- */
+        html += QString("<h3 style='color:%1; margin-bottom:4px;'>Connection</h3>").arg(headingColor);
+        html += QString("<table cellpadding='3'>"
+                        "<tr><td style='color:%1;'>Protocol:</td>"
+                        "<td><b>SIP</b></td></tr>"
+                        "<tr><td style='color:%1;'>Endpoints:</td>"
+                        "<td><b>%2</b> &#8596; <b>%3</b></td></tr>"
+                        "<tr><td style='color:%1;'>Port:</td>"
+                        "<td><b>%4</b></td></tr>"
+                        "<tr><td style='color:%1;'>Packets matched:</td>"
+                        "<td><b>%5</b></td></tr>"
+                        "</table><br>")
+                    .arg(dimColor)
+                    .arg(src.toHtmlEscaped())
+                    .arg(dst.toHtmlEscaped())
+                    .arg(rd.port)
+                    .arg(vi->matched_packets);
+
+        /* ---- Authentication ---- */
+        if (vi->auth_username) {
+            html += QString("<h3 style='color:%1; margin-bottom:4px;'>Authentication</h3>").arg(headingColor);
+            html += QString("<table cellpadding='3'>"
+                            "<tr><td style='color:%1;'>Username:</td>"
+                            "<td style='color:%2;'><b>%3</b></td></tr>"
+                            "</table><br>")
+                        .arg(dimColor).arg(valColor)
+                        .arg(QString::fromUtf8(vi->auth_username).toHtmlEscaped());
+        }
+
+        /* ---- SIP Addresses ---- */
+        if (vi->from_addrs || vi->to_addrs) {
+            html += QString("<h3 style='color:%1; margin-bottom:4px;'>SIP Addresses</h3>").arg(headingColor);
+            html += "<table cellpadding='3'>";
+            if (vi->from_addrs) {
+                for (GList *l = vi->from_addrs; l; l = l->next) {
+                    const gchar *a = (const gchar *)l->data;
+                    if (a) html += QString("<tr><td style='color:%1;'>From:</td>"
+                                           "<td style='color:%2;'><b>%3</b></td></tr>")
+                                       .arg(dimColor).arg(valColor)
+                                       .arg(QString::fromUtf8(a).toHtmlEscaped());
+                }
+            }
+            if (vi->to_addrs) {
+                for (GList *l = vi->to_addrs; l; l = l->next) {
+                    const gchar *a = (const gchar *)l->data;
+                    if (a) html += QString("<tr><td style='color:%1;'>To:</td>"
+                                           "<td><b>%2</b></td></tr>")
+                                       .arg(dimColor)
+                                       .arg(QString::fromUtf8(a).toHtmlEscaped());
+                }
+            }
+            html += "</table><br>";
+        }
+
+        /* ---- Call IDs ---- */
+        if (vi->call_ids) {
+            html += QString("<h3 style='color:%1; margin-bottom:4px;'>Call IDs (%2)</h3>")
+                        .arg(headingColor).arg(g_list_length(vi->call_ids));
+            int count = 0;
+            for (GList *l = vi->call_ids; l; l = l->next) {
+                const gchar *c = (const gchar *)l->data;
+                if (!c) continue;
+                count++;
+                if (count > 20) {
+                    guint total = g_list_length(vi->call_ids);
+                    html += QString("<span style='color:%1;'>... and %2 more</span><br>")
+                                .arg(dimColor).arg(total - 20);
+                    break;
+                }
+                html += QString("&nbsp;&nbsp;&#8226; <span style='font-family:monospace; font-size:11px;'>%1</span><br>")
+                            .arg(QString::fromUtf8(c).toHtmlEscaped());
+            }
+            html += "<br>";
+        }
+
+        /* ---- User-Agent ---- */
+        if (vi->user_agents) {
+            html += QString("<h3 style='color:%1; margin-bottom:4px;'>User-Agent</h3>").arg(headingColor);
+            for (GList *l = vi->user_agents; l; l = l->next) {
+                const gchar *ua = (const gchar *)l->data;
+                if (ua) html += QString("&nbsp;&nbsp;&#8226; <span style='font-family:monospace; font-size:12px;'>%1</span><br>")
+                                    .arg(QString::fromUtf8(ua).toHtmlEscaped());
+            }
+            html += "<br>";
+        }
+
+        /* ---- Content-Types ---- */
+        if (vi->content_types) {
+            html += QString("<h3 style='color:%1; margin-bottom:4px;'>Content-Types</h3>").arg(headingColor);
+            for (GList *l = vi->content_types; l; l = l->next) {
+                const gchar *ct = (const gchar *)l->data;
+                if (ct) html += QString("&nbsp;&nbsp;&#8226; <span style='font-family:monospace; font-size:12px;'>%1</span><br>")
+                                    .arg(QString::fromUtf8(ct).toHtmlEscaped());
+            }
+            html += "<br>";
+        }
+
+        /* ---- SIP Method Statistics ---- */
+        html += renderHashCountTable(vi->method_counts, headingColor, valColor, dimColor, "SIP Methods");
+
+        /* ---- SIP Status Code Statistics ---- */
+        html += renderHashCountTable(vi->status_counts, headingColor, valColor, dimColor, "SIP Status Codes");
+
+        /* ---- RTP Media ---- */
+        if (vi->rtp_packet_count > 0 || vi->rtp_ssrcs || vi->rtp_payload_types) {
+            html += QString("<h3 style='color:%1; margin-bottom:4px;'>RTP Media</h3>").arg(headingColor);
+            html += "<table cellpadding='3'>";
+            html += QString("<tr><td style='color:%1;'>RTP Packets:</td>"
+                            "<td><b>%2</b></td></tr>")
+                        .arg(dimColor).arg(vi->rtp_packet_count);
+
+            if (vi->rtp_payload_types) {
+                QString ptList;
+                for (GList *l = vi->rtp_payload_types; l; l = l->next) {
+                    const gchar *pt = (const gchar *)l->data;
+                    if (pt) {
+                        if (!ptList.isEmpty()) ptList += ", ";
+                        ptList += QString::fromUtf8(pt).toHtmlEscaped();
+                    }
+                }
+                html += QString("<tr><td style='color:%1;'>Payload Types:</td>"
+                                "<td style='color:%2;'><b>%3</b></td></tr>")
+                            .arg(dimColor).arg(valColor).arg(ptList);
+            }
+
+            if (vi->rtp_ssrcs) {
+                html += QString("<tr><td style='color:%1;'>SSRC Count:</td>"
+                                "<td><b>%2</b></td></tr>")
+                            .arg(dimColor).arg(g_list_length(vi->rtp_ssrcs));
+            }
+
+            if (vi->rtp_setup_methods) {
+                QString smList;
+                for (GList *l = vi->rtp_setup_methods; l; l = l->next) {
+                    const gchar *sm = (const gchar *)l->data;
+                    if (sm) {
+                        if (!smList.isEmpty()) smList += ", ";
+                        smList += QString::fromUtf8(sm).toHtmlEscaped();
+                    }
+                }
+                html += QString("<tr><td style='color:%1;'>Setup Method:</td>"
+                                "<td><b>%2</b></td></tr>")
+                            .arg(dimColor).arg(smList);
+            }
+            html += "</table><br>";
+
+            /* List SSRCs */
+            if (vi->rtp_ssrcs && g_list_length(vi->rtp_ssrcs) <= 20) {
+                html += QString("<div style='margin-top:2px;'>"
+                                "<span style='color:%1;'>SSRCs:</span></div>")
+                            .arg(dimColor);
+                for (GList *l = vi->rtp_ssrcs; l; l = l->next) {
+                    const gchar *s = (const gchar *)l->data;
+                    if (s) html += QString("&nbsp;&nbsp;&#8226; <span style='font-family:monospace; font-size:11px;'>%1</span><br>")
+                                       .arg(QString::fromUtf8(s).toHtmlEscaped());
+                }
+                html += "<br>";
+            }
+        }
+
+        /* ---- H.223 ---- */
+        if (vi->h223_mux_count > 0) {
+            html += QString("<h3 style='color:%1; margin-bottom:4px;'>H.223 Multiplexing</h3>").arg(headingColor);
+            html += QString("<table cellpadding='3'>"
+                            "<tr><td style='color:%1;'>MUX PDUs:</td>"
+                            "<td><b>%2</b></td></tr>"
+                            "</table><br>")
+                        .arg(dimColor).arg(vi->h223_mux_count);
+        }
+
+        html += "</div>";
+
+        addHtmlTextEdit(mainLayout, dlg, dark, html);
+    }
+
+    addCloseButton(mainLayout, dlg, dark);
+
+    packet_analyzer_free_voip_info(vi);
+
+    hide();
+    deleteLater();
+
+    dlg->exec();
+}
