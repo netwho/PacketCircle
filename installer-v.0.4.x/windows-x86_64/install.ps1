@@ -84,22 +84,38 @@ if (-not $WsVersion) {
 
 $WsMajor      = $WsVersion.Split('.')[0]
 $WsMinor      = $WsVersion.Split('.')[1]
-$PluginPathId = "$WsMajor.$WsMinor"
+$PluginPathId = "$WsMajor.$WsMinor"   # default; overridden below if we find the real dir
 
-# Detect from existing plugin directories
+# --- Determine plugin directory ---
+# Scan known locations to find the exact directory name Wireshark uses for this version.
+# Windows typically uses dots ("4.6") but we also handle dashes ("4-6") for safety.
 $foundPathId = $null
-if ($WiresharkPath -and (Test-Path "$WiresharkPath\plugins")) {
-    Get-ChildItem "$WiresharkPath\plugins" -Directory | ForEach-Object {
-        if ($_.Name -match '^\d+\.\d+$') { $foundPathId = $_.Name }
+
+$searchBases = @(
+    $(if ($WiresharkPath) { "$WiresharkPath\plugins" } else { $null }),
+    "$env:APPDATA\Wireshark\plugins",
+    "$env:LOCALAPPDATA\Wireshark\plugins"
+) | Where-Object { $_ -and (Test-Path $_) }
+
+foreach ($base in $searchBases) {
+    Get-ChildItem $base -Directory -ErrorAction SilentlyContinue | ForEach-Object {
+        # Match only the directory whose major.minor matches the detected version
+        if ($_.Name -match "^$WsMajor[\.\-]$WsMinor$") {
+            $foundPathId = $_.Name
+        }
     }
+    if ($foundPathId) { break }
 }
-$personalPluginBase = "$env:APPDATA\Wireshark\plugins"
-if (Test-Path $personalPluginBase) {
-    Get-ChildItem $personalPluginBase -Directory -ErrorAction SilentlyContinue | ForEach-Object {
-        if ($_.Name -match '^\d+\.\d+$') { $foundPathId = $_.Name }
-    }
+
+if ($foundPathId) {
+    $PluginPathId = $foundPathId
+    Write-Host "  Plugin path ID detected: " -NoNewline
+    Write-Host $PluginPathId -ForegroundColor Cyan
+} else {
+    Write-Host "  Plugin path ID not found in existing dirs, using default: " -NoNewline
+    Write-Host $PluginPathId -ForegroundColor Yellow
+    Write-Host "  If the plugin does not load, check: Help > About Wireshark > Folders > Personal Plugins" -ForegroundColor Yellow
 }
-if ($foundPathId) { $PluginPathId = $foundPathId }
 
 $PersonalPluginDir = "$env:APPDATA\Wireshark\plugins\$PluginPathId\epan"
 $SystemPluginDir   = if ($WiresharkPath) { "$WiresharkPath\plugins\$PluginPathId\epan" } else { $null }
@@ -108,11 +124,18 @@ Write-Host "[OK] " -ForegroundColor Green -NoNewline
 Write-Host "Wireshark version: $WsVersion  |  Plugin API: $PluginPathId"
 
 # --- Detect currently installed version ---
+# Check all known locations, including %LOCALAPPDATA% as an alternative personal dir.
 $InstalledVersion = $null
 $InstalledPath    = $null
 
-foreach ($dir in @($PersonalPluginDir, $SystemPluginDir)) {
-    if ($dir -and (Test-Path "$dir\$PluginName")) {
+$allCheckDirs = @(
+    $PersonalPluginDir,
+    "$env:LOCALAPPDATA\Wireshark\plugins\$PluginPathId\epan",
+    $SystemPluginDir
+) | Where-Object { $_ }
+
+foreach ($dir in $allCheckDirs) {
+    if (Test-Path "$dir\$PluginName") {
         $InstalledPath = "$dir\$PluginName"
         try {
             $bytes = [System.IO.File]::ReadAllBytes($InstalledPath)
