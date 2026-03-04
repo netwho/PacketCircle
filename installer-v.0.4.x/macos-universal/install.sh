@@ -74,43 +74,91 @@ WS_MINOR=$(printf "%s" "$WS_VERSION" | cut -d. -f2)
 printf "${GREEN}✓${NC} Wireshark version: ${CYAN}%s${NC}\n" "$WS_VERSION"
 
 # --- Determine plugin directory ---
+# Wireshark uses either "4.6" or "4-6" as the version directory name depending on
+# the build. We discover the correct format rather than hardcoding it.
 PLUGIN_PATH_ID=""
 
+# Step 1: look inside Wireshark.app — most authoritative, tells us the exact name
+#         the build uses (e.g. "4-6" for the official .dmg installer)
 if [ -n "$WIRESHARK_APP" ]; then
-    for dir in "$WIRESHARK_APP/Contents/PlugIns/wireshark"/*; do
-        if [ -d "$dir" ] && printf "%s" "$(basename "$dir")" | grep -qE '^[0-9]+-[0-9]+$'; then
-            PLUGIN_PATH_ID=$(basename "$dir")
+    for dir in "$WIRESHARK_APP/Contents/PlugIns/wireshark"/*/; do
+        b=$(basename "$dir" 2>/dev/null) || continue
+        if printf "%s" "$b" | grep -qE "^${WS_MAJOR}[.-]${WS_MINOR}$"; then
+            PLUGIN_PATH_ID="$b"
+            printf "  Plugin path ID from app bundle: ${CYAN}%s${NC}\n" "$PLUGIN_PATH_ID"
             break
         fi
     done
 fi
 
+# Step 2: scan known personal plugin locations for an existing matching version dir
 if [ -z "$PLUGIN_PATH_ID" ]; then
-    for dir in "$HOME/.local/lib/wireshark/plugins"/*; do
-        if [ -d "$dir" ] && printf "%s" "$(basename "$dir")" | grep -qE '^[0-9]+-[0-9]+$'; then
-            PLUGIN_PATH_ID=$(basename "$dir")
+    for base in \
+        "$HOME/.local/lib/wireshark/plugins" \
+        "$HOME/Library/Application Support/Wireshark/plugins" \
+        "$HOME/Library/Wireshark/plugins"; do
+        [ -d "$base" ] || continue
+        for dir in "$base"/*/; do
+            b=$(basename "$dir" 2>/dev/null) || continue
+            if printf "%s" "$b" | grep -qE "^${WS_MAJOR}[.-]${WS_MINOR}$"; then
+                PLUGIN_PATH_ID="$b"
+                printf "  Plugin path ID from personal dir: ${CYAN}%s${NC}\n" "$PLUGIN_PATH_ID"
+                break 2
+            fi
+        done
+    done
+fi
+
+# Step 3: infer separator convention from any existing version dir in the app bundle
+#         (e.g. if "3-4" exists, then "4-6" is also dash-separated)
+if [ -z "$PLUGIN_PATH_ID" ] && [ -n "$WIRESHARK_APP" ]; then
+    for dir in "$WIRESHARK_APP/Contents/PlugIns/wireshark"/*/; do
+        b=$(basename "$dir" 2>/dev/null) || continue
+        if printf "%s" "$b" | grep -qE '^[0-9]+-[0-9]+$'; then
+            PLUGIN_PATH_ID="${WS_MAJOR}-${WS_MINOR}"
+            printf "  Inferred dash format from app bundle: ${CYAN}%s${NC}\n" "$PLUGIN_PATH_ID"
+            break
+        elif printf "%s" "$b" | grep -qE '^[0-9]+\.[0-9]+$'; then
+            PLUGIN_PATH_ID="${WS_MAJOR}.${WS_MINOR}"
+            printf "  Inferred dot format from app bundle: ${CYAN}%s${NC}\n" "$PLUGIN_PATH_ID"
             break
         fi
     done
 fi
 
-[ -z "$PLUGIN_PATH_ID" ] && PLUGIN_PATH_ID="${WS_MAJOR}-${WS_MINOR}"
+# Step 4: fallback — use dot format (XDG/Linux convention, also valid on macOS)
+if [ -z "$PLUGIN_PATH_ID" ]; then
+    PLUGIN_PATH_ID="${WS_MAJOR}.${WS_MINOR}"
+    printf "  ${YELLOW}Warning: Could not detect plugin path format. Defaulting to: %s${NC}\n" "$PLUGIN_PATH_ID"
+    printf "  If the plugin does not load, check Help > About Wireshark > Folders > Personal Plugins\n"
+fi
 
 PERSONAL_PLUGIN_DIR="$HOME/.local/lib/wireshark/plugins/$PLUGIN_PATH_ID/epan"
 SYSTEM_PLUGIN_DIR=""
 [ -n "$WIRESHARK_APP" ] && SYSTEM_PLUGIN_DIR="$WIRESHARK_APP/Contents/PlugIns/wireshark/$PLUGIN_PATH_ID/epan"
 
 # --- Detect currently installed version ---
+# Check all known personal plugin locations in addition to the derived path,
+# in case Wireshark was previously installed with a different path convention.
 INSTALLED_VERSION=""
 INSTALLED_PATH=""
-for dir in "$PERSONAL_PLUGIN_DIR" "$SYSTEM_PLUGIN_DIR"; do
-    if [ -n "$dir" ] && [ -f "$dir/$PLUGIN_NAME" ]; then
-        INSTALLED_VERSION=$(strings "$dir/$PLUGIN_NAME" 2>/dev/null \
-            | grep -oE 'PacketCircle v\.[0-9]+\.[0-9]+\.[0-9]+' | head -1 \
-            | grep -oE '[0-9]+\.[0-9]+\.[0-9]+')
-        INSTALLED_PATH="$dir/$PLUGIN_NAME"
-        break
-    fi
+EXTRA_PERSONAL_DIRS=""
+for base in \
+    "$HOME/.local/lib/wireshark/plugins" \
+    "$HOME/Library/Application Support/Wireshark/plugins" \
+    "$HOME/Library/Wireshark/plugins"; do
+    [ -d "$base" ] || continue
+    EXTRA_PERSONAL_DIRS="$EXTRA_PERSONAL_DIRS $base/$PLUGIN_PATH_ID/epan"
+done
+
+for dir in "$PERSONAL_PLUGIN_DIR" $EXTRA_PERSONAL_DIRS "$SYSTEM_PLUGIN_DIR"; do
+    [ -n "$dir" ] || continue
+    [ -f "$dir/$PLUGIN_NAME" ] || continue
+    INSTALLED_VERSION=$(strings "$dir/$PLUGIN_NAME" 2>/dev/null \
+        | grep -oE 'PacketCircle v\.[0-9]+\.[0-9]+\.[0-9]+' | head -1 \
+        | grep -oE '[0-9]+\.[0-9]+\.[0-9]+')
+    INSTALLED_PATH="$dir/$PLUGIN_NAME"
+    break
 done
 
 if [ -n "$INSTALLED_VERSION" ]; then
