@@ -3,7 +3,7 @@
 # =============================================================================
 #
 # Supports:
-#   - Installing v.0.3.2 or v.0.4.0 (default: latest)
+#   - Installing v.0.3.2 or v.0.4.1 (default: latest)
 #   - Detecting an already-installed version
 #   - Upgrading, downgrading, and uninstalling
 #
@@ -25,12 +25,12 @@ Write-Host ""
 Write-Host "===========================================================" -ForegroundColor Cyan
 Write-Host "      PacketCircle Installer for Windows                   " -ForegroundColor Cyan
 Write-Host "      x86_64 (64-bit Intel/AMD)                            " -ForegroundColor Cyan
-Write-Host "      Available: v.0.3.2, v.0.4.0                         " -ForegroundColor Cyan
+Write-Host "      Available: v.0.3.2, v.0.4.1                         " -ForegroundColor Cyan
 Write-Host "===========================================================" -ForegroundColor Cyan
 Write-Host ""
 
 # --- Verify binaries exist ---
-foreach ($ver in @("v.0.3.2", "v.0.4.0")) {
+foreach ($ver in @("v.0.3.2", "v.0.4.1")) {
     $path = Join-Path $ScriptDir "$ver\$PluginName"
     if (-not (Test-Path $path)) {
         Write-Host "Error: Missing binary: $ver\$PluginName" -ForegroundColor Red
@@ -197,15 +197,15 @@ Write-Host ""
 Write-Host "Select version to install:"
 Write-Host ""
 
-if ($InstalledVersion -eq "0.4.0") {
-    Write-Host "  1) v.0.4.0 (latest)   - already installed, reinstall" -ForegroundColor Green
+if ($InstalledVersion -eq "0.4.1") {
+    Write-Host "  1) v.0.4.1 (latest)   - already installed, reinstall" -ForegroundColor Green
     Write-Host "  2) v.0.3.2             - downgrade"                    -ForegroundColor Yellow
 } elseif ($InstalledVersion -eq "0.3.2") {
-    Write-Host "  1) v.0.4.0 (latest)   - upgrade (recommended)"         -ForegroundColor Green
+    Write-Host "  1) v.0.4.1 (latest)   - upgrade (recommended)"         -ForegroundColor Green
     Write-Host "  2) v.0.3.2             - already installed, reinstall"  -ForegroundColor Yellow
 } else {
-    Write-Host "  1) v.0.4.0 (latest)   - Protocol info dialogs, category search, IGMP multicast" -ForegroundColor Green
-    Write-Host "  2) v.0.3.2             - TCP stream stats, Select Results, theme-aware UI"       -ForegroundColor Yellow
+    Write-Host "  1) v.0.4.1 (latest)   - bidirectional arrows, adaptive display, IPv6 fixes" -ForegroundColor Green
+    Write-Host "  2) v.0.3.2             - TCP stream stats, Select Results, theme-aware UI"  -ForegroundColor Yellow
 }
 
 Write-Host ""
@@ -213,7 +213,7 @@ $verChoice = Read-Host "Choice [1]"
 if (-not $verChoice) { $verChoice = "1" }
 
 switch ($verChoice) {
-    "1" { $SelectedVersion = "0.4.0" }
+    "1" { $SelectedVersion = "0.4.1" }
     "2" { $SelectedVersion = "0.3.2" }
     default {
         Write-Host "Invalid choice." -ForegroundColor Red

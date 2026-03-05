@@ -4,7 +4,7 @@
 # =============================================================================
 #
 # Supports:
-#   - Installing v.0.3.2 or v.0.4.0 (default: latest)
+#   - Installing v.0.3.2 or v.0.4.1 (default: latest)
 #   - Detecting an already-installed version
 #   - Upgrading, downgrading, and uninstalling
 #
@@ -34,7 +34,7 @@ printf "\n"
 printf "${BLUE}╔══════════════════════════════════════════════════╗${NC}\n"
 printf "${BLUE}║   PacketCircle Installer for macOS               ║${NC}\n"
 printf "${BLUE}║   Universal Binary (Intel + Apple Silicon)       ║${NC}\n"
-printf "${BLUE}║   Available: v.0.3.2, v.0.4.0                    ║${NC}\n"
+printf "${BLUE}║   Available: v.0.3.2, v.0.4.1                    ║${NC}\n"
 printf "${BLUE}╚══════════════════════════════════════════════════╝${NC}\n"
 printf "\n"
 
@@ -207,14 +207,14 @@ printf "\n"
 printf "Select version to install:\n"
 printf "\n"
 
-if [ "$INSTALLED_VERSION" = "0.4.0" ]; then
-    printf "  ${GREEN}1${NC}) v.0.4.0 (latest)   — already installed, reinstall\n"
+if [ "$INSTALLED_VERSION" = "0.4.1" ]; then
+    printf "  ${GREEN}1${NC}) v.0.4.1 (latest)   — already installed, reinstall\n"
     printf "  ${YELLOW}2${NC}) v.0.3.2             — downgrade\n"
 elif [ "$INSTALLED_VERSION" = "0.3.2" ]; then
-    printf "  ${GREEN}1${NC}) v.0.4.0 (latest)   — upgrade (recommended)\n"
+    printf "  ${GREEN}1${NC}) v.0.4.1 (latest)   — upgrade (recommended)\n"
     printf "  ${YELLOW}2${NC}) v.0.3.2             — already installed, reinstall\n"
 else
-    printf "  ${GREEN}1${NC}) v.0.4.0 (latest)   — Protocol info dialogs, category search, IGMP multicast\n"
+    printf "  ${GREEN}1${NC}) v.0.4.1 (latest)   — bidirectional arrows, adaptive display, IPv6 fixes\n"
     printf "  ${YELLOW}2${NC}) v.0.3.2             — TCP stream stats, Select Results, theme-aware UI\n"
 fi
 
@@ -224,7 +224,7 @@ read -r VER_CHOICE
 VER_CHOICE=${VER_CHOICE:-1}
 
 case "$VER_CHOICE" in
-    1) SELECTED_VERSION="0.4.0" ;;
+    1) SELECTED_VERSION="0.4.1" ;;
     2) SELECTED_VERSION="0.3.2" ;;
     *) printf "Invalid choice. Exiting.\n"; exit 1 ;;
 esac
