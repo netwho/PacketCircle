@@ -21,6 +21,8 @@ A native Wireshark plugin that visualizes network communication pairs in an inte
 
 ▶️ **[Watch the intro video on YouTube](https://youtu.be/jg4O9rdUp_0)** — see PacketCircle in action in under 4 minutes.
 
+▶️ **[Watch the v.0.4.x feature video on YouTube](https://www.youtube.com/watch?v=Q83vcK8hXJo)** — protocol info dialogs, Wi-Fi mode, bidirectional pair filtering, and more.
+
 ## Features
 
 - **Circle Visualization** - Interactive circular graph showing communication relationships between network endpoints
