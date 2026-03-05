@@ -4,7 +4,7 @@
   <img src="PacketCircle.png" alt="PacketCircle Logo" width="128">
 </p>
 
-[![Version](https://img.shields.io/badge/version-0.4.0-blue.svg)](CHANGELOG.md)
+[![Version](https://img.shields.io/badge/version-0.4.1-blue.svg)](CHANGELOG.md)
 [![Status](https://img.shields.io/badge/status-public%20beta-orange.svg)](CHANGELOG.md)
 [![License: GPL v2](https://img.shields.io/badge/License-GPL%20v2-blue.svg)](LICENSE)
 [![Wireshark](https://img.shields.io/badge/Wireshark-4.2.x%20%7C%204.4.x%20%7C%204.6.x-1679A7.svg)](https://www.wireshark.org/)
@@ -15,7 +15,7 @@
 
 A native Wireshark plugin that visualizes network communication pairs in an interactive circle diagram with protocol color coding, traffic volume indicators, and PDF report export.
 
-> **Beta Status**: This is version 0.4.0, a public beta release. While fully functional, the software is under active development. Please report any issues you encounter.
+> **Beta Status**: This is version 0.4.1, a public beta release. While fully functional, the software is under active development. Please report any issues you encounter.
 
 ## Demo
 
@@ -48,6 +48,10 @@ A native Wireshark plugin that visualizes network communication pairs in an inte
 - **Conversation Limits** - Limit display to top 10, 25, or 50 conversations
 - **Wi-Fi Monitoring Mode** *(new in v0.4.0)* - Switch to Wi-Fi mode to visualize 802.11 wireless communication with RSSI-based signal-quality color coding. Connection lines are colored green (Excellent), yellow (Good), orange (Fair), or red (Poor) based on measured signal strength. Click any node to see SSID, BSSID, channel, 802.11 standard, per-node signal statistics (average RSSI, range, sample count), traffic volume, frame type breakdown, and management events. Search by MAC address, SSID, or signal quality keyword (`excellent`, `good`, `fair`, `poor`)
 - **Live Capture Support** - Works with both loaded PCAP files and live captures
+- **Single-Row Bidirectional Pairs** *(new in v0.4.1)* - The connection pair list shows one row per bidirectional connection. Click the row (outside the checkbox) to cycle the arrow between **→** (A→B filter only), **↔** (both directions, default), and **←** (B→A only). "Apply Filter" respects the chosen direction
+- **IPv6 Display Filters** *(fixed in v0.4.1)* - Filter strings now correctly use `ipv6.src`/`ipv6.dst` for IPv6 addresses instead of `ip.src`/`ip.dst`
+- **MAC Truncation Adapts to Width** *(fixed in v0.4.1)* - MAC addresses in the pair list now resize dynamically with the splitter, matching the behaviour of IP addresses and hostnames
+- **MAC Mode Persists Across Restarts** *(fixed in v0.4.1)* - Saving in MAC mode and reopening PacketCircle now correctly loads pair data in MAC mode immediately, without requiring a manual toggle
 - **Cross-Platform** - macOS Universal Binary (Intel + Apple Silicon), Linux x86_64, Windows x86_64
 
 ## Screenshots
@@ -119,7 +123,7 @@ Hover over any node to see a detailed popup with IP address, total packet count,
 
 ### Installation
 
-All installers support **version selection** (v.0.4.0 or v.0.3.2), detect any existing installation, and offer an **uninstall** option. Run the installer, then follow the prompts.
+All installers support **version selection** (v.0.4.1 or v.0.3.2), detect any existing installation, and offer an **uninstall** option. Run the installer, then follow the prompts.
 
 #### macOS (Intel & Apple Silicon) — Wireshark 4.6.x
 ```bash
@@ -166,14 +170,14 @@ The unified Linux installer auto-detects your Wireshark version and installs the
 
 > **Note**: macOS uses **dashes** (`4-6`), Linux uses **dots** (`4.2`, `4.4`, `4.6`), Windows uses **dots** (`4.6`) in the plugin directory name.
 
-The installer directory includes both v.0.4.0 (latest) and v.0.3.2 binaries in versioned subdirectories. Choose the version you want to install:
+The installer directory includes both v.0.4.1 (latest) and v.0.3.2 binaries in versioned subdirectories. Choose the version you want to install:
 
 ```bash
 # macOS (Wireshark 4.6.x) — choose your version:
 mkdir -p ~/.local/lib/wireshark/plugins/4-6/epan/
 
-# Latest (v.0.4.0):
-cp installer-v.0.4.x/macos-universal/v.0.4.0/packetcircle.so ~/.local/lib/wireshark/plugins/4-6/epan/
+# Latest (v.0.4.1):
+cp installer-v.0.4.x/macos-universal/v.0.4.1/packetcircle.so ~/.local/lib/wireshark/plugins/4-6/epan/
 
 # Or downgrade to v.0.3.2:
 cp installer-v.0.4.x/macos-universal/v.0.3.2/packetcircle.so ~/.local/lib/wireshark/plugins/4-6/epan/
@@ -181,20 +185,20 @@ cp installer-v.0.4.x/macos-universal/v.0.3.2/packetcircle.so ~/.local/lib/wiresh
 
 ```bash
 # Linux — first pick the binary matching your Wireshark version:
-#   v.0.4.0/packetcircle-ws42.so  → Wireshark 4.2.x
-#   v.0.4.0/packetcircle-ws44.so  → Wireshark 4.4.x
-#   v.0.4.0/packetcircle-ws46.so  → Wireshark 4.6.x
-# (replace v.0.4.0 with v.0.3.2 to install the previous version)
+#   v.0.4.1/packetcircle-ws42.so  → Wireshark 4.2.x
+#   v.0.4.1/packetcircle-ws44.so  → Wireshark 4.4.x
+#   v.0.4.1/packetcircle-ws46.so  → Wireshark 4.6.x
+# (replace v.0.4.1 with v.0.3.2 to install the previous version)
 
 mkdir -p ~/.local/lib/wireshark/plugins/4.6/epan/
-cp installer-v.0.4.x/linux-x86_64/bin/v.0.4.0/packetcircle-ws46.so ~/.local/lib/wireshark/plugins/4.6/epan/packetcircle.so
+cp installer-v.0.4.x/linux-x86_64/bin/v.0.4.1/packetcircle-ws46.so ~/.local/lib/wireshark/plugins/4.6/epan/packetcircle.so
 ```
 
 ```powershell
 # Windows (Wireshark 4.6.x) — run in PowerShell
 
-# Latest (v.0.4.0):
-Copy-Item installer-v.0.4.x\windows-x86_64\v.0.4.0\packetcircle.dll "$env:APPDATA\Wireshark\plugins\4.6\epan\"
+# Latest (v.0.4.1):
+Copy-Item installer-v.0.4.x\windows-x86_64\v.0.4.1\packetcircle.dll "$env:APPDATA\Wireshark\plugins\4.6\epan\"
 
 # Or downgrade to v.0.3.2:
 Copy-Item installer-v.0.4.x\windows-x86_64\v.0.3.2\packetcircle.dll "$env:APPDATA\Wireshark\plugins\4.6\epan\"
