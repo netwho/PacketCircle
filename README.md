@@ -49,7 +49,7 @@ A native Wireshark plugin that visualizes network communication pairs in an inte
 - **Multiple Views** - Toggle between circle view and table view
 - **Conversation Limits** - Limit display to top 10, 25, or 50 conversations
 - **Wi-Fi Monitoring Mode** *(new in v0.4.0)* - Switch to Wi-Fi mode to visualize 802.11 wireless communication with RSSI-based signal-quality color coding. Connection lines are colored green (Excellent), yellow (Good), orange (Fair), or red (Poor) based on measured signal strength. Click any node to see SSID, BSSID, channel, 802.11 standard, per-node signal statistics (average RSSI, range, sample count), traffic volume, frame type breakdown, and management events. Search by MAC address, SSID, or signal quality keyword (`excellent`, `good`, `fair`, `poor`)
-- **Live Capture Support** - Works with both loaded PCAP files and live captures
+- ~~**Live Capture Support** - Works with both loaded PCAP files and live captures~~ *(considered for v0.5.x)*
 - **Single-Row Bidirectional Pairs** *(new in v0.4.1)* - The connection pair list shows one row per bidirectional connection. Click the row (outside the checkbox) to cycle the arrow between **→** (A→B filter only), **↔** (both directions, default), and **←** (B→A only). "Apply Filter" respects the chosen direction
 - **IPv6 Display Filters** *(fixed in v0.4.1)* - Filter strings now correctly use `ipv6.src`/`ipv6.dst` for IPv6 addresses instead of `ip.src`/`ip.dst`
 - **MAC Truncation Adapts to Width** *(fixed in v0.4.1)* - MAC addresses in the pair list now resize dynamically with the splitter, matching the behaviour of IP addresses and hostnames
