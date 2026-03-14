@@ -2,6 +2,46 @@
 
 All notable changes to PacketCircle will be documented in this file.
 
+## [0.4.3] - 2026-03-11
+
+### Added
+- **VLAN (802.1Q) Information Dialog** — Right-click any `0x8100` row in the MAC-mode protocol breakdown table to open a VLAN session summary. Shows: matched frame count, QinQ (double-tagged) frame count, DEI/CFI bit count, a VLAN ID table sorted by frame count (ID → frames), and a PCP (Priority Code Point) distribution with IEEE 802.1p class names (Best Effort, Background, Excellent Effort, Critical Applications, Video, Voice, Internetwork Control, Network Control).
+
+### Fixed
+- **Bug: MACsec dialog showed "no data" / "SecTAG fields not decoded"** — The MACsec extractor previously relied exclusively on `macsec.*` dissector fields from Wireshark's tree. When the MACsec dissector is inactive or the frame is only partially decoded, those fields are absent even though the EtherType `0x88E5` is present. Fixed with a TVB raw-byte fallback: when `eth.type == 0x88E5` is found but no `macsec.*` fields are decoded, the SecTAG is parsed directly from the packet bytes (TCI/AN byte, Packet Number, SCI). The per-frame walk context is now reset for each matched frame so the fallback flags do not carry over between frames. The `found` condition is relaxed to `matched > 0` so the dialog always opens when MACsec traffic is present.
+- **Bug: MACsec dialog showed outdated / placeholder fields** — The dialog now displays meaningful data from the TVB fallback: E-bit (encryption enabled), SC-bit (SCI present), AN (Association Number) distribution table, Packet Number range (min / max), and SCI values with format explanation.
+
+### Improved
+- **MAC-mode popup: instant display with loading indicator** — The MAC-mode Connection Details popup now appears immediately with a "Scanning packets…" placeholder row instead of blocking the UI. A thin animated progress bar (5 px, blue gradient) indicates background scanning. Once the frame scan completes the placeholder is replaced by the real protocol breakdown table and the progress bar is hidden.
+- **MAC-mode popup: dynamic window sizing** — After the protocol breakdown table is populated the popup resizes itself to fit the table content (capped at 300 px table height), removing unused whitespace for captures with few distinct EtherTypes.
+- **MAC-mode popup: removed redundant "Apply Filter" button** — The per-row right-click context menu already provides "Apply Filter in Wireshark"; the separate button below the table was removed to reduce clutter.
+- **Linux Wireshark 4.0.x support** — Added pre-built `.so` binary for Wireshark 4.0.x (built against 4.0.17 on Ubuntu 22.04 with Qt6). Required a source-level API compatibility shim (`PC_FI_VALUE` macro) to handle the `field_info.value` type change between WS 4.0 (`fvalue_t` struct by value) and WS 4.2+ (`fvalue_t*` pointer). Debian stable ships Wireshark 4.0.x in its package repository.
+- **Linux binaries rebuilt** — Pre-built `.so` binaries for Linux x86_64 (Wireshark 4.0.x, 4.2.x, 4.4.x, 4.6.x) have been rebuilt from the v0.4.3 source and updated in the installer package. The unified installer now auto-detects all four series and offers only the versions compatible with the detected Wireshark release.
+- AI-Assisted: yes (Claude) — VLAN dialog, MACsec TVB fallback + richer dialog, MAC popup UX improvements, Linux rebuild
+
+## [0.4.2] - 2026-03-09
+
+### Added
+- **DNS Information Dialog** — Right-click any DNS connection (port 53 / mDNS port 5353) in the Connection Details popup to see a full DNS session summary: total packets, query/response counts, recursion desired flag, DNS-over-TCP detection, NOERROR/NXDOMAIN/SERVFAIL/REFUSED response code breakdown, query type histogram (A, AAAA, CNAME, MX, TXT, SRV, PTR, …), top queried domains with per-name counts, resolved answer records (name → type → value), and NXDOMAIN names. Results are filtered to the selected pair only (IP addresses + port).
+- **mDNS (port 5353) protocol detection** — mDNS traffic is now recognised as a distinct protocol in pair classification and the category search (IP mode), consistent with DNS at port 53.
+- **DHCP protocol detection** — DHCP (ports 67/68) and GRE/ESP/AH/IKE tunnel protocols are now promoted to their protocol name instead of remaining "UDP" in pair classification, enabling accurate category filtering and search.
+
+### Fixed
+- **Bug: Category legend not updating after search** — When a search entered override mode (results outside Top-N), the protocol category checkboxes in the legend still reflected the pre-filter Top-N set instead of the matched pairs. Fix: `updateLegend()` is now called after `updateViews()` in `enterSearchOverrideMode()`, `exitSearchOverrideMode()` (clear-search path), and the Top-10/25/50 button handlers.
+- **Bug: DNS / protocol-info dialogs showing data for entire trace** — The DNS extractor used `(void)addr_a; (void)addr_b;` and scanned the full capture regardless of which pair was clicked. Fixed by adding bidirectional address + port filtering (same pattern as TLS/HTTP/SMB), so the dialog now shows only traffic for the selected connection pair.
+- **Bug: SIGSEGV crash in Connection Popup context menu** — During heavy frame scans (TLS, HTTP, SMB, Kerberos, Email, SQL, VoIP etc.), `circle_vis_pump_events()` processed Qt events mid-scan. A mouse-leave event restarted the auto-close timer, which fired and called `deleteLater()` while the popup was still scanning. The subsequent `hide()` call crashed with a Pointer Authentication (PAC) violation on ARM64. Fix: `m_contextMenuActive` is no longer reset after `menu.exec()` returns — it stays `true` throughout any action that involves a frame scan. Only the dismiss-only path resets it.
+- **Bug: ARP/STP/LLDP search returned no results in MAC view** — The tap listener registered with `TL_REQUIRES_NOTHING` left `pinfo->current_proto` as "Ethernet" for L2-only protocols. The pair's `top_protocol` ended up as "Ethernet", so searching for "ARP", "STP", or "LLDP" matched nothing. Fix: added Priority 1.4 detection using `proto_is_frame_protocol(pinfo->layers, ...)` for ARP, RARP, STP, LLDP, LACP, CDP, VTP, EAPOL, EAP, and LLC — the same reliable technique used for ICMP since v0.4.1.
+- **Bug: ICMP type label memory leak in `walk_icmp_proto_tree()`** — `g_hash_table_replace()` allocated a new key string with `g_strdup()` but `type_labels` still held a pointer to the old (now freed) key, creating both a memory leak and a potential use-after-free. Fix: replaced with `g_hash_table_lookup_extended()` + `g_hash_table_steal()` to update the count in-place using the original key pointer — no new allocation, no stale pointer.
+- **Bug: Wrong type passed to `proto_is_frame_protocol()`** — The ICMP extraction function was passing `fdata->pfd` (a `GSList *`) where `wmem_list_t *` is expected, causing a compiler warning and potential misbehaviour. Corrected to `edt->pi.layers` which carries the same protocol stack information with the correct type.
+- **Bug: EtherType hex search accepted but never matched** — The search bar accepted `0x0806`, `0x0800` etc. but could not match pairs because pairs store protocol names, not EtherType numbers. Removed the EtherType hex search entirely; protocol names (`arp`, `ipv4`, etc.) already work case-insensitively.
+
+### Improved
+- **"Not in Top-N" search dialog** — The confirmation dialog shown when search results fall outside the current Top-N view now uses an HTML `<ul>` list for the "If you continue:" bullet points, ensuring consistent indentation when text wraps, and is sized wide enough to fit all three bullets on single lines.
+- **Protocol info dialogs: NULL guard after `epan_dissect_new()`** — All 16 extraction functions (TLS, HTTP, SMB, Kerberos, Email, SQL, VoIP, L2, STP, LLDP, LACP, EAP, MACsec, ARP, DHCP, ICMP) and the main analysis loop now check the return value of `epan_dissect_new()` and return an empty-but-valid result on OOM rather than crashing.
+- **Eliminated ~93 per-packet debug log lines** — The tap callback and all extraction functions contained `LOG_LEVEL_WARNING` traces that fired on every packet (up to hundreds of thousands of calls on large captures). These have been removed or demoted to `LOG_LEVEL_INFO`/`LOG_LEVEL_ERROR` as appropriate, significantly reducing log noise and I/O overhead on large captures.
+- **Version strings corrected** — `PLUGIN_VERSION_MINOR` in `circle_plugin.h` was stuck at 3 (should be 4). All five version locations now consistently report v0.4.2.
+- AI-Assisted: yes (Claude) — crash fixes, L2 protocol detection, ICMP memory fix, NULL guards, debug log cleanup, version bump, documentation
+
 ## [0.4.1] - 2026-03-05
 
 ### Fixed
