@@ -4,10 +4,10 @@
 # =============================================================================
 #
 # Supports:
-#   - Installing v.0.3.2 or v.0.4.1 (default: latest)
+#   - Installing v.0.3.2 or v.0.4.3 (default: latest)
 #   - Detecting an already-installed version
 #   - Upgrading, downgrading, and uninstalling
-#   - Auto-detecting Wireshark version (4.2.x, 4.4.x, 4.6.x)
+#   - Auto-detecting Wireshark version (4.0.x, 4.2.x, 4.4.x, 4.6.x)
 #
 # Plugin directory:
 #   ~/.local/lib/wireshark/plugins/<version>/epan/
@@ -33,8 +33,8 @@ printf "\n"
 printf "${BLUE}╔══════════════════════════════════════════════════╗${NC}\n"
 printf "${BLUE}║   PacketCircle Installer for Linux               ║${NC}\n"
 printf "${BLUE}║   x86_64 (64-bit Intel/AMD)                      ║${NC}\n"
-printf "${BLUE}║   Supports Wireshark 4.2.x, 4.4.x, 4.6.x         ║${NC}\n"
-printf "${BLUE}║   Available: v.0.3.2, v.0.4.1                    ║${NC}\n"
+printf "${BLUE}║   Supports Wireshark 4.0.x, 4.2.x, 4.4.x, 4.6.x  ║${NC}\n"
+printf "${BLUE}║   Available: v.0.3.2, v.0.4.3 (latest)           ║${NC}\n"
 printf "${BLUE}╚══════════════════════════════════════════════════╝${NC}\n"
 printf "\n"
 
@@ -48,13 +48,18 @@ if [ "$ARCH" != "x86_64" ]; then
 fi
 
 # --- Verify binaries exist ---
-for ver in v.0.3.2 v.0.4.1; do
-    for ws in ws42 ws44 ws46; do
-        if [ ! -f "$BIN_DIR/$ver/packetcircle-${ws}.so" ]; then
-            printf "${RED}Error: Missing binary: bin/%s/packetcircle-%s.so${NC}\n" "$ver" "$ws"
-            exit 1
-        fi
-    done
+# v.0.3.2 has ws42/ws44/ws46 only; v.0.4.3 adds ws40
+for ws in ws42 ws44 ws46; do
+    if [ ! -f "$BIN_DIR/v.0.3.2/packetcircle-${ws}.so" ]; then
+        printf "${RED}Error: Missing binary: bin/v.0.3.2/packetcircle-%s.so${NC}\n" "$ws"
+        exit 1
+    fi
+done
+for ws in ws40 ws42 ws44 ws46; do
+    if [ ! -f "$BIN_DIR/v.0.4.3/packetcircle-${ws}.so" ]; then
+        printf "${RED}Error: Missing binary: bin/v.0.4.3/packetcircle-%s.so${NC}\n" "$ws"
+        exit 1
+    fi
 done
 printf "${GREEN}✓${NC} All plugin binaries present.\n"
 
@@ -102,6 +107,7 @@ if [ -z "$WS_VERSION" ]; then
         if [ -L "$lib" ] || [ -f "$lib" ]; then
             SONAME=$(readlink -f "$lib" 2>/dev/null | grep -oE 'libwireshark\.so\.[0-9]+' | grep -oE '[0-9]+$')
             case "$SONAME" in
+                16) WS_VERSION="4.0.0"; printf "  Detected from libwireshark.so.16: 4.0.x\n" ;;
                 17) WS_VERSION="4.2.0"; printf "  Detected from libwireshark.so.17: 4.2.x\n" ;;
                 18) WS_VERSION="4.4.0"; printf "  Detected from libwireshark.so.18: 4.4.x\n" ;;
                 19) WS_VERSION="4.6.0"; printf "  Detected from libwireshark.so.19: 4.6.x\n" ;;
@@ -113,7 +119,7 @@ fi
 
 if [ -z "$WS_VERSION" ]; then
     printf "\n${YELLOW}Could not automatically detect Wireshark version.${NC}\n"
-    printf "Enter Wireshark major.minor version (e.g., 4.6): "
+    printf "Enter Wireshark major.minor version (e.g., 4.0, 4.2, 4.6): "
     read -r WS_VERSION_INPUT
     WS_VERSION="${WS_VERSION_INPUT}.0"
 fi
@@ -124,25 +130,32 @@ printf "${GREEN}✓${NC} Wireshark version: ${CYAN}%s${NC} (ABI: %s.%s)\n" "$WS_
 
 # --- Select binary for Wireshark version ---
 case "$WS_MINOR" in
+    0) SELECTED_WS_TAG="ws40"; SELECTED_WS_LABEL="Wireshark 4.0.x (built against 4.0.17)" ;;
     2) SELECTED_WS_TAG="ws42"; SELECTED_WS_LABEL="Wireshark 4.2.x (built against 4.2.14)" ;;
     4) SELECTED_WS_TAG="ws44"; SELECTED_WS_LABEL="Wireshark 4.4.x (built against 4.4.7)"  ;;
     6) SELECTED_WS_TAG="ws46"; SELECTED_WS_LABEL="Wireshark 4.6.x (built against 4.6.3)"  ;;
     *)
         printf "\n${RED}Unsupported Wireshark version: %s.%s${NC}\n" "$WS_MAJOR" "$WS_MINOR"
-        printf "Supported: 4.2.x, 4.4.x, 4.6.x\n\n"
+        printf "Supported: 4.0.x, 4.2.x, 4.4.x, 4.6.x\n\n"
         printf "Force-install a binary anyway?\n"
-        printf "  1) 4.2.x binary\n  2) 4.4.x binary\n  3) 4.6.x binary\n  q) Quit\n"
+        printf "  1) 4.0.x binary\n  2) 4.2.x binary\n  3) 4.4.x binary\n  4) 4.6.x binary\n  q) Quit\n"
         printf "Choice [q]: "
         read -r MANUAL_CHOICE
         case "$MANUAL_CHOICE" in
-            1) SELECTED_WS_TAG="ws42"; SELECTED_WS_LABEL="Wireshark 4.2.x (FORCED)"; WS_MINOR=2 ;;
-            2) SELECTED_WS_TAG="ws44"; SELECTED_WS_LABEL="Wireshark 4.4.x (FORCED)"; WS_MINOR=4 ;;
-            3) SELECTED_WS_TAG="ws46"; SELECTED_WS_LABEL="Wireshark 4.6.x (FORCED)"; WS_MINOR=6 ;;
+            1) SELECTED_WS_TAG="ws40"; SELECTED_WS_LABEL="Wireshark 4.0.x (FORCED)"; WS_MINOR=0 ;;
+            2) SELECTED_WS_TAG="ws42"; SELECTED_WS_LABEL="Wireshark 4.2.x (FORCED)"; WS_MINOR=2 ;;
+            3) SELECTED_WS_TAG="ws44"; SELECTED_WS_LABEL="Wireshark 4.4.x (FORCED)"; WS_MINOR=4 ;;
+            4) SELECTED_WS_TAG="ws46"; SELECTED_WS_LABEL="Wireshark 4.6.x (FORCED)"; WS_MINOR=6 ;;
             *) printf "Installation cancelled.\n"; exit 1 ;;
         esac
         printf "${YELLOW}Warning: Installing binary for a non-matching version.${NC}\n"
         ;;
 esac
+
+# Note for Wireshark 4.0.x users: only v.0.4.3 is available (first release with 4.0 support)
+if [ "$SELECTED_WS_TAG" = "ws40" ]; then
+    printf "${YELLOW}Note: Only PacketCircle v.0.4.3 is available for Wireshark 4.0.x.${NC}\n"
+fi
 
 # --- Determine plugin directory ---
 PLUGIN_PATH_ID=""
@@ -217,32 +230,39 @@ case "$ACTION" in
     *) printf "Invalid choice. Exiting.\n"; exit 1 ;;
 esac
 
-# --- Version selection (context-aware) ---
+# --- Version selection ---
+# Note: ws40 support was added in v.0.4.3; v.0.3.2 only supports 4.2+
 printf "\n"
 printf "Select version to install:\n"
 printf "\n"
-
-if [ "$INSTALLED_VERSION" = "0.4.1" ]; then
-    printf "  ${GREEN}1${NC}) v.0.4.1 (latest)   — already installed, reinstall\n"
-    printf "  ${YELLOW}2${NC}) v.0.3.2             — downgrade\n"
+if [ "$SELECTED_WS_TAG" = "ws40" ]; then
+    printf "  ${GREEN}1${NC}) v.0.4.3             — only version available for Wireshark 4.0.x\n"
+elif [ "$INSTALLED_VERSION" = "0.4.3" ]; then
+    printf "  ${GREEN}1${NC}) v.0.4.3 (latest)   — already installed, reinstall\n"
+    printf "  ${YELLOW}2${NC}) v.0.3.2             — downgrade (legacy)\n"
 elif [ "$INSTALLED_VERSION" = "0.3.2" ]; then
-    printf "  ${GREEN}1${NC}) v.0.4.1 (latest)   — upgrade (recommended)\n"
+    printf "  ${GREEN}1${NC}) v.0.4.3 (latest)   — upgrade (recommended)\n"
     printf "  ${YELLOW}2${NC}) v.0.3.2             — already installed, reinstall\n"
 else
-    printf "  ${GREEN}1${NC}) v.0.4.1 (latest)   — bidirectional arrows, adaptive display, IPv6 fixes\n"
+    printf "  ${GREEN}1${NC}) v.0.4.3 (latest)   — Wireshark 4.0 support, API compat fixes\n"
     printf "  ${YELLOW}2${NC}) v.0.3.2             — TCP stream stats, Select Results, theme-aware UI\n"
 fi
-
 printf "\n"
 printf "Choice [1]: "
 read -r VER_CHOICE
 VER_CHOICE=${VER_CHOICE:-1}
-
-case "$VER_CHOICE" in
-    1) SELECTED_VERSION="0.4.1" ;;
-    2) SELECTED_VERSION="0.3.2" ;;
-    *) printf "Invalid choice. Exiting.\n"; exit 1 ;;
-esac
+if [ "$SELECTED_WS_TAG" = "ws40" ]; then
+    case "$VER_CHOICE" in
+        1) SELECTED_VERSION="0.4.3" ;;
+        *) printf "Invalid choice. Exiting.\n"; exit 1 ;;
+    esac
+else
+    case "$VER_CHOICE" in
+        1) SELECTED_VERSION="0.4.3" ;;
+        2) SELECTED_VERSION="0.3.2" ;;
+        *) printf "Invalid choice. Exiting.\n"; exit 1 ;;
+    esac
+fi
 
 PLUGIN_FILE="$BIN_DIR/v.${SELECTED_VERSION}/packetcircle-${SELECTED_WS_TAG}.so"
 
