@@ -23,6 +23,8 @@ A native Wireshark plugin that visualizes network communication pairs in an inte
 
 ▶️ **[Watch the v.0.4.x feature video on YouTube](https://www.youtube.com/watch?v=Q83vcK8hXJo)** — protocol info dialogs, Wi-Fi mode, bidirectional pair filtering, and more.
 
+▶️ **[What's New in v.0.4.3 on YouTube](https://youtu.be/0WXxILTMHWE)** — Linux 4.0.x support, installer improvements, and latest fixes.
+
 ## Features
 
 - **Circle Visualization** - Interactive circular graph showing communication relationships between network endpoints
@@ -101,6 +103,8 @@ Switch to Wi-Fi mode to visualize 802.11 wireless communication directly from a 
 ### Protocol Information Dialogs
 
 Right-click any connection line to open a protocol-specific information dialog. PacketCircle inspects the actual packet dissection and surfaces relevant details for the most common application protocols — without leaving Wireshark.
+
+📄 **[Full Protocol Reference](https://github.com/netwho/PacketCircle/blob/main/PROTOCOL-INFO.md)** — complete list of supported protocols, fields extracted, and popup details.
 
 ![Protocol Information Dialogs](screenshots/PacketCircelProtDetails.png)
 
