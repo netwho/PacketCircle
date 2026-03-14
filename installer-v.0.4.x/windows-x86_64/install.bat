@@ -21,10 +21,24 @@ SET SCRIPT_PATH=%SCRIPT_DIR%install.ps1
 
 IF NOT EXIST "%SCRIPT_PATH%" (
     echo ERROR: install.ps1 not found in %SCRIPT_DIR%
+    pause
     exit /b 1
 )
 
-echo Launching PowerShell installer...
+echo.
+echo ===========================================================
+echo   PacketCircle Installer
+echo ===========================================================
+echo.
+echo   TIP: For the best experience run this installer from
+echo   an existing Command Prompt window so you can scroll
+echo   back and review all prompts and options:
+echo.
+echo     1. Open "Command Prompt"  (search: cmd)
+echo     2. cd /d "%SCRIPT_DIR%"
+echo     3. install.bat
+echo.
+echo   Launching PowerShell installer now...
 echo.
 
 powershell.exe ^
@@ -36,5 +50,6 @@ SET EXIT_CODE=%ERRORLEVEL%
 
 echo.
 echo PowerShell exited with code %EXIT_CODE%
-
+echo.
+pause
 exit /b %EXIT_CODE%

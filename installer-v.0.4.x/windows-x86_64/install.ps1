@@ -3,7 +3,7 @@
 # =============================================================================
 #
 # Supports:
-#   - Installing v.0.3.2 or v.0.4.1 (default: latest)
+#   - Installing v.0.3.2 or v.0.4.3 (default: latest)
 #   - Detecting an already-installed version
 #   - Upgrading, downgrading, and uninstalling
 #
@@ -25,12 +25,31 @@ Write-Host ""
 Write-Host "===========================================================" -ForegroundColor Cyan
 Write-Host "      PacketCircle Installer for Windows                   " -ForegroundColor Cyan
 Write-Host "      x86_64 (64-bit Intel/AMD)                            " -ForegroundColor Cyan
-Write-Host "      Available: v.0.3.2, v.0.4.1                         " -ForegroundColor Cyan
+Write-Host "      Available: v.0.3.2, v.0.4.3 (latest)               " -ForegroundColor Cyan
 Write-Host "===========================================================" -ForegroundColor Cyan
 Write-Host ""
 
+# --- Warn if launched directly (e.g. double-click) instead of from a Command Prompt ---
+$parentProcess = (Get-CimInstance Win32_Process -Filter "ProcessId=$PID" -ErrorAction SilentlyContinue).ParentProcessId
+$parentName    = (Get-Process -Id $parentProcess -ErrorAction SilentlyContinue).ProcessName
+if ($parentName -notmatch '^(cmd|powershell|pwsh|WindowsTerminal)$') {
+    Write-Host "  !! IMPORTANT: Run this installer from a Command Prompt window !!" -ForegroundColor Red
+    Write-Host "     If you double-clicked this file you may miss interactive"      -ForegroundColor Yellow
+    Write-Host "     prompts and the window may close before you can read them."    -ForegroundColor Yellow
+    Write-Host ""
+    Write-Host "     How to run correctly:"                                          -ForegroundColor White
+    Write-Host "       1. Open Command Prompt  (search: cmd)"                       -ForegroundColor White
+    Write-Host "       2. cd /d `"$ScriptDir`""                                     -ForegroundColor White
+    Write-Host "       3. install.bat"                                               -ForegroundColor White
+    Write-Host ""
+    Write-Host "     Continuing anyway in 5 seconds..." -ForegroundColor Yellow
+    Start-Sleep -Seconds 5
+    Write-Host ""
+}
+
+
 # --- Verify binaries exist ---
-foreach ($ver in @("v.0.3.2", "v.0.4.1")) {
+foreach ($ver in @("v.0.3.2", "v.0.4.3")) {
     $path = Join-Path $ScriptDir "$ver\$PluginName"
     if (-not (Test-Path $path)) {
         Write-Host "Error: Missing binary: $ver\$PluginName" -ForegroundColor Red
@@ -197,15 +216,15 @@ Write-Host ""
 Write-Host "Select version to install:"
 Write-Host ""
 
-if ($InstalledVersion -eq "0.4.1") {
-    Write-Host "  1) v.0.4.1 (latest)   - already installed, reinstall" -ForegroundColor Green
-    Write-Host "  2) v.0.3.2             - downgrade"                    -ForegroundColor Yellow
+if ($InstalledVersion -eq "0.4.3") {
+    Write-Host "  1) v.0.4.3 (latest)   - already installed, reinstall" -ForegroundColor Green
+    Write-Host "  2) v.0.3.2             - downgrade (legacy)"           -ForegroundColor Yellow
 } elseif ($InstalledVersion -eq "0.3.2") {
-    Write-Host "  1) v.0.4.1 (latest)   - upgrade (recommended)"         -ForegroundColor Green
+    Write-Host "  1) v.0.4.3 (latest)   - upgrade (recommended)"         -ForegroundColor Green
     Write-Host "  2) v.0.3.2             - already installed, reinstall"  -ForegroundColor Yellow
 } else {
-    Write-Host "  1) v.0.4.1 (latest)   - bidirectional arrows, adaptive display, IPv6 fixes" -ForegroundColor Green
-    Write-Host "  2) v.0.3.2             - TCP stream stats, Select Results, theme-aware UI"  -ForegroundColor Yellow
+    Write-Host "  1) v.0.4.3 (latest)   - VLAN dialog, MACsec fixes, API compat improvements" -ForegroundColor Green
+    Write-Host "  2) v.0.3.2             - TCP stream stats, Select Results, theme-aware UI"   -ForegroundColor Yellow
 }
 
 Write-Host ""
@@ -213,7 +232,7 @@ $verChoice = Read-Host "Choice [1]"
 if (-not $verChoice) { $verChoice = "1" }
 
 switch ($verChoice) {
-    "1" { $SelectedVersion = "0.4.1" }
+    "1" { $SelectedVersion = "0.4.3" }
     "2" { $SelectedVersion = "0.3.2" }
     default {
         Write-Host "Invalid choice." -ForegroundColor Red
