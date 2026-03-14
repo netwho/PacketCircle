@@ -118,6 +118,9 @@ typedef struct _analysis_result {
     guint64 total_packets;
     guint64 total_bytes;
     AnalysisMode mode;     /* Analysis mode used to produce this result */
+    gchar *encap_name;     /* Non-NULL for WAN/non-Ethernet encaps (e.g. "Frame Relay", "PPP").
+                            * MAC mode is automatically disabled for these capture types.
+                            * Caller must NOT free this — freed by packet_analyzer_free_result(). */
 } analysis_result_t;
 
 /* TLS certificate information */
@@ -276,6 +279,202 @@ typedef struct _sql_info {
     guint32 matched_packets;
     gboolean found;
 } sql_info_t;
+
+/* General Layer-2 frame info: EtherType values, VLAN tags, LLC DSAP/SSAP */
+typedef struct _l2_info {
+    GHashTable *ethertype_counts;  /* ethertype hex string (gchar*) → count (GUINT_TO_POINTER) */
+    GList *ethertype_names;        /* unique "0x8100 (VLAN)" style strings (gchar*) */
+    GList *vlan_ids;               /* unique VLAN IDs as strings (gchar*) */
+    GList *llc_dsap_ssap;          /* unique "DSAP=0x42 SSAP=0x42 (STP)" strings (gchar*) */
+    GHashTable *llc_counts;        /* "0xDS/0xSS" key (gchar*) → count (GUINT_TO_POINTER) */
+    guint32 matched_packets;
+    gboolean found;
+} l2_info_t;
+
+/* Spanning Tree Protocol information (STP/RSTP/MSTP/PVST+)
+ * WH: expanded from minimal stub to full field set covering root bridge
+ * priority/ext, all timers, per-type BPDU counters, RSTP flags, and PVST+. */
+typedef struct _stp_info {
+    /* ── Root bridge ────────────────────────────────────────────── */
+    gchar   *root_bridge_mac;       /* stp.root.hw  — root bridge MAC */
+    guint16  root_bridge_priority;  /* stp.root.pri — priority component (0–61440, steps of 4096) */
+    guint16  root_bridge_ext;       /* stp.root.ext — system ID extension (= VLAN in PVST+) */
+    guint32  root_path_cost;        /* stp.root.pathcost */
+    gboolean is_root;               /* TRUE when this bridge is the STP root */
+
+    /* ── Local bridge ───────────────────────────────────────────── */
+    gchar   *bridge_mac;            /* stp.bridge.hw */
+    guint16  bridge_priority;       /* stp.bridge.pri — priority component */
+    guint16  bridge_ext;            /* stp.bridge.ext — system ID extension */
+    guint16  port_id;               /* stp.port — full 16-bit port identifier */
+
+    /* ── Timers (Wireshark label strings, e.g. "2.000" seconds) ── */
+    gchar   *hello_time_str;        /* stp.hello */
+    gchar   *max_age_str;           /* stp.max_age */
+    gchar   *forward_delay_str;     /* stp.forward */
+    gchar   *msg_age_str;           /* stp.msg_age */
+
+    /* ── BPDU type & per-type counters ─────────────────────────── */
+    gchar   *bpdu_type;             /* first BPDU type label seen */
+    guint32  config_bpdu_count;     /* Configuration BPDUs (type 0x00) */
+    guint32  tcn_bpdu_count;        /* Topology Change Notification BPDUs (type 0x80) */
+    guint32  rst_bpdu_count;        /* RST / MST BPDUs (type 0x02) */
+    guint32  topology_change_count; /* TC events: TCN BPDUs + Config BPDUs with TC flag set */
+
+    /* ── RSTP / MSTP per-port flags ────────────────────────────── */
+    gboolean flags_proposal;        /* stp.flags.proposal */
+    gboolean flags_agreement;       /* stp.flags.agreement */
+    gboolean flags_forwarding;      /* stp.flags.forward  */
+    gboolean flags_learning;        /* stp.flags.learn    */
+    gboolean flags_tca;             /* stp.flags.tca (Topology Change Acknowledgment) */
+
+    /* ── Protocol variant & port roles ─────────────────────────── */
+    gchar   *stp_variant;           /* "STP", "RSTP", "MSTP" */
+    GList   *port_roles;            /* unique port role strings seen */
+
+    /* ── PVST+ (Cisco Per-VLAN Spanning Tree Plus) ──────────────── */
+    gboolean is_pvst;               /* TRUE when pvst.origvlan field detected */
+    guint16  pvst_vlan;             /* originating VLAN ID */
+
+    guint32  matched_packets;
+    gboolean found;
+} stp_info_t;
+
+/* LLDP (Link Layer Discovery Protocol) information */
+typedef struct _lldp_info {
+    gchar *chassis_id;             /* Chassis ID value */
+    gchar *port_id;                /* Port ID value */
+    gchar *system_name;            /* System Name TLV */
+    gchar *system_description;     /* System Description TLV */
+    gchar *port_description;       /* Port Description TLV */
+    GList *capabilities;           /* System capabilities strings (gchar*) */
+    GList *enabled_capabilities;   /* Enabled capabilities strings (gchar*) */
+    GList *management_addresses;   /* Management address strings (gchar*) */
+    GList *vlan_names;             /* Org-specific VLAN name strings (gchar*) */
+    guint ttl;                     /* Time To Live */
+    guint32 matched_packets;
+    gboolean found;
+} lldp_info_t;
+
+/* LACP (Link Aggregation Control Protocol) information */
+typedef struct _lacp_info {
+    gchar *actor_system;           /* Actor system MAC */
+    guint16 actor_key;             /* Actor operational key */
+    guint16 actor_port;            /* Actor port number */
+    guint8 actor_state;            /* Actor state bitmask */
+    gchar *partner_system;         /* Partner system MAC */
+    guint16 partner_key;           /* Partner operational key */
+    guint16 partner_port;          /* Partner port number */
+    guint8 partner_state;          /* Partner state bitmask */
+    guint32 matched_packets;
+    gboolean found;
+} lacp_info_t;
+
+/* 802.1Q VLAN tagging information */
+typedef struct _vlan_info {
+    GHashTable *vlan_id_counts; /* VLAN-ID string (gchar*) → frame count (GUINT_TO_POINTER) */
+    guint32 pcp_counts[8];      /* per-PCP (Priority Code Point 0-7) frame count            */
+    guint32 dei_count;          /* frames with DEI (Drop Eligible Indicator) bit set         */
+    guint32 qinq_count;         /* frames carrying more than one VLAN tag (QinQ / 802.1ad)  */
+    guint32 matched_packets;
+    gboolean found;
+} vlan_info_t;
+
+/* 802.1X / EAP (Extensible Authentication Protocol over LAN) information */
+typedef struct _eap_info {
+    GList *eap_types;              /* unique EAP type strings: "EAP-TLS", "PEAP", etc. (gchar*) */
+    GList *identities;             /* unique EAP identity values (gchar*) */
+    guint request_count;           /* EAP Request count */
+    guint response_count;          /* EAP Response count */
+    guint success_count;           /* EAP Success count */
+    guint failure_count;           /* EAP Failure count */
+    GList *eapol_types;            /* unique EAPOL type strings: "EAP Packet", "Start", etc. */
+    guint32 matched_packets;
+    gboolean found;
+} eap_info_t;
+
+/* MACsec (802.1AE) information */
+typedef struct _macsec_info {
+    GList   *sci_values;             /* unique SCI strings — "AA:BB:CC:DD:EE:FF/0001" */
+    guint8   tci_flags;              /* TCI byte from the first SecTAG seen (raw byte) */
+    gboolean encryption_enabled;     /* TRUE when E bit detected in any frame          */
+    gboolean sci_present;            /* TRUE when SC bit detected (SCI field included)  */
+    guint32  an_counts[4];           /* per-Association-Number (0-3) frame count        */
+    guint32  min_pn;                 /* smallest Packet Number seen (replay protection) */
+    guint32  max_pn;                 /* largest  Packet Number seen                     */
+    gboolean pn_valid;               /* TRUE once at least one PN has been read         */
+    guint32  packet_count_protected; /* frames where SecTAG header fields were found    */
+    guint32  matched_packets;
+    gboolean found;
+} macsec_info_t;
+
+/* ARP MAC/IP mapping and anomaly information */
+/* ICMP / ICMPv6 type+code statistics for a communication pair */
+typedef struct _icmp_info {
+    GHashTable *type_counts; /* label (gchar*) → packet count (GUINT_TO_POINTER) */
+    GList      *type_labels; /* labels in insertion order (gchar*, owned by type_counts) */
+    guint32     matched_packets;
+    gboolean    found;
+    gboolean    is_v6;       /* TRUE for ICMPv6 */
+} icmp_info_t;
+
+typedef struct _arp_info {
+    guint32 request_count;          /* ARP requests (opcode 1) */
+    guint32 reply_count;            /* ARP replies (opcode 2) */
+    guint32 gratuitous_count;       /* Replies where sender IP == target IP */
+    GList  *mac_ip_mappings;        /* Unique "MAC -> IP" strings from replies (gchar*) */
+    GList  *ip_conflict_warnings;   /* IPs claimed by >1 MAC: warning strings (gchar*) */
+    GList  *unsolicited_warnings;   /* Replies for IPs never requested: warning strings (gchar*) */
+    guint32 matched_packets;        /* Total ARP packets found in trace */
+    gboolean found;
+} arp_info_t;
+
+/* DHCP session information (Discover/Offer/Request/ACK/NAK/Release/Decline/Inform) */
+typedef struct _dhcp_info {
+    /* Message type counters */
+    guint32 discover_count;
+    guint32 offer_count;
+    guint32 request_count;
+    guint32 ack_count;
+    guint32 nak_count;
+    guint32 release_count;
+    guint32 decline_count;
+    guint32 inform_count;
+    /* Addresses */
+    GList *client_macs;         /* Unique client hardware addresses (gchar*) */
+    GList *requested_ips;       /* ciaddr from REQUEST messages (gchar*) */
+    GList *offered_ips;         /* yiaddr from OFFER messages (gchar*) */
+    GList *assigned_ips;        /* yiaddr from ACK messages (gchar*) */
+    GList *server_ids;          /* DHCP server IPs / option 54 (gchar*) */
+    /* Options */
+    GList *hostnames;           /* option 12: client host names (gchar*) */
+    GList *domain_names;        /* option 15: domain names (gchar*) */
+    GList *routers;             /* option 3: default gateways (gchar*) */
+    GList *dns_servers;         /* option 6: DNS server IPs (gchar*) */
+    GList *lease_times;         /* option 51: formatted lease time strings (gchar*) */
+    GList *requested_options;   /* option 55: parameter names the client requested (gchar*) */
+    guint32 matched_packets;    /* Total DHCP packets found in trace */
+    gboolean found;
+} dhcp_info_t;
+
+/* DNS query / response information extracted from DNS packets in a capture */
+typedef struct _dns_info {
+    gboolean  found;
+    guint32   matched_packets;   /* total DNS frames scanned                   */
+    guint32   query_count;       /* frames with QR=0 (query)                   */
+    guint32   response_count;    /* frames with QR=1 (response)                */
+    guint32   noerror_count;     /* rcode=0 (NOERROR) responses                */
+    guint32   nxdomain_count;    /* rcode=3 (NXDOMAIN) responses               */
+    guint32   servfail_count;    /* rcode=2 (SERVFAIL) responses               */
+    guint32   refused_count;     /* rcode=5 (REFUSED)  responses               */
+    guint32   other_error_count; /* other non-zero rcode responses             */
+    gboolean  uses_tcp;          /* DNS-over-TCP frames seen                   */
+    gboolean  uses_recursion;    /* RD flag set in at least one query          */
+    GHashTable *type_counts;     /* qtype name (gchar*) → guint* count         */
+    GHashTable *name_counts;     /* domain name (gchar*) → guint* count        */
+    GList      *answers;         /* "name TYPE value" strings (unique, gchar*) */
+    GList      *nxdomain_names;  /* names that returned NXDOMAIN (gchar*)      */
+} dns_info_t;
 
 /* VoIP protocol information (SIP, RTP, H.223) */
 typedef struct _voip_info {
@@ -486,6 +685,133 @@ voip_info_t* packet_analyzer_extract_voip_info(capture_file *cf,
                                                gboolean addr_is_mac);
 
 void packet_analyzer_free_voip_info(voip_info_t *info);
+
+/**
+ * Extract general Layer-2 frame information (EtherType values, VLAN tags, LLC).
+ * Scans frames matching the given MAC pair.
+ *
+ * @param cf          Capture file handle
+ * @param addr_a      First endpoint MAC address
+ * @param addr_b      Second endpoint MAC address
+ * @param addr_is_mac Must be TRUE (L2 info is always MAC-based)
+ * @return L2 info structure (caller must free with packet_analyzer_free_l2_info)
+ */
+l2_info_t* packet_analyzer_extract_l2_info(capture_file *cf,
+                                            const gchar *addr_a,
+                                            const gchar *addr_b,
+                                            gboolean addr_is_mac);
+
+void packet_analyzer_free_l2_info(l2_info_t *info);
+
+/**
+ * Extract Spanning Tree Protocol information (STP/RSTP/MSTP BPDUs).
+ */
+stp_info_t* packet_analyzer_extract_stp_info(capture_file *cf,
+                                              const gchar *addr_a,
+                                              const gchar *addr_b,
+                                              gboolean addr_is_mac);
+
+void packet_analyzer_free_stp_info(stp_info_t *info);
+
+/**
+ * Extract LLDP (Link Layer Discovery Protocol) information.
+ */
+lldp_info_t* packet_analyzer_extract_lldp_info(capture_file *cf,
+                                                const gchar *addr_a,
+                                                const gchar *addr_b,
+                                                gboolean addr_is_mac);
+
+void packet_analyzer_free_lldp_info(lldp_info_t *info);
+
+/**
+ * Extract LACP (Link Aggregation Control Protocol) information.
+ */
+lacp_info_t* packet_analyzer_extract_lacp_info(capture_file *cf,
+                                                const gchar *addr_a,
+                                                const gchar *addr_b,
+                                                gboolean addr_is_mac);
+
+void packet_analyzer_free_lacp_info(lacp_info_t *info);
+
+/**
+ * Extract 802.1Q VLAN tagging information (VLAN IDs, PCP, DEI, QinQ).
+ */
+vlan_info_t* packet_analyzer_extract_vlan_info(capture_file *cf,
+                                                const gchar *addr_a,
+                                                const gchar *addr_b,
+                                                gboolean addr_is_mac);
+
+void packet_analyzer_free_vlan_info(vlan_info_t *info);
+
+/**
+ * Extract 802.1X / EAP (EAP over LAN) information.
+ */
+eap_info_t* packet_analyzer_extract_eap_info(capture_file *cf,
+                                              const gchar *addr_a,
+                                              const gchar *addr_b,
+                                              gboolean addr_is_mac);
+
+void packet_analyzer_free_eap_info(eap_info_t *info);
+
+/**
+ * Extract MACsec (802.1AE) information.
+ */
+macsec_info_t* packet_analyzer_extract_macsec_info(capture_file *cf,
+                                                    const gchar *addr_a,
+                                                    const gchar *addr_b,
+                                                    gboolean addr_is_mac);
+
+void packet_analyzer_free_macsec_info(macsec_info_t *info);
+
+/**
+ * Extract ARP MAC/IP mapping and security anomaly information.
+ * Scans ALL ARP packets in the capture (broadcast-based; addr params not used for filtering).
+ */
+arp_info_t* packet_analyzer_extract_arp_info(capture_file *cf,
+                                              const gchar *addr_a,
+                                              const gchar *addr_b,
+                                              gboolean addr_is_mac);
+
+void packet_analyzer_free_arp_info(arp_info_t *info);
+
+/**
+ * Extract DHCP session information (all message types, all options).
+ * Scans ALL DHCP packets in the capture (broadcast-based; addr/port params not used for filtering).
+ */
+dhcp_info_t* packet_analyzer_extract_dhcp_info(capture_file *cf,
+                                                const gchar *addr_a,
+                                                const gchar *addr_b,
+                                                guint16 port,
+                                                gboolean addr_is_mac);
+
+void packet_analyzer_free_dhcp_info(dhcp_info_t *info);
+
+/**
+ * Extract DNS query/response information.
+ * Scans ALL DNS frames in the capture (port 53 UDP/TCP).
+ */
+dns_info_t* packet_analyzer_extract_dns_info(capture_file *cf,
+                                              const gchar *addr_a,
+                                              const gchar *addr_b,
+                                              guint16 port,
+                                              gboolean addr_is_mac);
+
+void packet_analyzer_free_dns_info(dns_info_t *info);
+
+/**
+ * Extract ICMP / ICMPv6 type+code statistics for a communication pair.
+ * @param cf          Capture file
+ * @param src_addr    Source address (IP or MAC)
+ * @param dst_addr    Destination address (IP or MAC)
+ * @param addr_is_mac TRUE if addresses are MAC
+ * @param is_v6       TRUE for ICMPv6, FALSE for ICMP
+ */
+icmp_info_t* packet_analyzer_extract_icmp_info(capture_file *cf,
+                                                const gchar *src_addr,
+                                                const gchar *dst_addr,
+                                                gboolean addr_is_mac,
+                                                gboolean is_v6);
+void packet_analyzer_free_icmp_info(icmp_info_t *info);
 
 #ifdef __cplusplus
 }

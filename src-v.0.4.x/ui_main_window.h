@@ -46,6 +46,7 @@
 #include <QFile>
 #include <QCloseEvent>
 #include <QPointer>
+#include <QProgressBar>
 #include "circle_widget.h"
 #include "packet_analyzer.h"
 
@@ -78,6 +79,23 @@ private:
     void showEmailInfoForRow(int row);
     void showSqlInfoForRow(int row);
     void showVoipInfoForRow(int row);
+    /* Layer-2 info dialogs */
+    void populateL2Info();
+    void loadL2Extended();
+    void populateMacTable();
+    void showL2ContextMenu(const QPoint &pos);
+    void showL2InfoDialog();
+    void showStpInfoDialog();
+    void showLldpInfoDialog();
+    void showLacpInfoDialog();
+    void showEapInfoDialog();
+    void showMacsecInfoDialog();
+    void showArpInfoDialog();
+    void showVlanInfoDialog();
+    void showDhcpInfoForRow(int row);
+    void showDnsInfoForRow(int row);
+    void onMacTableContextMenu(const QPoint &pos);
+    static bool isLayer2Protocol(const gchar *proto);
     QString buildFilterForRow(int row);
     static QString wifiPhyName(guint8 phy);
     static QString wifiReasonCodeText(guint16 reason);
@@ -86,12 +104,15 @@ private:
     comm_pair_t *m_reversePair; /* Reverse direction (may be NULL) */
     gboolean m_useMAC;
     QTableWidget *m_table;
+    QTableWidget  *m_macTable;        /* Protocol breakdown table for MAC/L2 mode */
+    QProgressBar  *m_macProgressBar;  /* Indeterminate busy bar shown while scanning */
     QTextEdit *m_wifiInfoEdit;  /* Rich-text Wi-Fi detail card (used instead of table) */
+    QTextEdit *m_l2InfoEdit;    /* Rich-text Layer-2 detail card for non-IP MAC pairs */
     QTimer *m_autoCloseTimer;
     QLabel *m_headerLabel;
     bool m_contextMenuActive;
 
-    /* Per-row data (with per-port protocol information) */
+    /* Per-row data (with per-port protocol information) — IP mode */
     struct RowData {
         QString protocol;  /* "TCP", "UDP", or "TCP+UDP" */
         quint16 port;
@@ -100,6 +121,19 @@ private:
         bool isUdp;        /* TRUE if UDP was seen on this specific port */
     };
     QList<RowData> m_rowData;
+
+    /* Per-row data for MAC/L2 protocol breakdown table */
+    struct MacRowData {
+        QString  etherType;    /* "0x0800" for EtherType rows, "802.3" for LLC rows */
+        QString  sapSnap;      /* "0x42/0x42" for LLC rows, "—" for EtherType rows */
+        QString  name;         /* "IPv4", "ARP", "STP / Spanning Tree", etc. */
+        quint64  packets;
+        bool     isEtherType;  /* true = Ethernet II EtherType; false = IEEE 802.3 LLC */
+        guint16  etherTypeVal; /* numeric EtherType (0 for LLC rows) */
+        guint8   dsap;         /* LLC DSAP (0 for EtherType rows) */
+        guint8   ssap;         /* LLC SSAP (0 for EtherType rows) */
+    };
+    QList<MacRowData> m_macRowData;
 };
 
 class MainWindow : public QMainWindow
@@ -146,6 +180,7 @@ public slots:
 protected:
     void resizeEvent(QResizeEvent *event) override;
     void closeEvent(QCloseEvent *event) override;
+    bool eventFilter(QObject *obj, QEvent *event) override;
 
 private:
     void setupUI();
@@ -159,6 +194,9 @@ private:
     QString createFilterString();
     QList<comm_pair_t*> getActivePairsForFilter() const;
     void applySearchFilter(const QString &query);
+    void enterSearchOverrideMode(const QList<comm_pair_t*> &matches, const QString &query);
+    void exitSearchOverrideMode();
+    void showSearchHelp();
     void refreshPairListText();
     void updateSearchBarForMode();
     static QString truncateIPv6Address(const QString &address);
@@ -214,7 +252,7 @@ private:
 
     /* Legend */
     QWidget *m_legendWidget;
-    QHBoxLayout *m_legendLayout;  /* First row layout for legend (kept for compatibility) */
+    QHBoxLayout *m_legendLayout;      /* First row layout for legend (kept for compatibility) */
     QHBoxLayout *m_legendRow2Layout;  /* Second row layout for legend */
     QHash<QString, QCheckBox*> m_protocolCheckboxes;  /* Protocol checkboxes for filtering */
     QCheckBox *m_lineThicknessCheckBox;
@@ -231,6 +269,11 @@ private:
     analysis_result_t *m_analysisResult;
     GList *m_top_pairs;  /* Track top pairs list to free it properly */
     GList *m_circle_pairs;  /* Limited list for circle widget (exactly top_n pairs) */
+    /* Search override mode: shows full-buffer matches instead of Top-N ranked pairs.
+     * Active from user confirmation until search is cleared or a Top-N button is clicked. */
+    GList *m_searchOverridePairs; /* borrowed from m_analysisResult — do NOT free elements */
+    bool   m_searchOverrideMode;
+    guint  m_savedTopN;           /* m_topN saved before entering override mode */
     guint m_topN;
     gboolean m_useBytes;
     gboolean m_useMAC;

@@ -98,8 +98,8 @@ void circle_vis_open_window(capture_file *cf)
     /* packet_analyzer_analyze will check if cf is valid */
     if (cf) {
         qDebug() << "circle_vis_open_window: Calling packet_analyzer_analyze";
-        /* Use IP by default (FALSE) - MainWindow will handle MAC/IP toggle */
-        analysis_result_t *result = packet_analyzer_analyze(cf, FALSE); /* Start with IP */
+        /* Analyse with the mode restored from preferences (MAC or IP) */
+        analysis_result_t *result = packet_analyzer_analyze(cf, g_main_window->getUseMAC());
         if (result) {
             /* Log what we're passing to UI */
             guint pairs_count = result->pairs ? g_list_length(result->pairs) : 0;
