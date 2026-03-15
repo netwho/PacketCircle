@@ -273,6 +273,42 @@ fi
 
 printf "\n${GREEN}✓${NC} Selected: PacketCircle v.%s for %s\n" "$SELECTED_VERSION" "$SELECTED_WS_LABEL"
 
+# --- Qt6 runtime check ---
+# PacketCircle is built against Qt6. Wireshark 4.0.x and 4.2.x ship Qt5 on most
+# distros, so Qt6 runtime libraries may not be present. Check and offer to install.
+QT6_OK=0
+for libdir in /usr/lib/x86_64-linux-gnu /usr/lib64 /usr/lib; do
+    if [ -f "$libdir/libQt6Widgets.so.6" ] || [ -f "$libdir/libQt6Core.so.6" ]; then
+        QT6_OK=1
+        break
+    fi
+done
+
+if [ "$QT6_OK" = "0" ]; then
+    printf "\n${YELLOW}⚠ Qt6 runtime libraries not found.${NC}\n"
+    printf "  PacketCircle requires Qt6 (libQt6Widgets, libQt6Gui, libQt6Core).\n"
+    printf "  Wireshark %s.%s ships with Qt5; Qt6 must be installed separately.\n" "$WS_MAJOR" "$WS_MINOR"
+    printf "\n"
+    if command -v apt-get >/dev/null 2>&1; then
+        printf "  Install Qt6 runtime now? (requires sudo)\n"
+        printf "  Command: sudo apt-get install -y libqt6widgets6\n"
+        printf "  Proceed? [Y/n]: "
+        read -r QT6_INSTALL
+        QT6_INSTALL=${QT6_INSTALL:-Y}
+        if [ "$QT6_INSTALL" = "y" ] || [ "$QT6_INSTALL" = "Y" ]; then
+            sudo apt-get install -y libqt6widgets6
+            printf "${GREEN}✓${NC} Qt6 runtime installed.\n"
+        else
+            printf "${YELLOW}Skipped. The plugin may fail to load without Qt6 runtime.${NC}\n"
+        fi
+    else
+        printf "  ${YELLOW}apt not available. Install Qt6 runtime manually for your distro:${NC}\n"
+        printf "    Fedora/RHEL: sudo dnf install qt6-qtbase\n"
+        printf "    Arch:        sudo pacman -S qt6-base\n"
+        printf "    openSUSE:    sudo zypper install libQt6Widgets6\n"
+    fi
+fi
+
 # --- Install ---
 printf "\n${BLUE}Installing to: %s${NC}\n" "$INSTALL_DIR"
 mkdir -p "$INSTALL_DIR"
