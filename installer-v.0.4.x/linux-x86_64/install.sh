@@ -34,7 +34,7 @@ printf "${BLUE}╔════════════════════�
 printf "${BLUE}║   PacketCircle Installer for Linux               ║${NC}\n"
 printf "${BLUE}║   x86_64 (64-bit Intel/AMD)                      ║${NC}\n"
 printf "${BLUE}║   Supports Wireshark 4.0.x, 4.2.x, 4.4.x, 4.6.x  ║${NC}\n"
-printf "${BLUE}║   Available: v.0.3.2, v.0.4.3 (latest)           ║${NC}\n"
+printf "${BLUE}║   Available: v.0.3.2, v.0.4.4 (latest)           ║${NC}\n"
 printf "${BLUE}╚══════════════════════════════════════════════════╝${NC}\n"
 printf "\n"
 
@@ -48,7 +48,7 @@ if [ "$ARCH" != "x86_64" ]; then
 fi
 
 # --- Verify binaries exist ---
-# v.0.3.2 has ws42/ws44/ws46 only; v.0.4.3 adds ws40
+# v.0.3.2 has ws42/ws44/ws46 only; v.0.4.4 adds ws40
 for ws in ws42 ws44 ws46; do
     if [ ! -f "$BIN_DIR/v.0.3.2/packetcircle-${ws}.so" ]; then
         printf "${RED}Error: Missing binary: bin/v.0.3.2/packetcircle-%s.so${NC}\n" "$ws"
@@ -56,8 +56,8 @@ for ws in ws42 ws44 ws46; do
     fi
 done
 for ws in ws40 ws42 ws44 ws46; do
-    if [ ! -f "$BIN_DIR/v.0.4.3/packetcircle-${ws}.so" ]; then
-        printf "${RED}Error: Missing binary: bin/v.0.4.3/packetcircle-%s.so${NC}\n" "$ws"
+    if [ ! -f "$BIN_DIR/v.0.4.4/packetcircle-${ws}.so" ]; then
+        printf "${RED}Error: Missing binary: bin/v.0.4.4/packetcircle-%s.so${NC}\n" "$ws"
         exit 1
     fi
 done
@@ -152,10 +152,6 @@ case "$WS_MINOR" in
         ;;
 esac
 
-# Note for Wireshark 4.0.x users: only v.0.4.3 is available (first release with 4.0 support)
-if [ "$SELECTED_WS_TAG" = "ws40" ]; then
-    printf "${YELLOW}Note: Only PacketCircle v.0.4.3 is available for Wireshark 4.0.x.${NC}\n"
-fi
 
 # --- Determine plugin directory ---
 PLUGIN_PATH_ID=""
@@ -231,34 +227,38 @@ case "$ACTION" in
 esac
 
 # --- Version selection ---
-# Note: ws40 support was added in v.0.4.3; v.0.3.2 only supports 4.2+
+# v.0.3.2 supports ws42/ws44/ws46; v.0.4.4 adds ws40
 printf "\n"
 printf "Select version to install:\n"
 printf "\n"
 if [ "$SELECTED_WS_TAG" = "ws40" ]; then
-    printf "  ${GREEN}1${NC}) v.0.4.3             — only version available for Wireshark 4.0.x\n"
-elif [ "$INSTALLED_VERSION" = "0.4.3" ]; then
-    printf "  ${GREEN}1${NC}) v.0.4.3 (latest)   — already installed, reinstall\n"
-    printf "  ${YELLOW}2${NC}) v.0.3.2             — downgrade (legacy)\n"
-elif [ "$INSTALLED_VERSION" = "0.3.2" ]; then
-    printf "  ${GREEN}1${NC}) v.0.4.3 (latest)   — upgrade (recommended)\n"
-    printf "  ${YELLOW}2${NC}) v.0.3.2             — already installed, reinstall\n"
-else
-    printf "  ${GREEN}1${NC}) v.0.4.3 (latest)   — Wireshark 4.0 support, API compat fixes\n"
-    printf "  ${YELLOW}2${NC}) v.0.3.2             — TCP stream stats, Select Results, theme-aware UI\n"
-fi
-printf "\n"
-printf "Choice [1]: "
-read -r VER_CHOICE
-VER_CHOICE=${VER_CHOICE:-1}
-if [ "$SELECTED_WS_TAG" = "ws40" ]; then
+    # ws40: only v.0.4.4 available (first release with 4.0 support that is current)
+    printf "  ${GREEN}1${NC}) v.0.4.4 (latest)   — keyword search, display filter delegation\n"
+    printf "\n"
+    printf "Choice [1]: "
+    read -r VER_CHOICE
+    VER_CHOICE=${VER_CHOICE:-1}
     case "$VER_CHOICE" in
-        1) SELECTED_VERSION="0.4.3" ;;
+        1) SELECTED_VERSION="0.4.4" ;;
         *) printf "Invalid choice. Exiting.\n"; exit 1 ;;
     esac
 else
+    if [ "$INSTALLED_VERSION" = "0.4.4" ]; then
+        printf "  ${GREEN}1${NC}) v.0.4.4 (latest)   — already installed, reinstall\n"
+        printf "  ${YELLOW}2${NC}) v.0.3.2             — downgrade (legacy)\n"
+    elif [ "$INSTALLED_VERSION" = "0.3.2" ]; then
+        printf "  ${GREEN}1${NC}) v.0.4.4 (latest)   — upgrade (recommended)\n"
+        printf "  ${YELLOW}2${NC}) v.0.3.2             — already installed, reinstall\n"
+    else
+        printf "  ${GREEN}1${NC}) v.0.4.4 (latest)   — keyword search, display filter delegation\n"
+        printf "  ${YELLOW}2${NC}) v.0.3.2             — legacy\n"
+    fi
+    printf "\n"
+    printf "Choice [1]: "
+    read -r VER_CHOICE
+    VER_CHOICE=${VER_CHOICE:-1}
     case "$VER_CHOICE" in
-        1) SELECTED_VERSION="0.4.3" ;;
+        1) SELECTED_VERSION="0.4.4" ;;
         2) SELECTED_VERSION="0.3.2" ;;
         *) printf "Invalid choice. Exiting.\n"; exit 1 ;;
     esac
