@@ -4,18 +4,18 @@
   <img src="PacketCircle.png" alt="PacketCircle Logo" width="128">
 </p>
 
-[![Version](https://img.shields.io/badge/version-0.4.3-blue.svg)](CHANGELOG.md)
+[![Version](https://img.shields.io/badge/version-0.4.4-blue.svg)](CHANGELOG.md)
 [![Status](https://img.shields.io/badge/status-public%20beta-orange.svg)](CHANGELOG.md)
 [![License: GPL v2](https://img.shields.io/badge/License-GPL%20v2-blue.svg)](LICENSE)
 [![Wireshark](https://img.shields.io/badge/Wireshark-4.0.x%20%7C%204.2.x%20%7C%204.4.x%20%7C%204.6.x-1679A7.svg)](https://www.wireshark.org/)
 [![C++/Qt6](https://img.shields.io/badge/C%2B%2B%2FQt6-Native-41CD52.svg)](https://www.qt.io/)
-[![macOS](https://img.shields.io/badge/macOS-Universal%20Binary-000000.svg?logo=apple)](installer-v.0.4.x/macos-universal/)
-[![Linux](https://img.shields.io/badge/Linux-x86__64-FCC624.svg?logo=linux&logoColor=black)](installer-v.0.4.x/linux-x86_64/)
-[![Windows](https://img.shields.io/badge/Windows-x86__64-0078D6.svg?logo=windows&logoColor=white)](installer-v.0.4.x/windows-x86_64/)
+[![macOS](https://img.shields.io/badge/macOS-Universal%20Binary-000000.svg?logo=apple)](installer/macos-universal/)
+[![Linux](https://img.shields.io/badge/Linux-x86__64-FCC624.svg?logo=linux&logoColor=black)](installer/linux-x86_64/)
+[![Windows](https://img.shields.io/badge/Windows-x86__64-0078D6.svg?logo=windows&logoColor=white)](installer/windows-x86_64/)
 
 A native Wireshark plugin that visualizes network communication pairs in an interactive circle diagram with protocol color coding, traffic volume indicators, and PDF report export.
 
-> **Beta Status**: This is version 0.4.3, a public beta release. While fully functional, the software is under active development. Please report any issues you encounter.
+> **Beta Status**: This is version 0.4.4, a public beta release. While fully functional, the software is under active development. Please report any issues you encounter.
 
 ## Demo
 
@@ -47,7 +47,9 @@ A native Wireshark plugin that visualizes network communication pairs in an inte
   - **DHCP** - Client/server exchanges, lease requests and offers, assigned addresses, DHCP options
   - **VLAN (802.1Q)** *(new in v0.4.3)* - VLAN ID → frame count table, QinQ (double-tagged) detection, DEI/CFI bit count, PCP priority distribution with IEEE 802.1p class names
   - **MACsec (802.1AE)** *(improved in v0.4.3)* - Encryption E-bit, SC-bit, Association Number distribution, Packet Number range, SCI values; TVB raw-byte fallback when the MACsec dissector is not active
-- **Search** - Search by IP address, CIDR range, port (e.g., `TCP 443`, `UDP 53`), or protocol category (`TCP`, `UDP`, `ARP`, `ICMP`, `DNS`, `DHCP`, `Infrastructure`, `Unknown`) with blinking red highlights; protocol category search updates the legend live *(improved in v0.4.2)*
+- **Search** - Search by IP address, CIDR range, port (e.g., `TCP 443`, `UDP 53`), protocol category (`TCP`, `UDP`, `ARP`, `ICMP`, `DNS`, `DHCP`, `Infrastructure`, `Unknown`), or application-layer protocol keyword with blinking red highlights; protocol category search updates the legend live *(improved in v0.4.2)*
+- **Application Protocol Keyword Search** *(new in v0.4.4)* - Search directly for application protocols by name. IP-mode keywords: `TLS` / `SSL` / `HTTPS`, `HTTP`, `SMB` / `CIFS`, `Kerberos` / `KRB`, `SMTP` / `email` / `mail`, `IMAP`, `POP3` / `POP`, `SQL` / `MSSQL`, `MySQL`, `PostgreSQL` / `PGSQL`, `VoIP` / `SIP`. MAC-mode keyword: `MACsec` / `802.1AE`. Matching is port-based and supports the full-buffer "Not in Top-N" fallback
+- **Wireshark Display Filter Fallback** *(new in v0.4.4)* - When a search term is not recognised or returns no results, PacketCircle offers to apply it as a Wireshark display filter. If confirmed, the filter is applied, PacketCircle re-analyses the filtered packet set and reloads the view. If the filter matches nothing, ":-( no packets found in the buffer" is shown
 - **Select Search Results** - After a search, select only the matching pairs with one click — works with IP, port, and category searches
 - **Protocol Filtering** - Filter the visualization by specific protocols using interactive checkboxes; toggling a category also syncs the pair list checkboxes *(new in v0.4.0)*
 - **Theme-Aware UI** - Automatically adapts to light and dark themes
@@ -133,12 +135,12 @@ Hover over any node to see a detailed popup with IP address, total packet count,
 
 ### Installation
 
-All installers support **version selection** (v.0.4.3 or v.0.3.2), detect any existing installation, and offer an **uninstall** option. Run the installer, then follow the prompts.
+All installers support **version selection** (v.0.4.4 or v.0.3.2), detect any existing installation, and offer an **uninstall** option. Run the installer, then follow the prompts.
 
 #### macOS (Intel & Apple Silicon) — Wireshark 4.6.x
 ```bash
 git clone https://github.com/netwho/PacketCircle.git
-cd PacketCircle/installer-v.0.4.x/macos-universal
+cd PacketCircle/installer/macos-universal
 chmod +x install.sh
 ./install.sh
 ```
@@ -148,7 +150,7 @@ chmod +x install.sh
 **Recommended** — double-click or run the batch file (no execution policy changes needed):
 ```cmd
 git clone https://github.com/netwho/PacketCircle.git
-cd PacketCircle\installer-v.0.4.x\windows-x86_64
+cd PacketCircle\installer\windows-x86_64
 install.bat
 ```
 
@@ -158,7 +160,7 @@ The `.bat` wrapper launches the PowerShell installer with a temporary `-Executio
 <summary>Alternative: run the PowerShell script directly</summary>
 
 ```powershell
-cd PacketCircle\installer-v.0.4.x\windows-x86_64
+cd PacketCircle\installer\windows-x86_64
 .\install.ps1
 ```
 
@@ -169,50 +171,55 @@ cd PacketCircle\installer-v.0.4.x\windows-x86_64
 #### Linux (x86_64) — Wireshark 4.0.x / 4.2.x / 4.4.x / 4.6.x
 ```bash
 git clone https://github.com/netwho/PacketCircle.git
-cd PacketCircle/installer-v.0.4.x/linux-x86_64
+cd PacketCircle/installer/linux-x86_64
 chmod +x install.sh
 ./install.sh
 ```
 
 The unified Linux installer auto-detects your Wireshark version and installs the matching binary.
 
+> **Wireshark 4.0.x on Linux**: requires **Qt6** to be installed on the system. The installer checks for this and provides installation instructions if Qt6 is missing. On most distributions this is a one-time step:
+> ```bash
+> sudo apt install libqt6widgets6    # Debian/Ubuntu
+> ```
+
 #### Manual Install
 
 > **Note**: macOS uses **dashes** (`4-6`), Linux uses **dots** (`4.2`, `4.4`, `4.6`), Windows uses **dots** (`4.6`) in the plugin directory name.
 
-The installer directory includes both v.0.4.3 (latest) and v.0.3.2 binaries in versioned subdirectories. Choose the version you want to install:
+The installer directory includes both v.0.4.4 (latest) and v.0.3.2 binaries in versioned subdirectories. Choose the version you want to install:
 
 ```bash
 # macOS (Wireshark 4.6.x) — choose your version:
 mkdir -p ~/.local/lib/wireshark/plugins/4-6/epan/
 
-# Latest (v.0.4.3):
-cp installer-v.0.4.x/macos-universal/v.0.4.3/packetcircle.so ~/.local/lib/wireshark/plugins/4-6/epan/
+# Latest (v.0.4.4):
+cp installer/macos-universal/v.0.4.4/packetcircle.so ~/.local/lib/wireshark/plugins/4-6/epan/
 
-# Or downgrade to v.0.3.2:
-cp installer-v.0.4.x/macos-universal/v.0.3.2/packetcircle.so ~/.local/lib/wireshark/plugins/4-6/epan/
+# Or legacy v.0.3.2:
+cp installer/macos-universal/v.0.3.2/packetcircle.so ~/.local/lib/wireshark/plugins/4-6/epan/
 ```
 
 ```bash
 # Linux — pick the binary matching your Wireshark version:
-#   v.0.4.3/packetcircle-ws40.so  → Wireshark 4.0.x  (v.0.4.3 only)
-#   v.0.4.3/packetcircle-ws42.so  → Wireshark 4.2.x
-#   v.0.4.3/packetcircle-ws44.so  → Wireshark 4.4.x
-#   v.0.4.3/packetcircle-ws46.so  → Wireshark 4.6.x
-# (replace v.0.4.3 with v.0.3.2 for 4.2/4.4/4.6; v.0.3.2 does not support 4.0.x)
+#   v.0.4.4/packetcircle-ws40.so  → Wireshark 4.0.x
+#   v.0.4.4/packetcircle-ws42.so  → Wireshark 4.2.x
+#   v.0.4.4/packetcircle-ws44.so  → Wireshark 4.4.x
+#   v.0.4.4/packetcircle-ws46.so  → Wireshark 4.6.x
+# (replace v.0.4.4 with v.0.3.2 for 4.2/4.4/4.6; v.0.3.2 does not support 4.0.x)
 
 mkdir -p ~/.local/lib/wireshark/plugins/4.6/epan/
-cp installer-v.0.4.x/linux-x86_64/bin/v.0.4.3/packetcircle-ws46.so ~/.local/lib/wireshark/plugins/4.6/epan/packetcircle.so
+cp installer/linux-x86_64/bin/v.0.4.4/packetcircle-ws46.so ~/.local/lib/wireshark/plugins/4.6/epan/packetcircle.so
 ```
 
 ```powershell
 # Windows (Wireshark 4.6.x) — run in PowerShell
 
-# Latest (v.0.4.3):
-Copy-Item installer-v.0.4.x\windows-x86_64\v.0.4.3\packetcircle.dll "$env:APPDATA\Wireshark\plugins\4.6\epan\"
+# Latest (v.0.4.4):
+Copy-Item installer\windows-x86_64\v.0.4.4\packetcircle.dll "$env:APPDATA\Wireshark\plugins\4.6\epan\"
 
-# Or downgrade to v.0.3.2:
-Copy-Item installer-v.0.4.x\windows-x86_64\v.0.3.2\packetcircle.dll "$env:APPDATA\Wireshark\plugins\4.6\epan\"
+# Or legacy v.0.3.2:
+Copy-Item installer\windows-x86_64\v.0.3.2\packetcircle.dll "$env:APPDATA\Wireshark\plugins\4.6\epan\"
 ```
 
 > **Tip**: Check your exact plugin path in Wireshark under Help -> About Wireshark -> Folders -> Personal Plugins.
@@ -241,7 +248,7 @@ See [QUICKSTART.md](QUICKSTART.md) for a detailed guide.
 | **PDF** | Export a one-page PDF report |
 | **Protocol checkboxes** | Filter by specific protocols (TCP, UDP, HTTP, DNS, etc.) |
 | **Line Thickness** | Toggle proportional line weight on/off |
-| **Search** | Search by IP, CIDR, port (e.g., `TCP 443`), or category (`TCP`, `Infrastructure`) |
+| **Search** | Search by IP, CIDR, port (e.g., `TCP 443`), category (`TCP`, `Infrastructure`), or protocol keyword (`TLS`, `HTTP`, `SMB`, `Kerberos`, `SMTP`, `VoIP`, `MACsec`, …) |
 
 ## PDF Report
 
@@ -318,17 +325,20 @@ See [BUILD.md](src/BUILD.md) for detailed instructions.
 | **4.6.x** (4.6.0 – 4.6.x) | Supported | Supported | Supported |
 | **4.4.x** (4.4.0 – 4.4.x) | — | — | Supported |
 | **4.2.x** (4.2.0 – 4.2.x) | — | — | Supported |
-| **4.0.x** (4.0.0 – 4.0.x) | — | — | Supported (v.0.4.3+) |
+| **4.0.x** (4.0.0 – 4.0.x) | — | — | Supported (v.0.4.3+) ¹ |
 
 **macOS and Windows** ship with Wireshark 4.6.x builds only. On these platforms, Wireshark is typically installed or updated directly from [wireshark.org](https://www.wireshark.org/download.html), so running the latest 4.6.x release is straightforward.
 
-**Linux** distributions often ship older Wireshark versions in their package repositories (e.g., Debian stable ships 4.0.x, Debian 13 Trixie ships 4.4.x, some distributions still carry 4.2.x). The unified Linux installer (`installer-v.0.4.x/linux-x86_64/`) includes binaries for all four series and automatically selects the right one. Note: Wireshark 4.0.x support requires PacketCircle v.0.4.3 or later.
+**Linux** distributions often ship older Wireshark versions in their package repositories (e.g., Debian stable ships 4.0.x, Debian 13 Trixie ships 4.4.x, some distributions still carry 4.2.x). The unified Linux installer (`installer/linux-x86_64/`) includes binaries for all four series and automatically selects the right one.
+
+> ¹ **Wireshark 4.0.x**: requires Qt6 on the host system (Wireshark 4.0.x does not bundle Qt). Install `libqt6widgets6` via your package manager if it is not already present. The Linux installer detects this and provides instructions automatically.
 
 > **Why separate binaries?** Wireshark uses a versioned plugin ABI (`MAJOR.MINOR`). Each minor release series (4.0, 4.2, 4.4, 4.6) has its own ABI. Pre-built plugins only load in the matching series.
 
 ## Requirements
 
 - **Wireshark** 4.6.x (macOS/Windows) or 4.0.x–4.6.x (Linux, v.0.4.3+), or any 4.x if building from source
+- **Qt6 runtime** (Linux + Wireshark 4.0.x only) — `libqt6widgets6` or equivalent; handled automatically by the installer
 - **macOS** 13.0 or later (Ventura+) — Universal Binary (Intel + Apple Silicon)
 - **Windows** 10/11 x86_64 — Wireshark 4.6.x with Qt6
 - **Linux** x86_64 — Ubuntu 22.04+, Debian 12+/13, Fedora 39+, or similar with Qt6

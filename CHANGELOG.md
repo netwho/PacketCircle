@@ -2,6 +2,22 @@
 
 All notable changes to PacketCircle will be documented in this file.
 
+## [0.4.4] - 2026-03-15
+
+### Added
+- **Protocol-info keyword search** — The search bar now accepts friendly keywords for every protocol that has a protocol information popup. Typing the keyword highlights all pairs using that protocol and supports "Not in Top-N" full-buffer lookup. New IP-mode keywords: `TLS` / `SSL` / `HTTPS` (ports 443, 465, 993, 995, 8443), `HTTP` (ports 80, 8080, 8000, 8888), `SMB` / `CIFS` (ports 445, 139), `Kerberos` / `KRB` (port 88), `SMTP` / `email` / `mail` (ports 25, 465, 587), `IMAP` (ports 143, 993), `POP3` / `POP` (ports 110, 995), `SQL` / `MSSQL` (port 1433), `MySQL` (port 3306), `PostgreSQL` / `PGSQL` (port 5432), `VoIP` / `SIP` (ports 5060, 5061). New MAC-mode keyword: `MACsec` / `802.1AE` (EtherType 0x88E5).
+- **Wireshark display filter fallback** — When a search term returns no PacketCircle results (either unrecognised keyword or zero pair matches), PacketCircle now asks whether to apply the query as a Wireshark display filter. The user is warned about potential additional processing time on large captures. If confirmed: the filter is applied to Wireshark, PacketCircle re-analyses the filtered packet set (400 ms delay), and the view is reloaded. If the filter produces no matching packets the message ":-( no packets found in the buffer" is shown. If the user declines, the search help dialog is shown instead.
+
+### Changed
+- **Search help dialog updated** — IP mode help now lists the new protocol-info keywords under a dedicated "Protocol info keywords" section. MAC mode help adds MACsec / 802.1AE. All modes show an explanatory note about the display filter fallback.
+- **Installer paths** — Installer directories renamed from `installer-v.0.4.x/` to `installer/` for a cleaner repository layout. Old version binaries moved to `binary-backup/` per platform.
+
+### Fixed
+- **Linux: GLIBC_2.38 dependency on older distributions** — Binaries built on Ubuntu 24.04 (glibc 2.39) referenced `__isoc23_sscanf` and `__isoc23_strtoul` (C23 glibc 2.38 variants), causing a load error on Debian 12, Ubuntu 22.04, and similar distributions with glibc < 2.38. Root cause: `_GNU_SOURCE` (set by the Wireshark build system) implicitly enables `_ISOC2X_SOURCE`, which causes glibc 2.38+ headers to redirect `sscanf`/`strtoul` to their C23 variants. Fixed with a small `glibc_compat.c` shim compiled without `_GNU_SOURCE`, providing weak `__isoc23_sscanf` and `__isoc23_strtoul` wrappers that call the standard `vsscanf`/`strtoul`. The linker resolves these references locally, eliminating the GLIBC_2.38 requirement from the `.so`. All four Linux binaries (ws40 / ws42 / ws44 / ws46) are fixed.
+- **Plugin version reported incorrectly** — `set_module_info` in `CMakeLists.txt` was not updated from v0.4.2, causing Wireshark's Help → About → Plugins list to show the wrong version. Now correctly reports v0.4.4.
+- **Wireshark 4.0.x: Qt6 runtime required** — The pre-built ws40 binary links against Qt6 (Wireshark 4.0.x supports both Qt5 and Qt6 at build time; the shipped binary uses Qt6). Systems running Wireshark 4.0.x from a distribution package may not have Qt6 installed. The installer now detects this and provides the `libqt6widgets6` install command if needed.
+- AI-Assisted: yes (Claude) — protocol-info keyword search, display filter delegation, glibc compat shim, search help updates, installer layout, CHANGELOG
+
 ## [0.4.3] - 2026-03-11
 
 ### Added
