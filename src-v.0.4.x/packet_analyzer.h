@@ -457,6 +457,125 @@ typedef struct _dhcp_info {
     gboolean found;
 } dhcp_info_t;
 
+/* LDAP session information (LDAP / LDAPS / Global Catalog) */
+typedef struct _ldap_info {
+    /* Operation counters */
+    guint32 bind_count;              /* BindRequest frames */
+    guint32 search_count;            /* SearchRequest frames */
+    guint32 search_res_entry_count;  /* Total SearchResultEntry frames */
+    guint32 modify_count;            /* ModifyRequest / ModDNRequest frames */
+    guint32 add_count;               /* AddRequest frames */
+    guint32 delete_count;            /* DelRequest frames */
+    /* Bind details */
+    GList   *bind_dns;               /* Unique bind DNs from BindRequest (gchar*) */
+    GList   *sasl_mechanisms;        /* Unique SASL mechanisms (gchar*) */
+    gboolean has_simple_bind;        /* Simple authentication seen */
+    gboolean has_sasl_bind;          /* SASL authentication seen */
+    gboolean has_anonymous_bind;     /* Simple bind with empty DN */
+    /* Search details */
+    GList   *base_dns;               /* Unique search base DNs (gchar*) */
+    GList   *search_filters;         /* Unique search filters — up to 30 (gchar*) */
+    /* Results */
+    GHashTable *result_counts;       /* result code name (gchar*) → guint* count */
+    guint32 success_count;           /* resultCode == 0 (success) */
+    guint32 error_count;             /* any non-zero resultCode */
+    /* Meta */
+    guint32  matched_packets;
+    gboolean found;
+    gboolean is_tls;                 /* TRUE when port 636 or 3269 (LDAPS / GC/TLS) */
+} ldap_info_t;
+
+/* SNMP session information (v1 / v2c / v3, ports 161/162) */
+typedef struct _snmp_info {
+    /* Protocol version counters */
+    guint32 v1_count;
+    guint32 v2c_count;
+    guint32 v3_count;
+    /* PDU type counters */
+    guint32 get_count;           /* GetRequest + GetNextRequest + GetBulkRequest */
+    guint32 set_count;           /* SetRequest */
+    guint32 response_count;      /* Response / GetResponse */
+    guint32 trap_count;          /* Trap-v1 + SNMPv2-Trap */
+    guint32 inform_count;        /* InformRequest */
+    guint32 report_count;        /* Report */
+    GHashTable *pdu_counts;      /* PDU type name (gchar*) → guint* count */
+    /* Community strings (v1/v2c) */
+    GList   *communities;        /* unique community strings (gchar*) */
+    gboolean has_default_community; /* TRUE if "public" or "private" detected */
+    /* v3 security */
+    GList   *v3_usernames;       /* unique v3 USM usernames (gchar*) */
+    /* Variable binding OIDs */
+    GHashTable *oid_counts;      /* OID/name (gchar*) → guint* count — capped at 100 */
+    /* Error status */
+    GHashTable *error_counts;    /* error name (gchar*) → guint* count */
+    guint32 error_total;         /* frames with error_status != noError */
+    /* Meta */
+    guint32  matched_packets;
+    gboolean found;
+} snmp_info_t;
+
+/* Syslog session information (RFC 3164 / RFC 5424, port 514/601/6514) */
+typedef struct _syslog_info {
+    /* Severity counters: index 0=Emergency … 7=Debug */
+    guint32 severity_counts[8];
+    /* Facility counters */
+    GHashTable *facility_counts; /* facility label (gchar*) → guint* count */
+    /* Sources */
+    GList *hostnames;            /* unique sending hostnames (gchar*) */
+    GList *app_names;            /* unique app-name / process tags (gchar*) */
+    /* Critical message samples — severity 0-3, up to 15 entries */
+    GList *critical_msgs;        /* "[SEVERITY] message text" strings (gchar*) */
+    /* RFC version breakdown */
+    guint32 rfc3164_count;       /* BSD syslog (no version field) */
+    guint32 rfc5424_count;       /* IETF syslog (version=1) */
+    /* Meta */
+    guint32  matched_packets;
+    gboolean found;
+} syslog_info_t;
+
+/* SSH / SFTP / SCP session information (port 22) */
+typedef struct _ssh_info {
+    /* Version banners — client + server (up to 2 unique strings) */
+    GList *banners;                /* "SSH-2.0-OpenSSH_x.y" strings */
+    gboolean protocol_v2;          /* TRUE if any banner contains "SSH-2" */
+    /* Key exchange / KEXINIT algorithm lists (from first KEXINIT seen) */
+    GList *kex_algorithms;         /* preferred KEX algorithm names */
+    GList *host_key_algorithms;    /* server host key types */
+    GList *ciphers_c2s;            /* encryption client→server */
+    GList *ciphers_s2c;            /* encryption server→client */
+    GList *macs_c2s;               /* MAC client→server */
+    GList *macs_s2c;               /* MAC server→client */
+    GList *compress_c2s;           /* compression client→server */
+    GList *compress_s2c;           /* compression server→client */
+    gboolean compression_enabled;  /* TRUE if non-"none" compression algorithm seen */
+    guint32 kexinit_count;         /* KEXINIT frames seen (>2 means re-keying) */
+    guint32 newkeys_count;         /* SSH2_MSG_NEWKEYS frames (key rotation events) */
+    /* Authentication (only visible when Wireshark has decryption keys) */
+    GList *usernames;              /* unique usernames seen in USERAUTH_REQUEST */
+    GList *auth_methods;           /* unique method strings: "password", "publickey", etc. */
+    guint32 auth_success_count;    /* USERAUTH_SUCCESS frames */
+    guint32 auth_failure_count;    /* USERAUTH_FAILURE frames */
+    gboolean has_password_auth;
+    gboolean has_pubkey_auth;
+    gboolean has_kbdint_auth;      /* keyboard-interactive */
+    gboolean has_gssapi_auth;
+    /* Channel usage (only visible when Wireshark has decryption keys) */
+    gboolean has_shell;            /* "shell" channel request */
+    gboolean has_exec;             /* "exec" channel request */
+    gboolean has_sftp;             /* "sftp" subsystem */
+    gboolean has_scp;              /* exec command starting with "scp" */
+    gboolean has_x11_forwarding;   /* x11-req or x11 channel type */
+    gboolean has_tcp_forwarding;   /* direct-tcpip / forwarded-tcpip channel */
+    gboolean has_agent_forwarding; /* auth-agent@openssh.com channel */
+    GList *exec_commands;          /* sampled exec commands (up to 10) */
+    GList *subsystems;             /* unique subsystem names requested */
+    guint32 channel_count;         /* total SSH_MSG_CHANNEL_OPEN frames */
+    guint32 disconnect_count;      /* SSH_MSG_DISCONNECT frames */
+    /* Meta */
+    guint32  matched_packets;
+    gboolean found;
+} ssh_info_t;
+
 /* DNS query / response information extracted from DNS packets in a capture */
 typedef struct _dns_info {
     gboolean  found;
@@ -799,6 +918,51 @@ dns_info_t* packet_analyzer_extract_dns_info(capture_file *cf,
 void packet_analyzer_free_dns_info(dns_info_t *info);
 
 /**
+ * Extract LDAP session information (bind DNs, search bases, result codes).
+ * Covers ports 389 (LDAP), 636 (LDAPS), 3268 (Global Catalog), 3269 (GC/TLS).
+ */
+ldap_info_t* packet_analyzer_extract_ldap_info(capture_file *cf,
+                                                const gchar *addr_a,
+                                                const gchar *addr_b,
+                                                guint16 port,
+                                                gboolean addr_is_mac);
+
+void packet_analyzer_free_ldap_info(ldap_info_t *info);
+
+/**
+ * Extract SNMP session information (PDU types, communities, OIDs, errors).
+ * Covers ports 161 (agent) and 162 (trap receiver), UDP and TCP.
+ */
+snmp_info_t* packet_analyzer_extract_snmp_info(capture_file *cf,
+                                                const gchar *addr_a,
+                                                const gchar *addr_b,
+                                                guint16 port,
+                                                gboolean addr_is_mac);
+void packet_analyzer_free_snmp_info(snmp_info_t *info);
+
+/**
+ * Extract Syslog session information (severity, facility, sources, messages).
+ * Covers ports 514 (UDP/TCP), 601 (TCP), 6514 (TLS).
+ */
+syslog_info_t* packet_analyzer_extract_syslog_info(capture_file *cf,
+                                                    const gchar *addr_a,
+                                                    const gchar *addr_b,
+                                                    guint16 port,
+                                                    gboolean addr_is_mac);
+void packet_analyzer_free_syslog_info(syslog_info_t *info);
+
+/**
+ * Extract SSH / SFTP / SCP session information (handshake, algorithms, auth,
+ * channel usage, tunneling).  Covers port 22 (TCP).
+ */
+ssh_info_t* packet_analyzer_extract_ssh_info(capture_file *cf,
+                                              const gchar *addr_a,
+                                              const gchar *addr_b,
+                                              guint16 port,
+                                              gboolean addr_is_mac);
+void packet_analyzer_free_ssh_info(ssh_info_t *info);
+
+/**
  * Extract ICMP / ICMPv6 type+code statistics for a communication pair.
  * @param cf          Capture file
  * @param src_addr    Source address (IP or MAC)
@@ -812,6 +976,229 @@ icmp_info_t* packet_analyzer_extract_icmp_info(capture_file *cf,
                                                 gboolean addr_is_mac,
                                                 gboolean is_v6);
 void packet_analyzer_free_icmp_info(icmp_info_t *info);
+
+/* ── FTP ──────────────────────────────────────────────────────────────────── */
+
+typedef struct _ftp_info {
+    /* Auth */
+    gchar    *username;           /* USER command value                       */
+    gchar    *password;           /* PASS command value                       */
+    gboolean  login_success;      /* 230 seen                                 */
+    gboolean  login_failed;       /* 530 seen                                 */
+
+    /* Commands */
+    GHashTable *cmd_counts;       /* gchar* cmd → guint count                 */
+    GList      *command_log;      /* "CMD arg" strings, capped at 200         */
+
+    /* Data channel */
+    GList    *pasv_addrs;         /* "addr:port" from PASV/EPSV responses     */
+    GList    *port_addrs;         /* "addr:port" from PORT commands           */
+    gboolean  passive_mode;
+    gboolean  active_mode;
+
+    /* Transfers */
+    guint32   retr_count;
+    guint32   stor_count;
+    GList    *filenames;          /* args of RETR/STOR/DELE/RNFR              */
+
+    /* Server info */
+    gchar    *server_banner;      /* 220 response text                        */
+    GList    *features;           /* FEAT response lines                      */
+    gchar    *system_type;        /* SYST response                            */
+
+    /* Response stats */
+    GHashTable *resp_counts;      /* gchar* code → guint count                */
+    guint32   success_count;      /* 2xx responses                            */
+    guint32   error_count;        /* 4xx + 5xx responses                      */
+
+    guint32   matched_packets;
+    gboolean  found;
+} ftp_info_t;
+
+ftp_info_t* packet_analyzer_extract_ftp_info(capture_file *cf,
+                                              const gchar *addr_a,
+                                              const gchar *addr_b,
+                                              guint16 port,
+                                              gboolean addr_is_mac);
+void packet_analyzer_free_ftp_info(ftp_info_t *info);
+
+/* ── Telnet ───────────────────────────────────────────────────────────────── */
+
+typedef struct _telnet_info {
+    /* Option negotiations (option name string → guint count) */
+    GHashTable *will_opts;
+    GHashTable *wont_opts;
+    GHashTable *do_opts;
+    GHashTable *dont_opts;
+
+    /* Flags for commonly important options */
+    gboolean  has_echo;
+    gboolean  has_linemode;
+    gboolean  has_naws;          /* Negotiate About Window Size               */
+    gboolean  has_ttype;         /* Terminal Type                             */
+    gboolean  has_auth;          /* Authentication option                     */
+    gboolean  has_encrypt;       /* Telnet Encryption option                  */
+
+    /* Credentials extracted from data stream */
+    gchar    *username;          /* line following "login:" or "Username:"    */
+    gchar    *password;          /* line following "Password:"                */
+
+    /* Reassembled data (each direction, capped at 1024 bytes total)          */
+    GString  *data_c2s;          /* client → server                          */
+    GString  *data_s2c;          /* server → client                          */
+    guint32   total_data_bytes;  /* total bytes before cap                   */
+
+    guint32   matched_packets;
+    gboolean  found;
+} telnet_info_t;
+
+telnet_info_t* packet_analyzer_extract_telnet_info(capture_file *cf,
+                                                    const gchar *addr_a,
+                                                    const gchar *addr_b,
+                                                    guint16 port,
+                                                    gboolean addr_is_mac);
+void packet_analyzer_free_telnet_info(telnet_info_t *info);
+
+/* ── NBNS / NetBIOS Name Service (port 137 UDP) ──────────────────────── */
+typedef struct _nbns_entry {
+    gchar   *name;
+    gchar   *addr;      /* NULL for pure queries with no answer yet */
+    gchar   *opcode;    /* "Query","Registration","Release","WACK","Refresh" */
+    gboolean is_response;
+} nbns_entry_t;
+
+typedef struct _nbns_info {
+    GList      *entries;           /* GList of nbns_entry_t* (responses w/ addr) */
+    GHashTable *name_to_addr;      /* last known name → IP */
+    GHashTable *seen_pairs;        /* "name|addr" dedup set */
+    guint32     query_count;
+    guint32     response_count;
+    guint32     registration_count;
+    guint32     release_count;
+    guint32     refresh_count;
+    guint32     wack_count;
+    guint32     matched_packets;
+    gboolean    found;
+} nbns_info_t;
+
+nbns_info_t *packet_analyzer_extract_nbns_info(capture_file *cf,
+                                                const gchar *addr_a,
+                                                const gchar *addr_b,
+                                                gboolean addr_is_mac);
+void packet_analyzer_free_nbns_info(nbns_info_t *info);
+
+/* ── NetBIOS Datagram Service (port 138 UDP) ─────────────────────────── */
+typedef struct _nbdgm_info {
+    GHashTable *src_names;         /* source NetBIOS name → count */
+    GHashTable *dst_names;         /* dest  NetBIOS name → count */
+    GHashTable *dgm_types;         /* type label → count */
+    guint32     direct_unique;
+    guint32     direct_group;
+    guint32     broadcast;
+    guint32     error_pkts;
+    guint32     matched_packets;
+    gboolean    found;
+} nbdgm_info_t;
+
+nbdgm_info_t *packet_analyzer_extract_nbdgm_info(capture_file *cf,
+                                                   const gchar *addr_a,
+                                                   const gchar *addr_b,
+                                                   gboolean addr_is_mac);
+void packet_analyzer_free_nbdgm_info(nbdgm_info_t *info);
+
+/* ── NetBIOS Session Service (port 139 TCP) ──────────────────────────── */
+typedef struct _nbss_session {
+    gchar *calling_name;  /* client */
+    gchar *called_name;   /* server */
+} nbss_session_t;
+
+typedef struct _nbss_info {
+    GList   *sessions;             /* GList of nbss_session_t* */
+    guint32  session_requests;
+    guint32  session_confirms;
+    guint32  session_rejects;
+    guint32  retargets;
+    guint32  keepalives;
+    guint32  session_messages;
+    guint32  matched_packets;
+    gboolean found;
+} nbss_info_t;
+
+nbss_info_t *packet_analyzer_extract_nbss_info(capture_file *cf,
+                                                const gchar *addr_a,
+                                                const gchar *addr_b,
+                                                gboolean addr_is_mac);
+void packet_analyzer_free_nbss_info(nbss_info_t *info);
+
+/* ── Generic TCP Transport Statistics ───────────────────────────────────
+ * Aggregated TCP-level stats for any pair/port: flags observed, window
+ * size, MSS, negotiated options, and RTT derived from tcp.analysis.ack_rtt */
+typedef struct _tcp_stat_info {
+    /* Flags ever observed in this stream */
+    gboolean saw_syn;
+    gboolean saw_ack;
+    gboolean saw_fin;
+    gboolean saw_rst;
+    gboolean saw_psh;
+    gboolean saw_urg;
+    gboolean saw_ece;
+    gboolean saw_cwr;
+
+    /* MSS from SYN options (0 = not advertised) */
+    guint32  mss;
+
+    /* Window size (raw, in bytes) */
+    guint32  win_min;
+    guint32  win_max;
+    gdouble  win_sum;
+    guint32  win_count;
+
+    /* Negotiated options (from SYN/SYN-ACK) */
+    gboolean sack_permitted;   /* SACK OK option seen */
+    gboolean timestamps;       /* TCP timestamps option seen */
+    gint     window_scale;     /* window scale shift (-1 = not advertised) */
+
+    /* RTT from tcp.analysis.ack_rtt (Wireshark per-packet analysis) */
+    gdouble  rtt_min_ms;       /* milliseconds */
+    gdouble  rtt_max_ms;
+    gdouble  rtt_sum_ms;
+    guint32  rtt_count;
+
+    /* Packet counts */
+    guint32  matched_packets;
+    guint32  retrans_count;    /* tcp.analysis.retransmission present */
+    guint32  ooo_count;        /* tcp.analysis.out_of_order present */
+    gboolean found;
+} tcp_stat_info_t;
+
+tcp_stat_info_t *packet_analyzer_extract_tcp_stat_info(capture_file *cf,
+                                                        const gchar  *addr_a,
+                                                        const gchar  *addr_b,
+                                                        guint16       port,
+                                                        gboolean      addr_is_mac);
+void packet_analyzer_free_tcp_stat_info(tcp_stat_info_t *info);
+
+/* ── Generic UDP Transport Statistics ───────────────────────────────────
+ * Payload-level stats (datagram sizes, direction counts) for any pair/port */
+typedef struct _udp_stat_info {
+    guint32  payload_min;      /* bytes (udp.length - 8) */
+    guint32  payload_max;
+    gdouble  payload_sum;
+    guint32  payload_count;
+
+    guint32  pkts_a_to_b;      /* direction A→B */
+    guint32  pkts_b_to_a;      /* direction B→A */
+
+    guint32  matched_packets;
+    gboolean found;
+} udp_stat_info_t;
+
+udp_stat_info_t *packet_analyzer_extract_udp_stat_info(capture_file *cf,
+                                                        const gchar  *addr_a,
+                                                        const gchar  *addr_b,
+                                                        guint16       port,
+                                                        gboolean      addr_is_mac);
+void packet_analyzer_free_udp_stat_info(udp_stat_info_t *info);
 
 #ifdef __cplusplus
 }

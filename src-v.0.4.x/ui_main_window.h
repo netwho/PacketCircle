@@ -44,9 +44,22 @@
 #include <QTextEdit>
 #include <QDir>
 #include <QFile>
+#include <QFileInfo>
 #include <QCloseEvent>
 #include <QPointer>
 #include <QProgressBar>
+#include <QFormLayout>
+#include <QDialogButtonBox>
+#include <QDesktopServices>
+#include <QUrl>
+#include <QNetworkAccessManager>
+#include <QNetworkReply>
+#include <QNetworkRequest>
+#include <QHttpMultiPart>
+#include <QSslConfiguration>
+#include <QSslError>
+#include <QJsonDocument>
+#include <QJsonObject>
 #include "circle_widget.h"
 #include "packet_analyzer.h"
 
@@ -94,6 +107,18 @@ private:
     void showVlanInfoDialog();
     void showDhcpInfoForRow(int row);
     void showDnsInfoForRow(int row);
+    void showLdapInfoForRow(int row);
+    void showSnmpInfoForRow(int row);
+    void showSyslogInfoForRow(int row);
+    void showSshInfoForRow(int row);
+    void showFtpInfoForRow(int row);
+    void showTelnetInfoForRow(int row);
+    void showNbnsInfoForRow(int row);
+    void showNbdgmInfoForRow(int row);
+    void showNbssInfoForRow(int row);
+    void showTcpStatInfoForRow(int row);
+    void showUdpStatInfoForRow(int row);
+    void showProtocolInfoBrowserForRow(int row);
     void onMacTableContextMenu(const QPoint &pos);
     static bool isLayer2Protocol(const gchar *proto);
     QString buildFilterForRow(int row);
@@ -174,6 +199,8 @@ public slots:
     void syncTableCheckboxesFromPairList();
     void onHelpClicked();
     void onSavePDFClicked();
+    void onSendToNtopClicked();
+    void onSendToMalcolmClicked();
     void onLineClicked(comm_pair_t *pair, const QPoint &globalPos);
     void onPairListBlinkTimer();
 
@@ -194,6 +221,7 @@ private:
     QString createFilterString();
     QList<comm_pair_t*> getActivePairsForFilter() const;
     void applySearchFilter(const QString &query);
+    void applyAsDisplayFilter(const QString &filter);
     void enterSearchOverrideMode(const QList<comm_pair_t*> &matches, const QString &query);
     void exitSearchOverrideMode();
     void showSearchHelp();
@@ -204,6 +232,16 @@ private:
     void savePreferences();
     void loadPreferences();
     QString preferencesFilePath() const;
+    bool showNtopngConfigDialog();
+    bool showMalcolmConfigDialog();
+    void showSettingsDialog();
+    void showCaCertConfigDialog();
+    void uploadToNtopng(const QString &filePath, const QString &host, int port,
+                        bool useHttps, const QString &username, const QString &password,
+                        bool ignoreSslErrors, const QString &caCertPath);
+    void uploadToMalcolm(const QString &filePath, const QString &host, int port,
+                         bool useHttps, const QString &username, const QString &password,
+                         bool ignoreSslErrors, quint32 startTime, quint32 stopTime);
 
     /* UI Components */
     QWidget *m_centralWidget;
@@ -232,7 +270,11 @@ private:
     QPushButton *m_clearFilterBtn;
     QPushButton *m_reloadDataBtn;
     QPushButton *m_savePDFBtn;
-    /* Help is now a menu bar action, no button member needed */
+    QPushButton *m_sendToNtopBtn;
+    QPushButton *m_sendToMalcolmBtn;
+    QPushButton *m_settingsBtn;
+    bool         m_ntopEnabled;
+    bool         m_malcolmEnabled;
 
     /* Main splitter */
     QSplitter *m_splitter;
@@ -264,6 +306,9 @@ private:
 
     /* Connection popup */
     QPointer<ConnectionPopup> m_connectionPopup;
+
+    /* ntopng network manager */
+    QNetworkAccessManager *m_networkManager;
 
     /* Data */
     analysis_result_t *m_analysisResult;

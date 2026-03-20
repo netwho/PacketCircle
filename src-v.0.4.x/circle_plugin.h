@@ -32,7 +32,7 @@
 /* Plugin version */
 #define PLUGIN_VERSION_MAJOR 0
 #define PLUGIN_VERSION_MINOR 4  /* WH: was 3 — bumped to match product version */
-#define PLUGIN_VERSION_MICRO 3
+#define PLUGIN_VERSION_MICRO 6
 
 /* Plugin registration */
 void plugin_register(void);

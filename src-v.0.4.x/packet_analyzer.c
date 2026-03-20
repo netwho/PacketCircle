@@ -546,6 +546,16 @@ static tap_packet_status circle_vis_tap_packet_cb(void *tapdata, packet_info *pi
         protocol_name = g_strdup("Unknown");
     }
 
+    /* In MAC mode, if MACsec is anywhere in the frame protocol stack, label the
+     * pair "MACsec" regardless of what inner protocols were found.  This handles
+     * both encrypted MACsec (current_proto already = "MACsec") and plaintext
+     * MACsec (current_proto = inner protocol such as "TCP"). */
+    if (tap_data->use_mac && pinfo->layers &&
+            proto_is_frame_protocol(pinfo->layers, "macsec")) {
+        g_free(protocol_name);
+        protocol_name = g_strdup("MACsec");
+    }
+
     /* Get addresses based on MAC or IP preference */
     /* Log address types for debugging - be very careful accessing pinfo fields */
     
@@ -6372,5 +6382,2746 @@ void packet_analyzer_free_icmp_info(icmp_info_t *info)
     if (!info) return;
     if (info->type_counts) g_hash_table_destroy(info->type_counts);
     if (info->type_labels)  g_list_free(info->type_labels);  /* strings owned by hash table */
+    g_free(info);
+}
+
+/* ================================================================== */
+/*  LDAP Information Extraction                                       */
+/* ================================================================== */
+
+static const gchar *ldap_result_code_name(guint32 code)
+{
+    switch (code) {
+        case  0: return "success";
+        case  1: return "operationsError";
+        case  2: return "protocolError";
+        case  3: return "timeLimitExceeded";
+        case  4: return "sizeLimitExceeded";
+        case  7: return "authMethodNotSupported";
+        case  8: return "strongerAuthRequired";
+        case 10: return "referral";
+        case 11: return "adminLimitExceeded";
+        case 13: return "confidentialityRequired";
+        case 14: return "saslBindInProgress";
+        case 16: return "noSuchAttribute";
+        case 32: return "noSuchObject";
+        case 48: return "inappropriateAuthentication";
+        case 49: return "invalidCredentials";
+        case 50: return "insufficientAccessRights";
+        case 51: return "busy";
+        case 52: return "unavailable";
+        case 53: return "unwillingToPerform";
+        case 65: return "objectClassViolation";
+        case 68: return "entryAlreadyExists";
+        case 80: return "other";
+        default: return NULL;
+    }
+}
+
+static void ldap_hash_inc(GHashTable *ht, const gchar *key)
+{
+    if (!ht || !key || !*key) return;
+    gpointer val = g_hash_table_lookup(ht, key);
+    if (val) {
+        (*(guint *)val)++;
+    } else {
+        guint *cnt = g_new(guint, 1);
+        *cnt = 1;
+        g_hash_table_insert(ht, g_strdup(key), cnt);
+    }
+}
+
+typedef struct {
+    ldap_info_t *info;
+    /* Per-frame accumulators — reset after processing each frame */
+    gboolean saw_base_object;    /* SearchRequest */
+    gboolean saw_bind_name;      /* BindRequest name field */
+    gboolean saw_bind_simple;    /* simple auth credential field */
+    gboolean saw_sasl;           /* SASL mechanism field */
+    gboolean saw_result_code;    /* any LDAPResult */
+    gboolean saw_search_entry;   /* SearchResultEntry object name */
+    gboolean saw_modify;         /* ModifyRequest / ModDNRequest */
+    gboolean saw_add;            /* AddRequest */
+    gboolean saw_delete;         /* DelRequest */
+    gchar    bind_dn[512];
+    gchar    sasl_mech[64];
+    gchar    base_dn[512];
+    gchar    search_filter[256];
+    guint32  result_code;
+    gboolean has_result_code;
+} ldap_walk_ctx_t;
+
+static void walk_ldap_proto_tree(proto_node *node, ldap_walk_ctx_t *ctx, int depth)
+{
+    if (!node || depth > 30) return;
+
+    field_info *fi = node->finfo;
+    if (fi && fi->hfinfo && fi->hfinfo->abbrev) {
+        const gchar *abbrev = fi->hfinfo->abbrev;
+        gchar label[ITEM_LABEL_LENGTH];
+        label[0] = '\0';
+
+        /* SearchRequest base DN — presence marks this as a search */
+        if (g_strcmp0(abbrev, "ldap.baseObject") == 0) {
+            ctx->saw_base_object = TRUE;
+            fill_label_compat(fi, label);
+            gchar *val = label_value(label);
+            if (val && *val)
+                g_strlcpy(ctx->base_dn, val, sizeof(ctx->base_dn));
+            g_free(val);
+
+        /* BindRequest name (DN) — two possible abbrev spellings across WS versions */
+        } else if (g_strcmp0(abbrev, "ldap.bindRequest_name") == 0 ||
+                   g_strcmp0(abbrev, "ldap.name") == 0) {
+            ctx->saw_bind_name = TRUE;
+            fill_label_compat(fi, label);
+            gchar *val = label_value(label);
+            if (val)
+                g_strlcpy(ctx->bind_dn, val, sizeof(ctx->bind_dn));
+            g_free(val);
+
+        /* Simple authentication credential — confirms simple/anonymous bind */
+        } else if (g_strcmp0(abbrev, "ldap.simple") == 0 ||
+                   g_strcmp0(abbrev, "ldap.bind_simple") == 0) {
+            ctx->saw_bind_simple = TRUE;
+
+        /* SASL mechanism — confirms SASL bind */
+        } else if (g_strcmp0(abbrev, "ldap.mechanism") == 0) {
+            ctx->saw_sasl = TRUE;
+            fill_label_compat(fi, label);
+            gchar *val = label_value(label);
+            if (val && *val)
+                g_strlcpy(ctx->sasl_mech, val, sizeof(ctx->sasl_mech));
+            g_free(val);
+
+        /* Search filter — both abbrev spellings seen in different WS builds */
+        } else if (g_strcmp0(abbrev, "ldap.filter") == 0 ||
+                   g_strcmp0(abbrev, "ldap.Filter") == 0) {
+            if (ctx->search_filter[0] == '\0') {
+                fill_label_compat(fi, label);
+                gchar *val = label_value(label);
+                if (val && *val)
+                    g_strlcpy(ctx->search_filter, val, sizeof(ctx->search_filter));
+                g_free(val);
+            }
+
+        /* Any LDAPResult resultCode field */
+        } else if (g_strcmp0(abbrev, "ldap.resultCode") == 0) {
+            ctx->result_code     = fvalue_get_uinteger(PC_FI_VALUE(fi));
+            ctx->saw_result_code = TRUE;
+            ctx->has_result_code = TRUE;
+
+        /* SearchResultEntry objectName — counts individual entries returned */
+        } else if (g_strcmp0(abbrev, "ldap.searchResEntry_objectName") == 0 ||
+                   g_strcmp0(abbrev, "ldap.objectName") == 0) {
+            ctx->saw_search_entry = TRUE;
+
+        /* ModifyRequest / ModDNRequest object DN */
+        } else if (g_strcmp0(abbrev, "ldap.modifyRequest_object") == 0 ||
+                   g_strcmp0(abbrev, "ldap.modifyDNRequest_entry") == 0) {
+            ctx->saw_modify = TRUE;
+
+        /* AddRequest entry DN */
+        } else if (g_strcmp0(abbrev, "ldap.addRequest_entry") == 0) {
+            ctx->saw_add = TRUE;
+
+        /* DelRequest DN */
+        } else if (g_strcmp0(abbrev, "ldap.delRequest") == 0 ||
+                   g_strcmp0(abbrev, "ldap.delete_request") == 0) {
+            ctx->saw_delete = TRUE;
+        }
+    }
+
+    for (proto_node *child = node->first_child; child; child = child->next)
+        walk_ldap_proto_tree(child, ctx, depth + 1);
+}
+
+static void process_ldap_frame(ldap_walk_ctx_t *ctx)
+{
+    ldap_info_t *info = ctx->info;
+
+    /* SearchRequest */
+    if (ctx->saw_base_object) {
+        info->search_count++;
+        add_unique_string(&info->base_dns,
+                          ctx->base_dn[0] ? ctx->base_dn : "(root)");
+        if (ctx->search_filter[0] && g_list_length(info->search_filters) < 30)
+            add_unique_string(&info->search_filters, ctx->search_filter);
+    }
+
+    /* SearchResultEntry */
+    if (ctx->saw_search_entry)
+        info->search_res_entry_count++;
+
+    /* BindRequest */
+    if (ctx->saw_bind_name || ctx->saw_bind_simple || ctx->saw_sasl) {
+        info->bind_count++;
+        if (ctx->saw_sasl) {
+            info->has_sasl_bind = TRUE;
+            if (ctx->sasl_mech[0])
+                add_unique_string(&info->sasl_mechanisms, ctx->sasl_mech);
+        } else {
+            info->has_simple_bind = TRUE;
+            if (ctx->bind_dn[0])
+                add_unique_string(&info->bind_dns, ctx->bind_dn);
+            else
+                info->has_anonymous_bind = TRUE;
+        }
+    }
+
+    if (ctx->saw_modify) info->modify_count++;
+    if (ctx->saw_add)    info->add_count++;
+    if (ctx->saw_delete) info->delete_count++;
+
+    /* Result code — track per-code counts */
+    if (ctx->has_result_code) {
+        const gchar *code_name = ldap_result_code_name(ctx->result_code);
+        gchar code_str[48];
+        if (code_name)
+            g_snprintf(code_str, sizeof(code_str), "%s", code_name);
+        else
+            g_snprintf(code_str, sizeof(code_str), "code %u", ctx->result_code);
+        ldap_hash_inc(info->result_counts, code_str);
+        if (ctx->result_code == 0)
+            info->success_count++;
+        else
+            info->error_count++;
+    }
+
+    /* Reset per-frame state */
+    memset(ctx, 0, sizeof(*ctx));
+    ctx->info = info;
+}
+
+void packet_analyzer_free_ldap_info(ldap_info_t *info)
+{
+    if (!info) return;
+    if (info->bind_dns)        g_list_free_full(info->bind_dns,       g_free);
+    if (info->sasl_mechanisms) g_list_free_full(info->sasl_mechanisms, g_free);
+    if (info->base_dns)        g_list_free_full(info->base_dns,        g_free);
+    if (info->search_filters)  g_list_free_full(info->search_filters,  g_free);
+    if (info->result_counts)   g_hash_table_destroy(info->result_counts);
+    g_free(info);
+}
+
+ldap_info_t* packet_analyzer_extract_ldap_info(capture_file *cf,
+                                                const gchar *addr_a,
+                                                const gchar *addr_b,
+                                                guint16 port,
+                                                gboolean addr_is_mac)
+{
+    ldap_info_t *info = g_new0(ldap_info_t, 1);
+    info->result_counts = g_hash_table_new_full(g_str_hash, g_str_equal, g_free, g_free);
+    info->is_tls = (port == 636 || port == 3269);
+
+    if (!cf || cf->state != FILE_READ_DONE || !cf->provider.frames || cf->count == 0)
+        return info;
+
+    ws_log(WS_LOG_DOMAIN, LOG_LEVEL_INFO,
+           "LDAP analysis: addr_a=%s addr_b=%s port=%u is_mac=%d (%u frames)",
+           addr_a ? addr_a : "?", addr_b ? addr_b : "?", port, addr_is_mac, cf->count);
+
+    ldap_walk_ctx_t ctx;
+    memset(&ctx, 0, sizeof(ctx));
+    ctx.info = info;
+
+    epan_dissect_t *edt = epan_dissect_new(cf->epan, TRUE, TRUE);
+    if (!edt) {
+        ws_log(WS_LOG_DOMAIN, LOG_LEVEL_ERROR, "LDAP: epan_dissect_new() returned NULL");
+        return info;
+    }
+    guint32 ldap_packets = 0;
+
+    for (guint32 framenum = 1; framenum <= cf->count; framenum++) {
+        frame_data *fdata = frame_data_sequence_find(cf->provider.frames, framenum);
+        if (!fdata || fdata->file_off < 0) continue;
+
+        int err = 0;
+        gchar *err_info_str = NULL;
+        wtap_rec rec;
+        gboolean read_ok;
+
+#if VERSION_MINOR >= 6
+        wtap_rec_init(&rec, fdata->cap_len);
+        read_ok = wtap_seek_read(cf->provider.wth, fdata->file_off, &rec, &err, &err_info_str);
+        if (read_ok) {
+            int fts = wtap_file_type_subtype(cf->provider.wth);
+            epan_dissect_run(edt, fts, &rec, fdata, NULL);
+#else
+        {
+            Buffer buf;
+            ws_buffer_init(&buf, fdata->cap_len);
+            wtap_rec_init(&rec);
+            read_ok = wtap_seek_read(cf->provider.wth, fdata->file_off, &rec, &buf, &err, &err_info_str);
+            if (read_ok) {
+                int fts = wtap_file_type_subtype(cf->provider.wth);
+                tvbuff_t *tvb = tvb_new_real_data(ws_buffer_start_ptr(&buf),
+                                                  rec.rec_header.packet_header.caplen,
+                                                  rec.rec_header.packet_header.len);
+                epan_dissect_run(edt, fts, &rec, tvb, fdata, NULL);
+#endif
+                {
+                    gchar pkt_src[MAX_ADDR_STR_LEN], pkt_dst[MAX_ADDR_STR_LEN];
+                    if (addr_is_mac) {
+                        address_to_str_buf(&edt->pi.dl_src, pkt_src, sizeof(pkt_src));
+                        address_to_str_buf(&edt->pi.dl_dst, pkt_dst, sizeof(pkt_dst));
+                    } else {
+                        address_to_str_buf(&edt->pi.net_src, pkt_src, sizeof(pkt_src));
+                        address_to_str_buf(&edt->pi.net_dst, pkt_dst, sizeof(pkt_dst));
+                    }
+                    gboolean addr_ok =
+                        (g_strcmp0(pkt_src, addr_a) == 0 && g_strcmp0(pkt_dst, addr_b) == 0) ||
+                        (g_strcmp0(pkt_src, addr_b) == 0 && g_strcmp0(pkt_dst, addr_a) == 0);
+                    gboolean port_ok =
+                        ((guint32)port == edt->pi.srcport || (guint32)port == edt->pi.destport);
+
+                    if (addr_ok && port_ok) {
+                        walk_ldap_proto_tree(edt->tree, &ctx, 0);
+                        gboolean any_ldap =
+                            ctx.saw_base_object || ctx.saw_bind_name ||
+                            ctx.saw_bind_simple  || ctx.saw_sasl     ||
+                            ctx.has_result_code  || ctx.saw_search_entry ||
+                            ctx.saw_modify || ctx.saw_add || ctx.saw_delete;
+                        if (any_ldap) {
+                            process_ldap_frame(&ctx);
+                            ldap_packets++;
+                        } else {
+                            /* No LDAP fields in this frame; reset without counting */
+                            memset(&ctx, 0, sizeof(ctx));
+                            ctx.info = info;
+                        }
+                    }
+                }
+                epan_dissect_reset(edt);
+#if VERSION_MINOR >= 6
+        }
+        wtap_rec_cleanup(&rec);
+#else
+            }
+            wtap_rec_cleanup(&rec);
+            ws_buffer_free(&buf);
+        }
+#endif
+        if (err_info_str) g_free(err_info_str);
+        if (framenum % 200 == 0) circle_vis_pump_events();
+    }
+
+    epan_dissect_free(edt);
+    info->matched_packets = ldap_packets;
+    info->found = (ldap_packets > 0);
+    ws_log(WS_LOG_DOMAIN, LOG_LEVEL_INFO,
+           "LDAP analysis done: %u LDAP pkts, %u binds, %u searches, %u entries",
+           ldap_packets, info->bind_count, info->search_count, info->search_res_entry_count);
+    return info;
+}
+
+/* ================================================================== */
+/*  SNMP Information Extraction                                       */
+/* ================================================================== */
+
+/* Map BER context tag (0xa0-0xa8) or 0-indexed value to PDU type name */
+static const gchar *snmp_pdu_type_name(guint32 t)
+{
+    if (t >= 160) t -= 160;   /* normalize BER tag to 0-indexed */
+    switch (t) {
+        case 0: return "GetRequest";
+        case 1: return "GetNextRequest";
+        case 2: return "Response";
+        case 3: return "SetRequest";
+        case 4: return "Trap (v1)";
+        case 5: return "GetBulkRequest";
+        case 6: return "InformRequest";
+        case 7: return "Trap (v2/v3)";
+        case 8: return "Report";
+        default: return NULL;
+    }
+}
+
+static const gchar *snmp_error_status_name(guint32 s)
+{
+    switch (s) {
+        case  0: return "noError";
+        case  1: return "tooBig";
+        case  2: return "noSuchName";
+        case  3: return "badValue";
+        case  4: return "readOnly";
+        case  5: return "genErr";
+        case  6: return "noAccess";
+        case  7: return "wrongType";
+        case  8: return "wrongLength";
+        case  9: return "wrongEncoding";
+        case 10: return "wrongValue";
+        case 11: return "noCreation";
+        case 12: return "inconsistentValue";
+        case 13: return "resourceUnavailable";
+        case 14: return "commitFailed";
+        case 15: return "undoFailed";
+        case 16: return "authorizationError";
+        case 17: return "notWritable";
+        case 18: return "inconsistentName";
+        default: return NULL;
+    }
+}
+
+static void snmp_hash_inc(GHashTable *ht, const gchar *key)
+{
+    if (!ht || !key || !*key) return;
+    gpointer val = g_hash_table_lookup(ht, key);
+    if (val) { (*(guint *)val)++; }
+    else {
+        guint *cnt = g_new(guint, 1); *cnt = 1;
+        g_hash_table_insert(ht, g_strdup(key), cnt);
+    }
+}
+
+typedef struct {
+    snmp_info_t *info;
+    /* Per-frame state */
+    guint32  version;
+    gboolean has_version;
+    guint32  pdu_type;         /* BER tag 0xa0-0xa8, or 0-indexed 0-8 */
+    gboolean has_pdu_type;
+    guint32  error_status;
+    gboolean has_error_status;
+    gchar    community[256];
+    gboolean has_community;
+    gchar    username[256];    /* v3 USM userName */
+    gboolean has_username;
+} snmp_walk_ctx_t;
+
+static void walk_snmp_proto_tree(proto_node *node, snmp_walk_ctx_t *ctx, int depth)
+{
+    if (!node || depth > 30) return;
+
+    field_info *fi = node->finfo;
+    if (fi && fi->hfinfo && fi->hfinfo->abbrev) {
+        const gchar *abbrev = fi->hfinfo->abbrev;
+        gchar label[ITEM_LABEL_LENGTH];
+        label[0] = '\0';
+
+        /* SNMP version (0=v1, 1=v2c, 3=v3) */
+        if (g_strcmp0(abbrev, "snmp.version") == 0) {
+            ctx->version     = fvalue_get_uinteger(PC_FI_VALUE(fi));
+            ctx->has_version = TRUE;
+
+        /* PDU type — BER context tag (0xa0-0xa8) */
+        } else if (g_strcmp0(abbrev, "snmp.type") == 0 ||
+                   g_strcmp0(abbrev, "snmp.pdu_type") == 0) {
+            ctx->pdu_type     = fvalue_get_uinteger(PC_FI_VALUE(fi));
+            ctx->has_pdu_type = TRUE;
+
+        /* Community string (v1/v2c) */
+        } else if (g_strcmp0(abbrev, "snmp.community") == 0) {
+            fill_label_compat(fi, label);
+            gchar *val = label_value(label);
+            if (val && *val) {
+                g_strlcpy(ctx->community, val, sizeof(ctx->community));
+                ctx->has_community = TRUE;
+            }
+            g_free(val);
+
+        /* v3 USM username — multiple field name spellings across WS versions */
+        } else if (g_strcmp0(abbrev, "snmp.msgUserName")  == 0 ||
+                   g_strcmp0(abbrev, "snmp.v3.userName")  == 0  ||
+                   g_strcmp0(abbrev, "snmp.usmUserName")  == 0) {
+            fill_label_compat(fi, label);
+            gchar *val = label_value(label);
+            if (val && *val) {
+                g_strlcpy(ctx->username, val, sizeof(ctx->username));
+                ctx->has_username = TRUE;
+            }
+            g_free(val);
+
+        /* Variable binding OID — appears once per varbind, cap unique OIDs at 100 */
+        } else if (g_strcmp0(abbrev, "snmp.name") == 0) {
+            if (g_hash_table_size(ctx->info->oid_counts) < 100) {
+                fill_label_compat(fi, label);
+                gchar *val = label_value(label);
+                if (val && *val)
+                    snmp_hash_inc(ctx->info->oid_counts, val);
+                g_free(val);
+            }
+
+        /* Error status — only count non-zero values */
+        } else if (g_strcmp0(abbrev, "snmp.error_status") == 0 ||
+                   g_strcmp0(abbrev, "snmp.error-status") == 0) {
+            guint32 es = fvalue_get_uinteger(PC_FI_VALUE(fi));
+            if (es > 0) {
+                ctx->error_status     = es;
+                ctx->has_error_status = TRUE;
+            }
+        }
+    }
+
+    for (proto_node *child = node->first_child; child; child = child->next)
+        walk_snmp_proto_tree(child, ctx, depth + 1);
+}
+
+static void process_snmp_frame(snmp_walk_ctx_t *ctx)
+{
+    snmp_info_t *info = ctx->info;
+
+    if (ctx->has_version) {
+        switch (ctx->version) {
+            case 0: info->v1_count++;  break;
+            case 1: info->v2c_count++; break;
+            case 3: info->v3_count++;  break;
+            default: break;
+        }
+    }
+
+    if (ctx->has_pdu_type) {
+        const gchar *pname = snmp_pdu_type_name(ctx->pdu_type);
+        if (pname) {
+            snmp_hash_inc(info->pdu_counts, pname);
+            guint32 t = ctx->pdu_type;
+            if (t >= 160) t -= 160;
+            switch (t) {
+                case 0: case 1: case 5: info->get_count++;      break;
+                case 2:                 info->response_count++;  break;
+                case 3:                 info->set_count++;       break;
+                case 4: case 7:         info->trap_count++;      break;
+                case 6:                 info->inform_count++;    break;
+                case 8:                 info->report_count++;    break;
+                default: break;
+            }
+        }
+    }
+
+    if (ctx->has_community) {
+        add_unique_string(&info->communities, ctx->community);
+        if (g_strcmp0(ctx->community, "public")  == 0 ||
+            g_strcmp0(ctx->community, "private") == 0)
+            info->has_default_community = TRUE;
+    }
+
+    if (ctx->has_username)
+        add_unique_string(&info->v3_usernames, ctx->username);
+
+    if (ctx->has_error_status) {
+        info->error_total++;
+        const gchar *ename = snmp_error_status_name(ctx->error_status);
+        gchar ebuf[32];
+        if (ename) g_snprintf(ebuf, sizeof(ebuf), "%s", ename);
+        else       g_snprintf(ebuf, sizeof(ebuf), "error %u", ctx->error_status);
+        snmp_hash_inc(info->error_counts, ebuf);
+    }
+
+    memset(ctx, 0, sizeof(*ctx));
+    ctx->info = info;
+}
+
+void packet_analyzer_free_snmp_info(snmp_info_t *info)
+{
+    if (!info) return;
+    if (info->pdu_counts)   g_hash_table_destroy(info->pdu_counts);
+    if (info->communities)  g_list_free_full(info->communities,  g_free);
+    if (info->v3_usernames) g_list_free_full(info->v3_usernames, g_free);
+    if (info->oid_counts)   g_hash_table_destroy(info->oid_counts);
+    if (info->error_counts) g_hash_table_destroy(info->error_counts);
+    g_free(info);
+}
+
+snmp_info_t* packet_analyzer_extract_snmp_info(capture_file *cf,
+                                                const gchar *addr_a,
+                                                const gchar *addr_b,
+                                                guint16 port,
+                                                gboolean addr_is_mac)
+{
+    snmp_info_t *info = g_new0(snmp_info_t, 1);
+    info->pdu_counts   = g_hash_table_new_full(g_str_hash, g_str_equal, g_free, g_free);
+    info->oid_counts   = g_hash_table_new_full(g_str_hash, g_str_equal, g_free, g_free);
+    info->error_counts = g_hash_table_new_full(g_str_hash, g_str_equal, g_free, g_free);
+
+    if (!cf || cf->state != FILE_READ_DONE || !cf->provider.frames || cf->count == 0)
+        return info;
+
+    ws_log(WS_LOG_DOMAIN, LOG_LEVEL_INFO,
+           "SNMP analysis: addr_a=%s addr_b=%s port=%u (%u frames)",
+           addr_a ? addr_a : "?", addr_b ? addr_b : "?", port, cf->count);
+
+    snmp_walk_ctx_t ctx;
+    memset(&ctx, 0, sizeof(ctx));
+    ctx.info = info;
+
+    epan_dissect_t *edt = epan_dissect_new(cf->epan, TRUE, TRUE);
+    if (!edt) {
+        ws_log(WS_LOG_DOMAIN, LOG_LEVEL_ERROR, "SNMP: epan_dissect_new() returned NULL");
+        return info;
+    }
+    guint32 snmp_packets = 0;
+
+    for (guint32 framenum = 1; framenum <= cf->count; framenum++) {
+        frame_data *fdata = frame_data_sequence_find(cf->provider.frames, framenum);
+        if (!fdata || fdata->file_off < 0) continue;
+
+        int err = 0;
+        gchar *err_info_str = NULL;
+        wtap_rec rec;
+        gboolean read_ok;
+
+#if VERSION_MINOR >= 6
+        wtap_rec_init(&rec, fdata->cap_len);
+        read_ok = wtap_seek_read(cf->provider.wth, fdata->file_off, &rec, &err, &err_info_str);
+        if (read_ok) {
+            int fts = wtap_file_type_subtype(cf->provider.wth);
+            epan_dissect_run(edt, fts, &rec, fdata, NULL);
+#else
+        {
+            Buffer buf;
+            ws_buffer_init(&buf, fdata->cap_len);
+            wtap_rec_init(&rec);
+            read_ok = wtap_seek_read(cf->provider.wth, fdata->file_off, &rec, &buf, &err, &err_info_str);
+            if (read_ok) {
+                int fts = wtap_file_type_subtype(cf->provider.wth);
+                tvbuff_t *tvb = tvb_new_real_data(ws_buffer_start_ptr(&buf),
+                                                  rec.rec_header.packet_header.caplen,
+                                                  rec.rec_header.packet_header.len);
+                epan_dissect_run(edt, fts, &rec, tvb, fdata, NULL);
+#endif
+                {
+                    gchar pkt_src[MAX_ADDR_STR_LEN], pkt_dst[MAX_ADDR_STR_LEN];
+                    if (addr_is_mac) {
+                        address_to_str_buf(&edt->pi.dl_src, pkt_src, sizeof(pkt_src));
+                        address_to_str_buf(&edt->pi.dl_dst, pkt_dst, sizeof(pkt_dst));
+                    } else {
+                        address_to_str_buf(&edt->pi.net_src, pkt_src, sizeof(pkt_src));
+                        address_to_str_buf(&edt->pi.net_dst, pkt_dst, sizeof(pkt_dst));
+                    }
+                    gboolean addr_ok =
+                        (g_strcmp0(pkt_src, addr_a) == 0 && g_strcmp0(pkt_dst, addr_b) == 0) ||
+                        (g_strcmp0(pkt_src, addr_b) == 0 && g_strcmp0(pkt_dst, addr_a) == 0);
+                    gboolean port_ok =
+                        ((guint32)port == edt->pi.srcport || (guint32)port == edt->pi.destport);
+
+                    if (addr_ok && port_ok) {
+                        walk_snmp_proto_tree(edt->tree, &ctx, 0);
+                        gboolean any_snmp = ctx.has_version || ctx.has_pdu_type ||
+                                            ctx.has_community || ctx.has_username ||
+                                            ctx.has_error_status;
+                        if (any_snmp) {
+                            process_snmp_frame(&ctx);
+                            snmp_packets++;
+                        } else {
+                            memset(&ctx, 0, sizeof(ctx));
+                            ctx.info = info;
+                        }
+                    }
+                }
+                epan_dissect_reset(edt);
+#if VERSION_MINOR >= 6
+        }
+        wtap_rec_cleanup(&rec);
+#else
+            }
+            wtap_rec_cleanup(&rec);
+            ws_buffer_free(&buf);
+        }
+#endif
+        if (err_info_str) g_free(err_info_str);
+        if (framenum % 200 == 0) circle_vis_pump_events();
+    }
+
+    epan_dissect_free(edt);
+    info->matched_packets = snmp_packets;
+    info->found = (snmp_packets > 0);
+    ws_log(WS_LOG_DOMAIN, LOG_LEVEL_INFO,
+           "SNMP analysis done: %u pkts, v1=%u v2c=%u v3=%u, gets=%u sets=%u traps=%u",
+           snmp_packets, info->v1_count, info->v2c_count, info->v3_count,
+           info->get_count, info->set_count, info->trap_count);
+    return info;
+}
+
+/* ================================================================== */
+/*  Syslog Information Extraction                                     */
+/* ================================================================== */
+
+static const gchar *syslog_severity_label(guint32 sev)
+{
+    switch (sev) {
+        case 0: return "Emergency";
+        case 1: return "Alert";
+        case 2: return "Critical";
+        case 3: return "Error";
+        case 4: return "Warning";
+        case 5: return "Notice";
+        case 6: return "Informational";
+        case 7: return "Debug";
+        default: return "Unknown";
+    }
+}
+
+static const gchar *syslog_facility_label(guint32 fac)
+{
+    switch (fac) {
+        case  0: return "kern";
+        case  1: return "user";
+        case  2: return "mail";
+        case  3: return "daemon";
+        case  4: return "auth";
+        case  5: return "syslog";
+        case  6: return "lpr";
+        case  7: return "news";
+        case  8: return "uucp";
+        case  9: return "cron";
+        case 10: return "authpriv";
+        case 11: return "ftp";
+        case 16: return "local0";
+        case 17: return "local1";
+        case 18: return "local2";
+        case 19: return "local3";
+        case 20: return "local4";
+        case 21: return "local5";
+        case 22: return "local6";
+        case 23: return "local7";
+        default: return NULL;
+    }
+}
+
+static void syslog_hash_inc(GHashTable *ht, const gchar *key)
+{
+    if (!ht || !key || !*key) return;
+    gpointer val = g_hash_table_lookup(ht, key);
+    if (val) { (*(guint *)val)++; }
+    else {
+        guint *cnt = g_new(guint, 1); *cnt = 1;
+        g_hash_table_insert(ht, g_strdup(key), cnt);
+    }
+}
+
+typedef struct {
+    syslog_info_t *info;
+    guint32  facility;
+    gboolean has_facility;
+    guint32  severity;
+    gboolean has_severity;
+    gchar    hostname[256];
+    gboolean has_hostname;
+    gchar    app_name[128];
+    gboolean has_app_name;
+    gchar    msg_text[512];
+    gboolean has_msg;
+    gboolean is_rfc5424;
+} syslog_walk_ctx_t;
+
+static void walk_syslog_proto_tree(proto_node *node, syslog_walk_ctx_t *ctx, int depth)
+{
+    if (!node || depth > 25) return;
+
+    field_info *fi = node->finfo;
+    if (fi && fi->hfinfo && fi->hfinfo->abbrev) {
+        const gchar *abbrev = fi->hfinfo->abbrev;
+        gchar label[ITEM_LABEL_LENGTH];
+        label[0] = '\0';
+
+        /* Facility code (integer 0-23) */
+        if (g_strcmp0(abbrev, "syslog.facility") == 0) {
+            ctx->facility     = fvalue_get_uinteger(PC_FI_VALUE(fi));
+            ctx->has_facility = TRUE;
+
+        /* Severity / level — two common field names across WS versions */
+        } else if (g_strcmp0(abbrev, "syslog.level")    == 0 ||
+                   g_strcmp0(abbrev, "syslog.severity") == 0) {
+            ctx->severity     = fvalue_get_uinteger(PC_FI_VALUE(fi));
+            ctx->has_severity = TRUE;
+
+        /* RFC 5424 version field (integer 1) */
+        } else if (g_strcmp0(abbrev, "syslog.version") == 0) {
+            ctx->is_rfc5424 = TRUE;
+
+        /* Source hostname — present in both RFC 3164 and RFC 5424 */
+        } else if (g_strcmp0(abbrev, "syslog.hostname") == 0) {
+            fill_label_compat(fi, label);
+            gchar *val = label_value(label);
+            if (val && *val && g_strcmp0(val, "-") != 0) {
+                g_strlcpy(ctx->hostname, val, sizeof(ctx->hostname));
+                ctx->has_hostname = TRUE;
+            }
+            g_free(val);
+
+        /* App/process name — RFC 5424 app-name or RFC 3164 tag */
+        } else if (g_strcmp0(abbrev, "syslog.app_name") == 0 ||
+                   g_strcmp0(abbrev, "syslog.appname")  == 0 ||
+                   g_strcmp0(abbrev, "syslog.tag")       == 0) {
+            fill_label_compat(fi, label);
+            gchar *val = label_value(label);
+            if (val && *val && g_strcmp0(val, "-") != 0) {
+                g_strlcpy(ctx->app_name, val, sizeof(ctx->app_name));
+                ctx->has_app_name = TRUE;
+            }
+            g_free(val);
+
+        /* Message payload — two common field name spellings */
+        } else if (g_strcmp0(abbrev, "syslog.msg")        == 0 ||
+                   g_strcmp0(abbrev, "syslog.msgpayload") == 0) {
+            if (!ctx->has_msg) {
+                fill_label_compat(fi, label);
+                gchar *val = label_value(label);
+                if (val && *val) {
+                    g_strlcpy(ctx->msg_text, val, sizeof(ctx->msg_text));
+                    ctx->has_msg = TRUE;
+                }
+                g_free(val);
+            }
+        }
+    }
+
+    for (proto_node *child = node->first_child; child; child = child->next)
+        walk_syslog_proto_tree(child, ctx, depth + 1);
+}
+
+static void process_syslog_frame(syslog_walk_ctx_t *ctx)
+{
+    syslog_info_t *info = ctx->info;
+
+    if (ctx->has_facility) {
+        const gchar *fname = syslog_facility_label(ctx->facility);
+        gchar fbuf[32];
+        if (fname) g_snprintf(fbuf, sizeof(fbuf), "%s", fname);
+        else       g_snprintf(fbuf, sizeof(fbuf), "fac%u", ctx->facility);
+        syslog_hash_inc(info->facility_counts, fbuf);
+    }
+
+    if (ctx->has_severity && ctx->severity < 8)
+        info->severity_counts[ctx->severity]++;
+
+    if (ctx->is_rfc5424) info->rfc5424_count++;
+    else                  info->rfc3164_count++;
+
+    if (ctx->has_hostname)  add_unique_string(&info->hostnames,  ctx->hostname);
+    if (ctx->has_app_name)  add_unique_string(&info->app_names,  ctx->app_name);
+
+    /* Collect critical message samples (severity 0-3) up to 15 entries */
+    if (ctx->has_msg && ctx->has_severity && ctx->severity <= 3 &&
+        g_list_length(info->critical_msgs) < 15) {
+        gchar *entry = g_strdup_printf("[%s]  %s",
+            syslog_severity_label(ctx->severity), ctx->msg_text);
+        info->critical_msgs = g_list_append(info->critical_msgs, entry);
+    }
+
+    memset(ctx, 0, sizeof(*ctx));
+    ctx->info = info;
+}
+
+void packet_analyzer_free_syslog_info(syslog_info_t *info)
+{
+    if (!info) return;
+    if (info->facility_counts) g_hash_table_destroy(info->facility_counts);
+    if (info->hostnames)       g_list_free_full(info->hostnames,     g_free);
+    if (info->app_names)       g_list_free_full(info->app_names,     g_free);
+    if (info->critical_msgs)   g_list_free_full(info->critical_msgs, g_free);
+    g_free(info);
+}
+
+syslog_info_t* packet_analyzer_extract_syslog_info(capture_file *cf,
+                                                    const gchar *addr_a,
+                                                    const gchar *addr_b,
+                                                    guint16 port,
+                                                    gboolean addr_is_mac)
+{
+    syslog_info_t *info = g_new0(syslog_info_t, 1);
+    info->facility_counts = g_hash_table_new_full(g_str_hash, g_str_equal, g_free, g_free);
+
+    if (!cf || cf->state != FILE_READ_DONE || !cf->provider.frames || cf->count == 0)
+        return info;
+
+    ws_log(WS_LOG_DOMAIN, LOG_LEVEL_INFO,
+           "Syslog analysis: addr_a=%s addr_b=%s port=%u (%u frames)",
+           addr_a ? addr_a : "?", addr_b ? addr_b : "?", port, cf->count);
+
+    syslog_walk_ctx_t ctx;
+    memset(&ctx, 0, sizeof(ctx));
+    ctx.info = info;
+
+    epan_dissect_t *edt = epan_dissect_new(cf->epan, TRUE, TRUE);
+    if (!edt) {
+        ws_log(WS_LOG_DOMAIN, LOG_LEVEL_ERROR, "Syslog: epan_dissect_new() returned NULL");
+        return info;
+    }
+    guint32 syslog_packets = 0;
+
+    for (guint32 framenum = 1; framenum <= cf->count; framenum++) {
+        frame_data *fdata = frame_data_sequence_find(cf->provider.frames, framenum);
+        if (!fdata || fdata->file_off < 0) continue;
+
+        int err = 0;
+        gchar *err_info_str = NULL;
+        wtap_rec rec;
+        gboolean read_ok;
+
+#if VERSION_MINOR >= 6
+        wtap_rec_init(&rec, fdata->cap_len);
+        read_ok = wtap_seek_read(cf->provider.wth, fdata->file_off, &rec, &err, &err_info_str);
+        if (read_ok) {
+            int fts = wtap_file_type_subtype(cf->provider.wth);
+            epan_dissect_run(edt, fts, &rec, fdata, NULL);
+#else
+        {
+            Buffer buf;
+            ws_buffer_init(&buf, fdata->cap_len);
+            wtap_rec_init(&rec);
+            read_ok = wtap_seek_read(cf->provider.wth, fdata->file_off, &rec, &buf, &err, &err_info_str);
+            if (read_ok) {
+                int fts = wtap_file_type_subtype(cf->provider.wth);
+                tvbuff_t *tvb = tvb_new_real_data(ws_buffer_start_ptr(&buf),
+                                                  rec.rec_header.packet_header.caplen,
+                                                  rec.rec_header.packet_header.len);
+                epan_dissect_run(edt, fts, &rec, tvb, fdata, NULL);
+#endif
+                {
+                    gchar pkt_src[MAX_ADDR_STR_LEN], pkt_dst[MAX_ADDR_STR_LEN];
+                    if (addr_is_mac) {
+                        address_to_str_buf(&edt->pi.dl_src, pkt_src, sizeof(pkt_src));
+                        address_to_str_buf(&edt->pi.dl_dst, pkt_dst, sizeof(pkt_dst));
+                    } else {
+                        address_to_str_buf(&edt->pi.net_src, pkt_src, sizeof(pkt_src));
+                        address_to_str_buf(&edt->pi.net_dst, pkt_dst, sizeof(pkt_dst));
+                    }
+                    gboolean addr_ok =
+                        (g_strcmp0(pkt_src, addr_a) == 0 && g_strcmp0(pkt_dst, addr_b) == 0) ||
+                        (g_strcmp0(pkt_src, addr_b) == 0 && g_strcmp0(pkt_dst, addr_a) == 0);
+                    gboolean port_ok =
+                        ((guint32)port == edt->pi.srcport || (guint32)port == edt->pi.destport);
+
+                    if (addr_ok && port_ok) {
+                        walk_syslog_proto_tree(edt->tree, &ctx, 0);
+                        gboolean any_syslog = ctx.has_facility || ctx.has_severity ||
+                                              ctx.has_hostname  || ctx.has_msg;
+                        if (any_syslog) {
+                            process_syslog_frame(&ctx);
+                            syslog_packets++;
+                        } else {
+                            memset(&ctx, 0, sizeof(ctx));
+                            ctx.info = info;
+                        }
+                    }
+                }
+                epan_dissect_reset(edt);
+#if VERSION_MINOR >= 6
+        }
+        wtap_rec_cleanup(&rec);
+#else
+            }
+            wtap_rec_cleanup(&rec);
+            ws_buffer_free(&buf);
+        }
+#endif
+        if (err_info_str) g_free(err_info_str);
+        if (framenum % 200 == 0) circle_vis_pump_events();
+    }
+
+    epan_dissect_free(edt);
+    info->matched_packets = syslog_packets;
+    info->found = (syslog_packets > 0);
+    ws_log(WS_LOG_DOMAIN, LOG_LEVEL_INFO,
+           "Syslog analysis done: %u pkts, %u rfc3164, %u rfc5424, crit=%u",
+           syslog_packets, info->rfc3164_count, info->rfc5424_count,
+           info->severity_counts[0] + info->severity_counts[1] +
+           info->severity_counts[2] + info->severity_counts[3]);
+    return info;
+}
+
+/* ================================================================== */
+/*  SSH / SFTP / SCP Information Extraction                           */
+/* ================================================================== */
+
+/* SSH RFC 4250 message codes */
+#define SSH_MSG_DISCONNECT          1
+#define SSH_MSG_KEXINIT             20
+#define SSH_MSG_NEWKEYS             21
+#define SSH_MSG_USERAUTH_REQUEST    50
+#define SSH_MSG_USERAUTH_FAILURE    51
+#define SSH_MSG_USERAUTH_SUCCESS    52
+#define SSH_MSG_CHANNEL_OPEN        90
+#define SSH_MSG_CHANNEL_REQUEST     98
+
+/* Store a comma-separated algorithm list into a GList, first occurrence only. */
+static void ssh_store_alg_list(GList **list, const gchar *csv)
+{
+    if (!csv || !*csv || *list != NULL) return;  /* only populate once */
+    gchar **toks = g_strsplit(csv, ",", 64);
+    for (int i = 0; toks[i]; i++) {
+        gchar *s = g_strstrip(toks[i]);
+        if (*s) *list = g_list_append(*list, g_strdup(s));
+    }
+    g_strfreev(toks);
+}
+
+typedef struct {
+    ssh_info_t *info;
+    /* Per-frame collected fields */
+    gchar    protocol_str[256];
+    gboolean has_protocol;
+    guint32  message_code;
+    gboolean has_message_code;
+    /* KEXINIT algorithm lists (comma-separated) */
+    gchar    kex_algorithms[1024];
+    gboolean has_kex_algorithms;
+    gchar    host_key_algorithms[512];
+    gboolean has_host_key_algorithms;
+    gchar    enc_c2s[512];
+    gboolean has_enc_c2s;
+    gchar    enc_s2c[512];
+    gboolean has_enc_s2c;
+    gchar    mac_c2s[512];
+    gboolean has_mac_c2s;
+    gchar    mac_s2c[512];
+    gboolean has_mac_s2c;
+    gchar    comp_c2s[256];
+    gboolean has_comp_c2s;
+    gchar    comp_s2c[256];
+    gboolean has_comp_s2c;
+    /* Auth */
+    gchar    username[256];
+    gboolean has_username;
+    gchar    auth_method[64];
+    gboolean has_auth_method;
+    /* Channel */
+    gchar    channel_type[128];
+    gboolean has_channel_type;
+    gchar    channel_req_type[128];
+    gboolean has_channel_req_type;
+    gchar    subsystem_name[128];
+    gboolean has_subsystem_name;
+    gchar    exec_command[512];
+    gboolean has_exec_command;
+} ssh_walk_ctx_t;
+
+static void walk_ssh_proto_tree(proto_node *node, ssh_walk_ctx_t *ctx, int depth)
+{
+    if (!node || depth > 30) return;
+
+    field_info *fi = node->finfo;
+    if (fi && fi->hfinfo && fi->hfinfo->abbrev) {
+        const gchar *abbrev = fi->hfinfo->abbrev;
+        gchar label[ITEM_LABEL_LENGTH];
+        label[0] = '\0';
+
+        /* Version banner (both client and server emit this field) */
+        if (g_strcmp0(abbrev, "ssh.protocol") == 0) {
+            fill_label_compat(fi, label);
+            gchar *val = label_value(label);
+            if (val && *val && !ctx->has_protocol) {
+                g_strlcpy(ctx->protocol_str, val, sizeof(ctx->protocol_str));
+                ctx->has_protocol = TRUE;
+            }
+            g_free(val);
+
+        /* SSH message code */
+        } else if (g_strcmp0(abbrev, "ssh.message_code") == 0) {
+            ctx->message_code     = fvalue_get_uinteger(PC_FI_VALUE(fi));
+            ctx->has_message_code = TRUE;
+
+        /* KEXINIT: key exchange algorithms */
+        } else if (g_strcmp0(abbrev, "ssh.kex.algorithms") == 0 ||
+                   g_strcmp0(abbrev, "ssh.kex_algorithms")  == 0) {
+            fill_label_compat(fi, label);
+            gchar *val = label_value(label);
+            if (val && *val) {
+                g_strlcpy(ctx->kex_algorithms, val, sizeof(ctx->kex_algorithms));
+                ctx->has_kex_algorithms = TRUE;
+            }
+            g_free(val);
+
+        /* KEXINIT: server host key algorithms */
+        } else if (g_strcmp0(abbrev, "ssh.server_host_key_algorithms") == 0) {
+            fill_label_compat(fi, label);
+            gchar *val = label_value(label);
+            if (val && *val) {
+                g_strlcpy(ctx->host_key_algorithms, val, sizeof(ctx->host_key_algorithms));
+                ctx->has_host_key_algorithms = TRUE;
+            }
+            g_free(val);
+
+        /* KEXINIT: encryption algorithms */
+        } else if (g_strcmp0(abbrev, "ssh.encryption_algorithms_client_to_server") == 0) {
+            fill_label_compat(fi, label);
+            gchar *val = label_value(label);
+            if (val && *val) {
+                g_strlcpy(ctx->enc_c2s, val, sizeof(ctx->enc_c2s));
+                ctx->has_enc_c2s = TRUE;
+            }
+            g_free(val);
+        } else if (g_strcmp0(abbrev, "ssh.encryption_algorithms_server_to_client") == 0) {
+            fill_label_compat(fi, label);
+            gchar *val = label_value(label);
+            if (val && *val) {
+                g_strlcpy(ctx->enc_s2c, val, sizeof(ctx->enc_s2c));
+                ctx->has_enc_s2c = TRUE;
+            }
+            g_free(val);
+
+        /* KEXINIT: MAC algorithms */
+        } else if (g_strcmp0(abbrev, "ssh.mac_algorithms_client_to_server") == 0) {
+            fill_label_compat(fi, label);
+            gchar *val = label_value(label);
+            if (val && *val) {
+                g_strlcpy(ctx->mac_c2s, val, sizeof(ctx->mac_c2s));
+                ctx->has_mac_c2s = TRUE;
+            }
+            g_free(val);
+        } else if (g_strcmp0(abbrev, "ssh.mac_algorithms_server_to_client") == 0) {
+            fill_label_compat(fi, label);
+            gchar *val = label_value(label);
+            if (val && *val) {
+                g_strlcpy(ctx->mac_s2c, val, sizeof(ctx->mac_s2c));
+                ctx->has_mac_s2c = TRUE;
+            }
+            g_free(val);
+
+        /* KEXINIT: compression algorithms */
+        } else if (g_strcmp0(abbrev, "ssh.compression_algorithms_client_to_server") == 0) {
+            fill_label_compat(fi, label);
+            gchar *val = label_value(label);
+            if (val && *val) {
+                g_strlcpy(ctx->comp_c2s, val, sizeof(ctx->comp_c2s));
+                ctx->has_comp_c2s = TRUE;
+            }
+            g_free(val);
+        } else if (g_strcmp0(abbrev, "ssh.compression_algorithms_server_to_client") == 0) {
+            fill_label_compat(fi, label);
+            gchar *val = label_value(label);
+            if (val && *val) {
+                g_strlcpy(ctx->comp_s2c, val, sizeof(ctx->comp_s2c));
+                ctx->has_comp_s2c = TRUE;
+            }
+            g_free(val);
+
+        /* USERAUTH: username */
+        } else if (g_strcmp0(abbrev, "ssh.username")            == 0 ||
+                   g_strcmp0(abbrev, "ssh.userauth.user_name")  == 0) {
+            fill_label_compat(fi, label);
+            gchar *val = label_value(label);
+            if (val && *val) {
+                g_strlcpy(ctx->username, val, sizeof(ctx->username));
+                ctx->has_username = TRUE;
+            }
+            g_free(val);
+
+        /* USERAUTH: authentication method */
+        } else if (g_strcmp0(abbrev, "ssh.userauth.method")  == 0 ||
+                   g_strcmp0(abbrev, "ssh.userauth_method")  == 0 ||
+                   g_strcmp0(abbrev, "ssh.auth_method")      == 0) {
+            fill_label_compat(fi, label);
+            gchar *val = label_value(label);
+            if (val && *val) {
+                g_strlcpy(ctx->auth_method, val, sizeof(ctx->auth_method));
+                ctx->has_auth_method = TRUE;
+            }
+            g_free(val);
+
+        /* CHANNEL_OPEN: channel type */
+        } else if (g_strcmp0(abbrev, "ssh.channel_type")        == 0 ||
+                   g_strcmp0(abbrev, "ssh.channel.type")         == 0) {
+            fill_label_compat(fi, label);
+            gchar *val = label_value(label);
+            if (val && *val) {
+                g_strlcpy(ctx->channel_type, val, sizeof(ctx->channel_type));
+                ctx->has_channel_type = TRUE;
+            }
+            g_free(val);
+
+        /* CHANNEL_REQUEST: request type */
+        } else if (g_strcmp0(abbrev, "ssh.channel_request_type")   == 0 ||
+                   g_strcmp0(abbrev, "ssh.channel.request_type")    == 0 ||
+                   g_strcmp0(abbrev, "ssh.channel_req_type")        == 0) {
+            fill_label_compat(fi, label);
+            gchar *val = label_value(label);
+            if (val && *val) {
+                g_strlcpy(ctx->channel_req_type, val, sizeof(ctx->channel_req_type));
+                ctx->has_channel_req_type = TRUE;
+            }
+            g_free(val);
+
+        /* CHANNEL_REQUEST subsystem: subsystem name */
+        } else if (g_strcmp0(abbrev, "ssh.subsystem_name")    == 0 ||
+                   g_strcmp0(abbrev, "ssh.channel.subsystem") == 0) {
+            fill_label_compat(fi, label);
+            gchar *val = label_value(label);
+            if (val && *val) {
+                g_strlcpy(ctx->subsystem_name, val, sizeof(ctx->subsystem_name));
+                ctx->has_subsystem_name = TRUE;
+            }
+            g_free(val);
+
+        /* CHANNEL_REQUEST exec: command string */
+        } else if (g_strcmp0(abbrev, "ssh.exec_command")  == 0 ||
+                   g_strcmp0(abbrev, "ssh.channel.exec")  == 0) {
+            fill_label_compat(fi, label);
+            gchar *val = label_value(label);
+            if (val && *val) {
+                g_strlcpy(ctx->exec_command, val, sizeof(ctx->exec_command));
+                ctx->has_exec_command = TRUE;
+            }
+            g_free(val);
+        }
+    }
+
+    for (proto_node *child = node->first_child; child; child = child->next)
+        walk_ssh_proto_tree(child, ctx, depth + 1);
+}
+
+static void process_ssh_frame(ssh_walk_ctx_t *ctx)
+{
+    ssh_info_t *info = ctx->info;
+
+    /* Version banner — collect up to 2 unique banners (client + server) */
+    if (ctx->has_protocol) {
+        add_unique_string(&info->banners, ctx->protocol_str);
+        if (!info->protocol_v2 &&
+            g_str_has_prefix(ctx->protocol_str, "SSH-2"))
+            info->protocol_v2 = TRUE;
+    }
+
+    /* Algorithm lists — only take from first KEXINIT (ssh_store_alg_list is no-op if list set) */
+    if (ctx->has_kex_algorithms)       ssh_store_alg_list(&info->kex_algorithms,     ctx->kex_algorithms);
+    if (ctx->has_host_key_algorithms)  ssh_store_alg_list(&info->host_key_algorithms, ctx->host_key_algorithms);
+    if (ctx->has_enc_c2s)              ssh_store_alg_list(&info->ciphers_c2s,         ctx->enc_c2s);
+    if (ctx->has_enc_s2c)              ssh_store_alg_list(&info->ciphers_s2c,         ctx->enc_s2c);
+    if (ctx->has_mac_c2s)              ssh_store_alg_list(&info->macs_c2s,            ctx->mac_c2s);
+    if (ctx->has_mac_s2c)              ssh_store_alg_list(&info->macs_s2c,            ctx->mac_s2c);
+    if (ctx->has_comp_c2s)             ssh_store_alg_list(&info->compress_c2s,        ctx->comp_c2s);
+    if (ctx->has_comp_s2c)             ssh_store_alg_list(&info->compress_s2c,        ctx->comp_s2c);
+
+    /* Message code counters */
+    if (ctx->has_message_code) {
+        switch (ctx->message_code) {
+            case SSH_MSG_KEXINIT:            info->kexinit_count++;       break;
+            case SSH_MSG_NEWKEYS:            info->newkeys_count++;       break;
+            case SSH_MSG_DISCONNECT:         info->disconnect_count++;    break;
+            case SSH_MSG_USERAUTH_FAILURE:   info->auth_failure_count++;  break;
+            case SSH_MSG_USERAUTH_SUCCESS:   info->auth_success_count++;  break;
+            case SSH_MSG_CHANNEL_OPEN:       info->channel_count++;       break;
+            default: break;
+        }
+    }
+
+    /* Auth */
+    if (ctx->has_username)
+        add_unique_string(&info->usernames, ctx->username);
+    if (ctx->has_auth_method) {
+        add_unique_string(&info->auth_methods, ctx->auth_method);
+        const gchar *m = ctx->auth_method;
+        if (g_str_has_prefix(m, "password"))        info->has_password_auth = TRUE;
+        else if (g_str_has_prefix(m, "publickey") ||
+                 g_str_has_prefix(m, "public-key") ||
+                 g_str_has_prefix(m, "pubkey"))     info->has_pubkey_auth   = TRUE;
+        else if (g_str_has_prefix(m, "keyboard"))   info->has_kbdint_auth   = TRUE;
+        else if (g_str_has_prefix(m, "gssapi"))     info->has_gssapi_auth   = TRUE;
+    }
+
+    /* Channel type (from CHANNEL_OPEN) */
+    if (ctx->has_channel_type) {
+        const gchar *ct = ctx->channel_type;
+        if      (g_str_has_prefix(ct, "direct-tcpip") ||
+                 g_str_has_prefix(ct, "forwarded-tcpip"))  info->has_tcp_forwarding   = TRUE;
+        else if (g_str_has_prefix(ct, "x11"))               info->has_x11_forwarding   = TRUE;
+        else if (g_str_has_prefix(ct, "auth-agent"))        info->has_agent_forwarding = TRUE;
+        else if (g_str_has_prefix(ct, "session"))           info->has_shell            = TRUE;
+    }
+
+    /* Channel request type */
+    if (ctx->has_channel_req_type) {
+        const gchar *rt = ctx->channel_req_type;
+        if      (g_strcmp0(rt, "x11-req") == 0 ||
+                 g_strcmp0(rt, "x11")     == 0)            info->has_x11_forwarding = TRUE;
+        else if (g_strcmp0(rt, "shell")   == 0)            info->has_shell          = TRUE;
+        else if (g_strcmp0(rt, "exec")    == 0)            info->has_exec           = TRUE;
+    }
+
+    /* Subsystem */
+    if (ctx->has_subsystem_name) {
+        add_unique_string(&info->subsystems, ctx->subsystem_name);
+        if (g_strcmp0(ctx->subsystem_name, "sftp") == 0)
+            info->has_sftp = TRUE;
+    }
+
+    /* Exec command */
+    if (ctx->has_exec_command) {
+        info->has_exec = TRUE;
+        const gchar *cmd = ctx->exec_command;
+        /* SCP: exec command starts with "scp" */
+        if (g_str_has_prefix(cmd, "scp ") || g_strcmp0(cmd, "scp") == 0)
+            info->has_scp = TRUE;
+        if (g_list_length(info->exec_commands) < 10)
+            add_unique_string(&info->exec_commands, cmd);
+    }
+
+    memset(ctx, 0, sizeof(*ctx));
+    ctx->info = info;
+}
+
+void packet_analyzer_free_ssh_info(ssh_info_t *info)
+{
+    if (!info) return;
+    if (info->banners)             g_list_free_full(info->banners,             g_free);
+    if (info->kex_algorithms)      g_list_free_full(info->kex_algorithms,      g_free);
+    if (info->host_key_algorithms) g_list_free_full(info->host_key_algorithms, g_free);
+    if (info->ciphers_c2s)         g_list_free_full(info->ciphers_c2s,         g_free);
+    if (info->ciphers_s2c)         g_list_free_full(info->ciphers_s2c,         g_free);
+    if (info->macs_c2s)            g_list_free_full(info->macs_c2s,            g_free);
+    if (info->macs_s2c)            g_list_free_full(info->macs_s2c,            g_free);
+    if (info->compress_c2s)        g_list_free_full(info->compress_c2s,        g_free);
+    if (info->compress_s2c)        g_list_free_full(info->compress_s2c,        g_free);
+    if (info->usernames)           g_list_free_full(info->usernames,           g_free);
+    if (info->auth_methods)        g_list_free_full(info->auth_methods,        g_free);
+    if (info->subsystems)          g_list_free_full(info->subsystems,          g_free);
+    if (info->exec_commands)       g_list_free_full(info->exec_commands,       g_free);
+    g_free(info);
+}
+
+ssh_info_t* packet_analyzer_extract_ssh_info(capture_file *cf,
+                                              const gchar *addr_a,
+                                              const gchar *addr_b,
+                                              guint16 port,
+                                              gboolean addr_is_mac)
+{
+    ssh_info_t *info = g_new0(ssh_info_t, 1);
+
+    if (!cf || cf->state != FILE_READ_DONE || !cf->provider.frames || cf->count == 0)
+        return info;
+
+    ws_log(WS_LOG_DOMAIN, LOG_LEVEL_INFO,
+           "SSH analysis: addr_a=%s addr_b=%s port=%u (%u frames)",
+           addr_a ? addr_a : "?", addr_b ? addr_b : "?", port, cf->count);
+
+    ssh_walk_ctx_t ctx;
+    memset(&ctx, 0, sizeof(ctx));
+    ctx.info = info;
+
+    epan_dissect_t *edt = epan_dissect_new(cf->epan, TRUE, TRUE);
+    if (!edt) {
+        ws_log(WS_LOG_DOMAIN, LOG_LEVEL_ERROR, "SSH: epan_dissect_new() returned NULL");
+        return info;
+    }
+    guint32 ssh_packets = 0;
+
+    for (guint32 framenum = 1; framenum <= cf->count; framenum++) {
+        frame_data *fdata = frame_data_sequence_find(cf->provider.frames, framenum);
+        if (!fdata || fdata->file_off < 0) continue;
+
+        int err = 0;
+        gchar *err_info_str = NULL;
+        wtap_rec rec;
+        gboolean read_ok;
+
+#if VERSION_MINOR >= 6
+        wtap_rec_init(&rec, fdata->cap_len);
+        read_ok = wtap_seek_read(cf->provider.wth, fdata->file_off, &rec, &err, &err_info_str);
+        if (read_ok) {
+            int fts = wtap_file_type_subtype(cf->provider.wth);
+            epan_dissect_run(edt, fts, &rec, fdata, NULL);
+#else
+        {
+            Buffer buf;
+            ws_buffer_init(&buf, fdata->cap_len);
+            wtap_rec_init(&rec);
+            read_ok = wtap_seek_read(cf->provider.wth, fdata->file_off, &rec, &buf, &err, &err_info_str);
+            if (read_ok) {
+                int fts = wtap_file_type_subtype(cf->provider.wth);
+                tvbuff_t *tvb = tvb_new_real_data(ws_buffer_start_ptr(&buf),
+                                                  rec.rec_header.packet_header.caplen,
+                                                  rec.rec_header.packet_header.len);
+                epan_dissect_run(edt, fts, &rec, tvb, fdata, NULL);
+#endif
+                {
+                    gchar pkt_src[MAX_ADDR_STR_LEN], pkt_dst[MAX_ADDR_STR_LEN];
+                    if (addr_is_mac) {
+                        address_to_str_buf(&edt->pi.dl_src, pkt_src, sizeof(pkt_src));
+                        address_to_str_buf(&edt->pi.dl_dst, pkt_dst, sizeof(pkt_dst));
+                    } else {
+                        address_to_str_buf(&edt->pi.net_src, pkt_src, sizeof(pkt_src));
+                        address_to_str_buf(&edt->pi.net_dst, pkt_dst, sizeof(pkt_dst));
+                    }
+                    gboolean addr_ok =
+                        (g_strcmp0(pkt_src, addr_a) == 0 && g_strcmp0(pkt_dst, addr_b) == 0) ||
+                        (g_strcmp0(pkt_src, addr_b) == 0 && g_strcmp0(pkt_dst, addr_a) == 0);
+                    gboolean port_ok =
+                        ((guint32)port == edt->pi.srcport || (guint32)port == edt->pi.destport);
+
+                    if (addr_ok && port_ok) {
+                        walk_ssh_proto_tree(edt->tree, &ctx, 0);
+                        gboolean any_ssh = ctx.has_protocol         || ctx.has_message_code     ||
+                                           ctx.has_kex_algorithms   || ctx.has_enc_c2s          ||
+                                           ctx.has_username         || ctx.has_channel_type     ||
+                                           ctx.has_channel_req_type || ctx.has_exec_command     ||
+                                           ctx.has_subsystem_name;
+                        if (any_ssh) {
+                            process_ssh_frame(&ctx);
+                            ssh_packets++;
+                        } else {
+                            memset(&ctx, 0, sizeof(ctx));
+                            ctx.info = info;
+                        }
+                    }
+                }
+                epan_dissect_reset(edt);
+#if VERSION_MINOR >= 6
+        }
+        wtap_rec_cleanup(&rec);
+#else
+            }
+            wtap_rec_cleanup(&rec);
+            ws_buffer_free(&buf);
+        }
+#endif
+        if (err_info_str) g_free(err_info_str);
+        if (framenum % 200 == 0) circle_vis_pump_events();
+    }
+
+    epan_dissect_free(edt);
+    info->matched_packets = ssh_packets;
+    info->found = (ssh_packets > 0);
+
+    /* Detect compression from negotiated algorithm lists */
+    if (!info->compression_enabled) {
+        for (GList *n = info->compress_c2s; n; n = n->next)
+            if (g_strcmp0((gchar *)n->data, "none") != 0) { info->compression_enabled = TRUE; break; }
+    }
+    if (!info->compression_enabled) {
+        for (GList *n = info->compress_s2c; n; n = n->next)
+            if (g_strcmp0((gchar *)n->data, "none") != 0) { info->compression_enabled = TRUE; break; }
+    }
+
+    ws_log(WS_LOG_DOMAIN, LOG_LEVEL_INFO,
+           "SSH analysis done: %u pkts, banners=%u, kexinit=%u, newkeys=%u, "
+           "shell=%d sftp=%d scp=%d x11=%d tcpfwd=%d agentfwd=%d",
+           ssh_packets, g_list_length(info->banners),
+           info->kexinit_count, info->newkeys_count,
+           info->has_shell, info->has_sftp, info->has_scp,
+           info->has_x11_forwarding, info->has_tcp_forwarding, info->has_agent_forwarding);
+    return info;
+}
+
+/* ═══════════════════════════════════════════════════════════════════════════
+ * FTP  (port 21 control / passive data ports)
+ * Fields: ftp.request.command, ftp.request.arg,
+ *         ftp.response.code,   ftp.response.arg
+ * ═══════════════════════════════════════════════════════════════════════════ */
+
+static void ftp_hash_inc(GHashTable *ht, const gchar *key)
+{
+    if (!key || !*key) return;
+    gpointer v = g_hash_table_lookup(ht, key);
+    guint cnt  = v ? GPOINTER_TO_UINT(v) : 0;
+    g_hash_table_insert(ht, g_strdup(key), GUINT_TO_POINTER(cnt + 1));
+}
+
+/* Parse "h1,h2,h3,h4,p1,p2" from PORT / PASV → "a.b.c.d:N" */
+static gchar *ftp_parse_port_string(const gchar *s)
+{
+    if (!s) return NULL;
+    const gchar *p = s;
+    while (*p && !g_ascii_isdigit(*p)) p++;
+    guint h1=0,h2=0,h3=0,h4=0,p1=0,p2=0;
+    if (sscanf(p, "%u,%u,%u,%u,%u,%u", &h1,&h2,&h3,&h4,&p1,&p2) == 6)
+        return g_strdup_printf("%u.%u.%u.%u:%u", h1,h2,h3,h4, p1*256+p2);
+    guint eport = 0;
+    if (sscanf(p, "|||%u|", &eport) == 1)
+        return g_strdup_printf("(epsv):%u", eport);
+    return NULL;
+}
+
+typedef struct {
+    ftp_info_t  *info;
+    gchar       *last_cmd;
+} ftp_walk_ctx_t;
+
+static void walk_ftp_proto_tree(proto_node *node, gpointer data)
+{
+    ftp_walk_ctx_t *ctx  = (ftp_walk_ctx_t *)data;
+    ftp_info_t     *info = ctx->info;
+
+    for (proto_node *child = node->first_child; child; child = child->next)
+        walk_ftp_proto_tree(child, data);
+
+    field_info *fi = PNODE_FINFO(node);
+    if (!fi || !fi->hfinfo) return;
+    const gchar *abbrev = fi->hfinfo->abbrev;
+
+    gchar lbl[ITEM_LABEL_LENGTH] = {0};
+    fill_label_compat(fi, lbl);
+    const gchar *val = label_value(lbl);
+
+    if (g_strcmp0(abbrev, "ftp.request.command") == 0 && val && *val) {
+        gchar *cmd = g_ascii_strup(val, -1);
+        ftp_hash_inc(info->cmd_counts, cmd);
+        g_free(ctx->last_cmd);
+        ctx->last_cmd = cmd;
+        return;
+    }
+    if (g_strcmp0(abbrev, "ftp.request.arg") == 0 && val) {
+        const gchar *cmd = ctx->last_cmd ? ctx->last_cmd : "?";
+        if (g_strcmp0(cmd,"USER")==0 && !info->username)
+            info->username = g_strdup(val);
+        else if (g_strcmp0(cmd,"PASS")==0 && !info->password)
+            info->password = g_strdup(val);
+        else if (g_strcmp0(cmd,"PORT")==0 || g_strcmp0(cmd,"EPRT")==0) {
+            gchar *addr = ftp_parse_port_string(val);
+            if (!addr) addr = g_strdup(val);
+            info->port_addrs = g_list_append(info->port_addrs, addr);
+            info->active_mode = TRUE;
+        }
+        else if (g_strcmp0(cmd,"RETR")==0) { info->retr_count++; add_unique_string(&info->filenames, val); }
+        else if (g_strcmp0(cmd,"STOR")==0 || g_strcmp0(cmd,"STOU")==0)
+            { info->stor_count++; add_unique_string(&info->filenames, val); }
+        else if (g_strcmp0(cmd,"DELE")==0 || g_strcmp0(cmd,"RNFR")==0)
+            add_unique_string(&info->filenames, val);
+
+        if (g_list_length(info->command_log) < 200) {
+            gchar *entry = (*val) ? g_strdup_printf("%s %s", cmd, val)
+                                  : g_strdup(cmd);
+            info->command_log = g_list_append(info->command_log, entry);
+        }
+        return;
+    }
+    if (g_strcmp0(abbrev, "ftp.response.code") == 0 && val && *val) {
+        ftp_hash_inc(info->resp_counts, val);
+        int code = atoi(val);
+        if (code >= 200 && code < 300) info->success_count++;
+        else if (code >= 400)           info->error_count++;
+        if (code == 230) info->login_success = TRUE;
+        if (code == 530) info->login_failed  = TRUE;
+        return;
+    }
+    if (g_strcmp0(abbrev, "ftp.response.arg") == 0 && val && *val) {
+        /* Passive address from PASV/EPSV */
+        if (g_strstr_len(val,-1,"(") || g_strstr_len(val,-1,"passive") ||
+            g_strstr_len(val,-1,"Passive")) {
+            gchar *addr = ftp_parse_port_string(val);
+            if (addr) { info->pasv_addrs = g_list_append(info->pasv_addrs, addr);
+                        info->passive_mode = TRUE; }
+        }
+        /* Server banner */
+        if (!info->server_banner && (g_strstr_len(val,-1,"FTP") ||
+                                     g_strstr_len(val,-1,"ftp")))
+            info->server_banner = g_strdup(val);
+        /* SYST */
+        if (!info->system_type && (g_strstr_len(val,-1,"UNIX") ||
+                                   g_strstr_len(val,-1,"Windows") ||
+                                   g_strstr_len(val,-1,"Type:")))
+            info->system_type = g_strdup(val);
+        /* FEAT lines — short non-numeric values */
+        gsize vlen = strlen(val);
+        if (vlen > 2 && vlen < 48 && !g_ascii_isdigit(val[0]))
+            add_unique_string(&info->features, val);
+    }
+}
+
+void packet_analyzer_free_ftp_info(ftp_info_t *info)
+{
+    if (!info) return;
+    g_free(info->username);     g_free(info->password);
+    g_free(info->server_banner); g_free(info->system_type);
+    if (info->cmd_counts)  g_hash_table_destroy(info->cmd_counts);
+    if (info->resp_counts) g_hash_table_destroy(info->resp_counts);
+    g_list_free_full(info->command_log, g_free);
+    g_list_free_full(info->pasv_addrs,  g_free);
+    g_list_free_full(info->port_addrs,  g_free);
+    g_list_free_full(info->filenames,   g_free);
+    g_list_free_full(info->features,    g_free);
+    g_free(info);
+}
+
+ftp_info_t* packet_analyzer_extract_ftp_info(capture_file *cf,
+                                              const gchar *addr_a,
+                                              const gchar *addr_b,
+                                              guint16 port,
+                                              gboolean addr_is_mac)
+{
+    if (!cf || cf->state != FILE_READ_DONE || !cf->provider.frames || cf->count == 0)
+        return NULL;
+    if (!addr_a || !addr_b) return NULL;
+
+    ftp_info_t *info = g_new0(ftp_info_t, 1);
+    info->cmd_counts  = g_hash_table_new_full(g_str_hash, g_str_equal, g_free, NULL);
+    info->resp_counts = g_hash_table_new_full(g_str_hash, g_str_equal, g_free, NULL);
+
+    epan_dissect_t *edt = epan_dissect_new(cf->epan, TRUE, TRUE);
+    ftp_walk_ctx_t  ctx = { .info = info, .last_cmd = NULL };
+    guint32 matched = 0;
+
+    for (guint32 framenum = 1; framenum <= cf->count; framenum++) {
+        frame_data *fdata = frame_data_sequence_find(cf->provider.frames, framenum);
+        if (!fdata || fdata->file_off < 0) continue;
+
+        int err = 0;
+        gchar *err_info_str = NULL;
+        wtap_rec rec;
+        gboolean read_ok;
+
+#if VERSION_MINOR >= 6
+        wtap_rec_init(&rec, fdata->cap_len);
+        read_ok = wtap_seek_read(cf->provider.wth, fdata->file_off, &rec, &err, &err_info_str);
+        if (read_ok) {
+            int fts = wtap_file_type_subtype(cf->provider.wth);
+            epan_dissect_run(edt, fts, &rec, fdata, NULL);
+#else
+        {
+            Buffer buf;
+            ws_buffer_init(&buf, fdata->cap_len);
+            wtap_rec_init(&rec);
+            read_ok = wtap_seek_read(cf->provider.wth, fdata->file_off,
+                                     &rec, &buf, &err, &err_info_str);
+            if (read_ok) {
+                int fts = wtap_file_type_subtype(cf->provider.wth);
+                tvbuff_t *tvb = tvb_new_real_data(
+                    ws_buffer_start_ptr(&buf),
+                    rec.rec_header.packet_header.caplen,
+                    rec.rec_header.packet_header.len);
+                epan_dissect_run(edt, fts, &rec, tvb, fdata, NULL);
+#endif
+                /* Address + port match via edt->pi */
+                {
+                    gchar pkt_src[MAX_ADDR_STR_LEN], pkt_dst[MAX_ADDR_STR_LEN];
+                    if (addr_is_mac) {
+                        address_to_str_buf(&edt->pi.dl_src,  pkt_src, sizeof(pkt_src));
+                        address_to_str_buf(&edt->pi.dl_dst,  pkt_dst, sizeof(pkt_dst));
+                    } else {
+                        address_to_str_buf(&edt->pi.net_src, pkt_src, sizeof(pkt_src));
+                        address_to_str_buf(&edt->pi.net_dst, pkt_dst, sizeof(pkt_dst));
+                    }
+                    gboolean addr_ok =
+                        (g_strcmp0(pkt_src, addr_a)==0 && g_strcmp0(pkt_dst, addr_b)==0) ||
+                        (g_strcmp0(pkt_src, addr_b)==0 && g_strcmp0(pkt_dst, addr_a)==0);
+                    guint32 sp = edt->pi.srcport, dp = edt->pi.destport;
+                    gboolean port_ok =
+                        sp == 21 || dp == 21 || sp == 20 || dp == 20 ||
+                        sp == 990|| dp == 990|| sp == port || dp == port;
+
+                    if (addr_ok && port_ok) {
+                        matched++;
+                        ctx.last_cmd = NULL;
+                        proto_tree_children_foreach(edt->tree, walk_ftp_proto_tree, &ctx);
+                        g_free(ctx.last_cmd); ctx.last_cmd = NULL;
+                    }
+                }
+                epan_dissect_reset(edt);
+#if VERSION_MINOR >= 6
+        }
+        wtap_rec_cleanup(&rec);
+#else
+            }
+            wtap_rec_cleanup(&rec);
+            ws_buffer_free(&buf);
+        }
+#endif
+        if (err_info_str) g_free(err_info_str);
+        if (matched % 200 == 0 && matched > 0) circle_vis_pump_events();
+    }
+
+    epan_dissect_free(edt);
+    info->matched_packets = matched;
+    info->found = (matched > 0);
+    ws_log(WS_LOG_DOMAIN, LOG_LEVEL_INFO,
+           "FTP analysis done: %u pkts, cmds=%u, retr=%u, stor=%u, features=%u",
+           matched, g_hash_table_size(info->cmd_counts),
+           info->retr_count, info->stor_count, g_list_length(info->features));
+    return info;
+}
+
+/* ═══════════════════════════════════════════════════════════════════════════
+ * Telnet  (port 23, also 992 for Telnet/TLS)
+ * Fields: telnet.cmd, telnet.option, telnet.data
+ * ═══════════════════════════════════════════════════════════════════════════ */
+
+static const gchar *telnet_option_name(guint opt)
+{
+    switch (opt) {
+        case  0: return "Binary Transmission";
+        case  1: return "Echo";
+        case  2: return "Reconnection";
+        case  3: return "Suppress Go Ahead";
+        case  5: return "Status";
+        case  6: return "Timing Mark";
+        case 24: return "Terminal Type";
+        case 31: return "Window Size (NAWS)";
+        case 32: return "Terminal Speed";
+        case 33: return "Remote Flow Control";
+        case 34: return "Linemode";
+        case 35: return "X Display Location";
+        case 36: return "Old Environment";
+        case 37: return "Authentication";
+        case 38: return "Encryption";
+        case 39: return "New Environment";
+        case 85: return "Charset";
+        default: { static gchar buf[32]; snprintf(buf,sizeof(buf),"Option-%u",opt); return buf; }
+    }
+}
+
+static void telnet_hash_inc(GHashTable *ht, const gchar *key)
+{
+    if (!key || !*key) return;
+    gpointer v = g_hash_table_lookup(ht, key);
+    guint cnt  = v ? GPOINTER_TO_UINT(v) : 0;
+    g_hash_table_insert(ht, g_strdup(key), GUINT_TO_POINTER(cnt + 1));
+}
+
+static void telnet_scan_creds(telnet_info_t *info, const gchar *data, gsize len)
+{
+    if (!data || len == 0) return;
+    gchar *copy = g_strndup(data, len);
+    gchar **lines = g_strsplit_set(copy, "\r\n", -1);
+    g_free(copy);
+    gboolean next_user = FALSE, next_pass = FALSE;
+    for (gint i = 0; lines[i]; i++) {
+        const gchar *ln = g_strstrip(lines[i]);
+        if (!*ln) continue;
+        if (next_user && !info->username)  { info->username = g_strdup(ln); next_user = FALSE; }
+        if (next_pass && !info->password)  { info->password = g_strdup(ln); next_pass = FALSE; }
+        if (g_ascii_strcasecmp(ln,"login:")==0 || g_ascii_strcasecmp(ln,"username:")==0 ||
+            g_str_has_suffix(ln," login:") || g_str_has_suffix(ln," Login:"))
+            next_user = TRUE;
+        if (g_ascii_strcasecmp(ln,"password:")==0 ||
+            g_str_has_suffix(ln," Password:") || g_str_has_suffix(ln," password:"))
+            next_pass = TRUE;
+    }
+    g_strfreev(lines);
+}
+
+typedef struct {
+    telnet_info_t *info;
+    guint          cur_cmd;
+} telnet_walk_ctx_t;
+
+static void walk_telnet_proto_tree(proto_node *node, gpointer data)
+{
+    telnet_walk_ctx_t *ctx  = (telnet_walk_ctx_t *)data;
+    telnet_info_t     *info = ctx->info;
+
+    for (proto_node *child = node->first_child; child; child = child->next)
+        walk_telnet_proto_tree(child, data);
+
+    field_info *fi = PNODE_FINFO(node);
+    if (!fi || !fi->hfinfo) return;
+    const gchar *abbrev = fi->hfinfo->abbrev;
+
+    gchar lbl[ITEM_LABEL_LENGTH] = {0};
+    fill_label_compat(fi, lbl);
+    const gchar *val = label_value(lbl);
+
+    if (g_strcmp0(abbrev,"telnet.cmd")==0 && val) {
+        guint cv = 0;
+        if (sscanf(val, "%u", &cv) == 1) { ctx->cur_cmd = cv; return; }
+        if (g_strstr_len(val,-1,"WILL"))               ctx->cur_cmd = 251;
+        else if (g_strstr_len(val,-1,"WONT"))          ctx->cur_cmd = 252;
+        else if (g_strstr_len(val,-1,"DONT"))          ctx->cur_cmd = 254;
+        else if (g_strstr_len(val,-1," DO ") ||
+                 g_str_has_suffix(val,"DO"))           ctx->cur_cmd = 253;
+        return;
+    }
+    if ((g_strcmp0(abbrev,"telnet.option")==0 ||
+         g_strcmp0(abbrev,"telnet.opt")==0) && val) {
+        guint opt = 0;
+        const gchar *oname;
+        if (sscanf(val, "%u", &opt) == 1) oname = telnet_option_name(opt);
+        else                               oname = val;
+        if (opt == 1  || g_strstr_len(oname,-1,"Echo"))     info->has_echo    = TRUE;
+        if (opt == 34 || g_strstr_len(oname,-1,"Linemode")) info->has_linemode = TRUE;
+        if (opt == 31 || g_strstr_len(oname,-1,"Window"))   info->has_naws     = TRUE;
+        if (opt == 24 || g_strstr_len(oname,-1,"Terminal")) info->has_ttype    = TRUE;
+        if (opt == 37 || g_strstr_len(oname,-1,"Auth"))     info->has_auth     = TRUE;
+        if (opt == 38 || g_strstr_len(oname,-1,"Encrypt"))  info->has_encrypt  = TRUE;
+        switch (ctx->cur_cmd) {
+            case 251: telnet_hash_inc(info->will_opts, oname); break;
+            case 252: telnet_hash_inc(info->wont_opts, oname); break;
+            case 253: telnet_hash_inc(info->do_opts,   oname); break;
+            case 254: telnet_hash_inc(info->dont_opts, oname); break;
+            default: break;
+        }
+        ctx->cur_cmd = 0;
+        return;
+    }
+    if ((g_strcmp0(abbrev,"telnet.data")==0 ||
+         g_strcmp0(abbrev,"data.data")==0   ||
+         g_strcmp0(abbrev,"data.text_lines")==0) && val) {
+        gsize dlen = strlen(val);
+        info->total_data_bytes += (guint32)dlen;
+        if (info->data_s2c->len < 1024) {
+            gsize take = MIN(dlen, 1024 - info->data_s2c->len);
+            g_string_append_len(info->data_s2c, val, (gssize)take);
+            g_string_append_c(info->data_s2c, '\n');
+        }
+        telnet_scan_creds(info, info->data_s2c->str, info->data_s2c->len);
+    }
+}
+
+void packet_analyzer_free_telnet_info(telnet_info_t *info)
+{
+    if (!info) return;
+    g_free(info->username); g_free(info->password);
+    if (info->will_opts)  g_hash_table_destroy(info->will_opts);
+    if (info->wont_opts)  g_hash_table_destroy(info->wont_opts);
+    if (info->do_opts)    g_hash_table_destroy(info->do_opts);
+    if (info->dont_opts)  g_hash_table_destroy(info->dont_opts);
+    if (info->data_c2s)   g_string_free(info->data_c2s, TRUE);
+    if (info->data_s2c)   g_string_free(info->data_s2c, TRUE);
+    g_free(info);
+}
+
+telnet_info_t* packet_analyzer_extract_telnet_info(capture_file *cf,
+                                                    const gchar *addr_a,
+                                                    const gchar *addr_b,
+                                                    guint16 port,
+                                                    gboolean addr_is_mac)
+{
+    if (!cf || cf->state != FILE_READ_DONE || !cf->provider.frames || cf->count == 0)
+        return NULL;
+    if (!addr_a || !addr_b) return NULL;
+
+    telnet_info_t *info = g_new0(telnet_info_t, 1);
+    info->will_opts = g_hash_table_new_full(g_str_hash, g_str_equal, g_free, NULL);
+    info->wont_opts = g_hash_table_new_full(g_str_hash, g_str_equal, g_free, NULL);
+    info->do_opts   = g_hash_table_new_full(g_str_hash, g_str_equal, g_free, NULL);
+    info->dont_opts = g_hash_table_new_full(g_str_hash, g_str_equal, g_free, NULL);
+    info->data_c2s  = g_string_new(NULL);
+    info->data_s2c  = g_string_new(NULL);
+
+    epan_dissect_t    *edt = epan_dissect_new(cf->epan, TRUE, TRUE);
+    telnet_walk_ctx_t  ctx = { .info = info, .cur_cmd = 0 };
+    guint32 matched = 0;
+
+    for (guint32 framenum = 1; framenum <= cf->count; framenum++) {
+        frame_data *fdata = frame_data_sequence_find(cf->provider.frames, framenum);
+        if (!fdata || fdata->file_off < 0) continue;
+
+        int err = 0;
+        gchar *err_info_str = NULL;
+        wtap_rec rec;
+        gboolean read_ok;
+
+#if VERSION_MINOR >= 6
+        wtap_rec_init(&rec, fdata->cap_len);
+        read_ok = wtap_seek_read(cf->provider.wth, fdata->file_off, &rec, &err, &err_info_str);
+        if (read_ok) {
+            int fts = wtap_file_type_subtype(cf->provider.wth);
+            epan_dissect_run(edt, fts, &rec, fdata, NULL);
+#else
+        {
+            Buffer buf;
+            ws_buffer_init(&buf, fdata->cap_len);
+            wtap_rec_init(&rec);
+            read_ok = wtap_seek_read(cf->provider.wth, fdata->file_off,
+                                     &rec, &buf, &err, &err_info_str);
+            if (read_ok) {
+                int fts = wtap_file_type_subtype(cf->provider.wth);
+                tvbuff_t *tvb = tvb_new_real_data(
+                    ws_buffer_start_ptr(&buf),
+                    rec.rec_header.packet_header.caplen,
+                    rec.rec_header.packet_header.len);
+                epan_dissect_run(edt, fts, &rec, tvb, fdata, NULL);
+#endif
+                {
+                    gchar pkt_src[MAX_ADDR_STR_LEN], pkt_dst[MAX_ADDR_STR_LEN];
+                    if (addr_is_mac) {
+                        address_to_str_buf(&edt->pi.dl_src,  pkt_src, sizeof(pkt_src));
+                        address_to_str_buf(&edt->pi.dl_dst,  pkt_dst, sizeof(pkt_dst));
+                    } else {
+                        address_to_str_buf(&edt->pi.net_src, pkt_src, sizeof(pkt_src));
+                        address_to_str_buf(&edt->pi.net_dst, pkt_dst, sizeof(pkt_dst));
+                    }
+                    gboolean addr_ok =
+                        (g_strcmp0(pkt_src, addr_a)==0 && g_strcmp0(pkt_dst, addr_b)==0) ||
+                        (g_strcmp0(pkt_src, addr_b)==0 && g_strcmp0(pkt_dst, addr_a)==0);
+                    guint32 sp = edt->pi.srcport, dp = edt->pi.destport;
+                    gboolean port_ok =
+                        sp == 23 || dp == 23 || sp == 992 || dp == 992 ||
+                        sp == port || dp == port;
+
+                    if (addr_ok && port_ok) {
+                        matched++;
+                        ctx.cur_cmd = 0;
+                        proto_tree_children_foreach(edt->tree, walk_telnet_proto_tree, &ctx);
+                    }
+                }
+                epan_dissect_reset(edt);
+#if VERSION_MINOR >= 6
+        }
+        wtap_rec_cleanup(&rec);
+#else
+            }
+            wtap_rec_cleanup(&rec);
+            ws_buffer_free(&buf);
+        }
+#endif
+        if (err_info_str) g_free(err_info_str);
+        if (matched % 200 == 0 && matched > 0) circle_vis_pump_events();
+    }
+
+    epan_dissect_free(edt);
+    info->matched_packets = matched;
+    info->found = (matched > 0);
+    ws_log(WS_LOG_DOMAIN, LOG_LEVEL_INFO,
+           "Telnet analysis done: %u pkts, data_bytes=%u, opts=%u",
+           matched, info->total_data_bytes,
+           g_hash_table_size(info->will_opts) + g_hash_table_size(info->do_opts));
+    return info;
+}
+
+/* ═══════════════════════════════════════════════════════════════════════════
+ * NBNS  (NetBIOS Name Service, UDP port 137)
+ * Fields: nbns.name, nbns.addr, nbns.flags.response, nbns.flags.opcode
+ * ═══════════════════════════════════════════════════════════════════════════ */
+
+static const gchar *nbns_opcode_label(guint op)
+{
+    switch (op) {
+        case  0: return "Query";
+        case  5: return "Registration";
+        case  6: return "Release";
+        case  7: return "WACK";
+        case  8: return "Refresh";
+        default: { static gchar b[32]; snprintf(b, sizeof(b), "Op-%u", op); return b; }
+    }
+}
+
+typedef struct {
+    nbns_info_t *info;
+    gchar        cur_name[256];
+    gboolean     is_response;
+    guint        opcode;
+    gboolean     flag_counted;
+} nbns_walk_ctx_t;
+
+static void walk_nbns_proto_tree(proto_node *node, gpointer data)
+{
+    nbns_walk_ctx_t *ctx  = (nbns_walk_ctx_t *)data;
+    nbns_info_t     *info = ctx->info;
+
+    for (proto_node *child = node->first_child; child; child = child->next)
+        walk_nbns_proto_tree(child, data);
+
+    field_info *fi = PNODE_FINFO(node);
+    if (!fi || !fi->hfinfo) return;
+    const gchar *abbrev = fi->hfinfo->abbrev;
+
+    gchar lbl[ITEM_LABEL_LENGTH] = {0};
+    fill_label_compat(fi, lbl);
+    const gchar *val = label_value(lbl);
+
+    /* Response / query flag */
+    if (g_strcmp0(abbrev, "nbns.flags.response") == 0 && !ctx->flag_counted) {
+        ctx->flag_counted = TRUE;
+        /* val may be "0"/"1", "False"/"True", or contain "Response"/"Query" */
+        guint resp_v = 0;
+        if (val) sscanf(val, "%u", &resp_v);
+        ctx->is_response = (resp_v != 0) ||
+                           (val && g_strstr_len(val, -1, "esponse") != NULL);
+        if (ctx->is_response) info->response_count++;
+        else                  info->query_count++;
+        return;
+    }
+    /* Opcode */
+    if (g_strcmp0(abbrev, "nbns.flags.opcode") == 0) {
+        ctx->opcode = 0;
+        if (val) sscanf(val, "%u", &ctx->opcode);
+        /* also check text label for opcode name */
+        if (val && ctx->opcode == 0) {
+            if      (g_strstr_len(val,-1,"egistration")) ctx->opcode = 5;
+            else if (g_strstr_len(val,-1,"elease"))      ctx->opcode = 6;
+            else if (g_strstr_len(val,-1,"WACK"))        ctx->opcode = 7;
+            else if (g_strstr_len(val,-1,"efresh"))      ctx->opcode = 8;
+        }
+        switch (ctx->opcode) {
+            case 5: info->registration_count++; break;
+            case 6: info->release_count++;       break;
+            case 7: info->wack_count++;          break;
+            case 8: info->refresh_count++;       break;
+            default: break;
+        }
+        return;
+    }
+    /* NetBIOS name in query or answer */
+    if (g_strcmp0(abbrev, "nbns.name") == 0 && val && *val) {
+        g_strlcpy(ctx->cur_name, val, sizeof(ctx->cur_name));
+        return;
+    }
+    /* IP address in answer — record name→addr pair */
+    if ((g_strcmp0(abbrev, "nbns.addr") == 0 ||
+         g_strcmp0(abbrev, "nbns.nb_addr") == 0) && val && *val && *ctx->cur_name) {
+        g_hash_table_replace(info->name_to_addr,
+                             g_strdup(ctx->cur_name), g_strdup(val));
+        gchar *pair_key = g_strdup_printf("%s|%s", ctx->cur_name, val);
+        if (!g_hash_table_contains(info->seen_pairs, pair_key)) {
+            g_hash_table_add(info->seen_pairs, pair_key);  /* takes ownership */
+            nbns_entry_t *e = g_new0(nbns_entry_t, 1);
+            e->name        = g_strdup(ctx->cur_name);
+            e->addr        = g_strdup(val);
+            e->opcode      = g_strdup(nbns_opcode_label(ctx->opcode));
+            e->is_response = ctx->is_response;
+            info->entries  = g_list_append(info->entries, e);
+        } else {
+            g_free(pair_key);
+        }
+    }
+}
+
+void packet_analyzer_free_nbns_info(nbns_info_t *info)
+{
+    if (!info) return;
+    for (GList *l = info->entries; l; l = l->next) {
+        nbns_entry_t *e = (nbns_entry_t *)l->data;
+        g_free(e->name); g_free(e->addr); g_free(e->opcode); g_free(e);
+    }
+    g_list_free(info->entries);
+    if (info->name_to_addr) g_hash_table_destroy(info->name_to_addr);
+    if (info->seen_pairs)   g_hash_table_destroy(info->seen_pairs);
+    g_free(info);
+}
+
+nbns_info_t *packet_analyzer_extract_nbns_info(capture_file *cf,
+                                                const gchar *addr_a,
+                                                const gchar *addr_b,
+                                                gboolean addr_is_mac)
+{
+    if (!cf || cf->state != FILE_READ_DONE || !cf->provider.frames || cf->count == 0)
+        return NULL;
+    if (!addr_a || !addr_b) return NULL;
+
+    nbns_info_t *info = g_new0(nbns_info_t, 1);
+    info->name_to_addr = g_hash_table_new_full(g_str_hash, g_str_equal, g_free, g_free);
+    info->seen_pairs   = g_hash_table_new_full(g_str_hash, g_str_equal, g_free, NULL);
+
+    epan_dissect_t  *edt = epan_dissect_new(cf->epan, TRUE, TRUE);
+    nbns_walk_ctx_t  ctx = { .info = info };
+    guint32 matched = 0;
+
+    for (guint32 framenum = 1; framenum <= cf->count; framenum++) {
+        frame_data *fdata = frame_data_sequence_find(cf->provider.frames, framenum);
+        if (!fdata || fdata->file_off < 0) continue;
+
+        int err = 0; gchar *err_info_str = NULL;
+        wtap_rec rec; gboolean read_ok;
+
+#if VERSION_MINOR >= 6
+        wtap_rec_init(&rec, fdata->cap_len);
+        read_ok = wtap_seek_read(cf->provider.wth, fdata->file_off, &rec, &err, &err_info_str);
+        if (read_ok) {
+            int fts = wtap_file_type_subtype(cf->provider.wth);
+            epan_dissect_run(edt, fts, &rec, fdata, NULL);
+#else
+        {
+            Buffer buf; ws_buffer_init(&buf, fdata->cap_len);
+            wtap_rec_init(&rec);
+            read_ok = wtap_seek_read(cf->provider.wth, fdata->file_off,
+                                     &rec, &buf, &err, &err_info_str);
+            if (read_ok) {
+                int fts = wtap_file_type_subtype(cf->provider.wth);
+                tvbuff_t *tvb = tvb_new_real_data(
+                    ws_buffer_start_ptr(&buf),
+                    rec.rec_header.packet_header.caplen,
+                    rec.rec_header.packet_header.len);
+                epan_dissect_run(edt, fts, &rec, tvb, fdata, NULL);
+#endif
+                {
+                    gchar pkt_src[MAX_ADDR_STR_LEN], pkt_dst[MAX_ADDR_STR_LEN];
+                    if (addr_is_mac) {
+                        address_to_str_buf(&edt->pi.dl_src,  pkt_src, sizeof(pkt_src));
+                        address_to_str_buf(&edt->pi.dl_dst,  pkt_dst, sizeof(pkt_dst));
+                    } else {
+                        address_to_str_buf(&edt->pi.net_src, pkt_src, sizeof(pkt_src));
+                        address_to_str_buf(&edt->pi.net_dst, pkt_dst, sizeof(pkt_dst));
+                    }
+                    gboolean addr_ok =
+                        (g_strcmp0(pkt_src, addr_a)==0 && g_strcmp0(pkt_dst, addr_b)==0) ||
+                        (g_strcmp0(pkt_src, addr_b)==0 && g_strcmp0(pkt_dst, addr_a)==0);
+                    guint32 sp = edt->pi.srcport, dp = edt->pi.destport;
+                    gboolean port_ok = sp == 137 || dp == 137;
+
+                    if (addr_ok && port_ok) {
+                        matched++;
+                        ctx.cur_name[0]  = '\0';
+                        ctx.is_response  = FALSE;
+                        ctx.opcode       = 0;
+                        ctx.flag_counted = FALSE;
+                        proto_tree_children_foreach(edt->tree, walk_nbns_proto_tree, &ctx);
+                    }
+                }
+                epan_dissect_reset(edt);
+#if VERSION_MINOR >= 6
+        }
+        wtap_rec_cleanup(&rec);
+#else
+            }
+            wtap_rec_cleanup(&rec);
+            ws_buffer_free(&buf);
+        }
+#endif
+        if (err_info_str) g_free(err_info_str);
+        if (matched % 200 == 0 && matched > 0) circle_vis_pump_events();
+    }
+
+    epan_dissect_free(edt);
+    info->matched_packets = matched;
+    info->found = (matched > 0);
+    ws_log(WS_LOG_DOMAIN, LOG_LEVEL_INFO,
+           "NBNS analysis done: %u pkts, names=%u, regs=%u",
+           matched, g_hash_table_size(info->name_to_addr), info->registration_count);
+    return info;
+}
+
+/* ═══════════════════════════════════════════════════════════════════════════
+ * NetBIOS Datagram Service (port 138 UDP)
+ * Fields: nbdgm.type, nbdgm.src.name, nbdgm.dst.name
+ * ═══════════════════════════════════════════════════════════════════════════ */
+
+static void nbdgm_hash_inc(GHashTable *ht, const gchar *key)
+{
+    if (!key || !*key) return;
+    gpointer v   = g_hash_table_lookup(ht, key);
+    guint    cnt = v ? GPOINTER_TO_UINT(v) : 0;
+    g_hash_table_insert(ht, g_strdup(key), GUINT_TO_POINTER(cnt + 1));
+}
+
+static const gchar *nbdgm_type_label(guint t)
+{
+    switch (t) {
+        case 0x10: return "Direct Unique";
+        case 0x11: return "Direct Group";
+        case 0x12: return "Broadcast";
+        case 0x13: return "Datagram Error";
+        case 0x14: return "Query Request";
+        case 0x15: return "Positive Query Response";
+        case 0x16: return "Negative Query Response";
+        default:   { static gchar b[24]; snprintf(b,sizeof(b),"Type-0x%02x",t); return b; }
+    }
+}
+
+typedef struct {
+    nbdgm_info_t *info;
+    gboolean      type_counted;
+} nbdgm_walk_ctx_t;
+
+static void walk_nbdgm_proto_tree(proto_node *node, gpointer data)
+{
+    nbdgm_walk_ctx_t *ctx  = (nbdgm_walk_ctx_t *)data;
+    nbdgm_info_t     *info = ctx->info;
+
+    for (proto_node *child = node->first_child; child; child = child->next)
+        walk_nbdgm_proto_tree(child, data);
+
+    field_info *fi = PNODE_FINFO(node);
+    if (!fi || !fi->hfinfo) return;
+    const gchar *abbrev = fi->hfinfo->abbrev;
+
+    gchar lbl[ITEM_LABEL_LENGTH] = {0};
+    fill_label_compat(fi, lbl);
+    const gchar *val = label_value(lbl);
+
+    /* Datagram type */
+    if ((g_strcmp0(abbrev, "nbdgm.type") == 0 ||
+         g_strcmp0(abbrev, "nbdgm.msg_type") == 0) && !ctx->type_counted) {
+        ctx->type_counted = TRUE;
+        guint t = 0;
+        if (val) sscanf(val, "%u", &t);
+        const gchar *tl = nbdgm_type_label(t);
+        nbdgm_hash_inc(info->dgm_types, tl);
+        switch (t) {
+            case 0x10: info->direct_unique++; break;
+            case 0x11: info->direct_group++;  break;
+            case 0x12: info->broadcast++;     break;
+            case 0x13: info->error_pkts++;    break;
+            default:   break;
+        }
+        return;
+    }
+    /* Source NetBIOS name */
+    if ((g_strcmp0(abbrev, "nbdgm.src.name") == 0 ||
+         g_strcmp0(abbrev, "nbdgm.source_name") == 0) && val && *val)
+        nbdgm_hash_inc(info->src_names, val);
+    /* Destination NetBIOS name */
+    if ((g_strcmp0(abbrev, "nbdgm.dst.name") == 0 ||
+         g_strcmp0(abbrev, "nbdgm.dest_name") == 0) && val && *val)
+        nbdgm_hash_inc(info->dst_names, val);
+}
+
+void packet_analyzer_free_nbdgm_info(nbdgm_info_t *info)
+{
+    if (!info) return;
+    if (info->src_names) g_hash_table_destroy(info->src_names);
+    if (info->dst_names) g_hash_table_destroy(info->dst_names);
+    if (info->dgm_types) g_hash_table_destroy(info->dgm_types);
+    g_free(info);
+}
+
+nbdgm_info_t *packet_analyzer_extract_nbdgm_info(capture_file *cf,
+                                                   const gchar *addr_a,
+                                                   const gchar *addr_b,
+                                                   gboolean addr_is_mac)
+{
+    if (!cf || cf->state != FILE_READ_DONE || !cf->provider.frames || cf->count == 0)
+        return NULL;
+    if (!addr_a || !addr_b) return NULL;
+
+    nbdgm_info_t *info = g_new0(nbdgm_info_t, 1);
+    info->src_names = g_hash_table_new_full(g_str_hash, g_str_equal, g_free, NULL);
+    info->dst_names = g_hash_table_new_full(g_str_hash, g_str_equal, g_free, NULL);
+    info->dgm_types = g_hash_table_new_full(g_str_hash, g_str_equal, g_free, NULL);
+
+    epan_dissect_t   *edt = epan_dissect_new(cf->epan, TRUE, TRUE);
+    nbdgm_walk_ctx_t  ctx = { .info = info };
+    guint32 matched = 0;
+
+    for (guint32 framenum = 1; framenum <= cf->count; framenum++) {
+        frame_data *fdata = frame_data_sequence_find(cf->provider.frames, framenum);
+        if (!fdata || fdata->file_off < 0) continue;
+
+        int err = 0; gchar *err_info_str = NULL;
+        wtap_rec rec; gboolean read_ok;
+
+#if VERSION_MINOR >= 6
+        wtap_rec_init(&rec, fdata->cap_len);
+        read_ok = wtap_seek_read(cf->provider.wth, fdata->file_off, &rec, &err, &err_info_str);
+        if (read_ok) {
+            int fts = wtap_file_type_subtype(cf->provider.wth);
+            epan_dissect_run(edt, fts, &rec, fdata, NULL);
+#else
+        {
+            Buffer buf; ws_buffer_init(&buf, fdata->cap_len);
+            wtap_rec_init(&rec);
+            read_ok = wtap_seek_read(cf->provider.wth, fdata->file_off,
+                                     &rec, &buf, &err, &err_info_str);
+            if (read_ok) {
+                int fts = wtap_file_type_subtype(cf->provider.wth);
+                tvbuff_t *tvb = tvb_new_real_data(
+                    ws_buffer_start_ptr(&buf),
+                    rec.rec_header.packet_header.caplen,
+                    rec.rec_header.packet_header.len);
+                epan_dissect_run(edt, fts, &rec, tvb, fdata, NULL);
+#endif
+                {
+                    gchar pkt_src[MAX_ADDR_STR_LEN], pkt_dst[MAX_ADDR_STR_LEN];
+                    if (addr_is_mac) {
+                        address_to_str_buf(&edt->pi.dl_src,  pkt_src, sizeof(pkt_src));
+                        address_to_str_buf(&edt->pi.dl_dst,  pkt_dst, sizeof(pkt_dst));
+                    } else {
+                        address_to_str_buf(&edt->pi.net_src, pkt_src, sizeof(pkt_src));
+                        address_to_str_buf(&edt->pi.net_dst, pkt_dst, sizeof(pkt_dst));
+                    }
+                    gboolean addr_ok =
+                        (g_strcmp0(pkt_src, addr_a)==0 && g_strcmp0(pkt_dst, addr_b)==0) ||
+                        (g_strcmp0(pkt_src, addr_b)==0 && g_strcmp0(pkt_dst, addr_a)==0);
+                    guint32 sp = edt->pi.srcport, dp = edt->pi.destport;
+                    gboolean port_ok = sp == 138 || dp == 138;
+
+                    if (addr_ok && port_ok) {
+                        matched++;
+                        ctx.type_counted = FALSE;
+                        proto_tree_children_foreach(edt->tree, walk_nbdgm_proto_tree, &ctx);
+                    }
+                }
+                epan_dissect_reset(edt);
+#if VERSION_MINOR >= 6
+        }
+        wtap_rec_cleanup(&rec);
+#else
+            }
+            wtap_rec_cleanup(&rec);
+            ws_buffer_free(&buf);
+        }
+#endif
+        if (err_info_str) g_free(err_info_str);
+        if (matched % 200 == 0 && matched > 0) circle_vis_pump_events();
+    }
+
+    epan_dissect_free(edt);
+    info->matched_packets = matched;
+    info->found = (matched > 0);
+    ws_log(WS_LOG_DOMAIN, LOG_LEVEL_INFO,
+           "NBDGM analysis done: %u pkts, src_names=%u, dst_names=%u",
+           matched, g_hash_table_size(info->src_names), g_hash_table_size(info->dst_names));
+    return info;
+}
+
+/* ═══════════════════════════════════════════════════════════════════════════
+ * NetBIOS Session Service (port 139 TCP)
+ * Fields: nbss.type, nbss.called_name, nbss.calling_name
+ * ═══════════════════════════════════════════════════════════════════════════ */
+
+typedef struct {
+    nbss_info_t *info;
+    guint        sess_type;
+    gchar        calling[256];
+    gchar        called[256];
+    gboolean     type_counted;
+} nbss_walk_ctx_t;
+
+static void walk_nbss_proto_tree(proto_node *node, gpointer data)
+{
+    nbss_walk_ctx_t *ctx  = (nbss_walk_ctx_t *)data;
+    nbss_info_t     *info = ctx->info;
+
+    for (proto_node *child = node->first_child; child; child = child->next)
+        walk_nbss_proto_tree(child, data);
+
+    field_info *fi = PNODE_FINFO(node);
+    if (!fi || !fi->hfinfo) return;
+    const gchar *abbrev = fi->hfinfo->abbrev;
+
+    gchar lbl[ITEM_LABEL_LENGTH] = {0};
+    fill_label_compat(fi, lbl);
+    const gchar *val = label_value(lbl);
+
+    /* Session packet type — parse hex label e.g. "0x81" or "129" */
+    if (g_strcmp0(abbrev, "nbss.type") == 0 && !ctx->type_counted) {
+        ctx->type_counted = TRUE;
+        ctx->sess_type = 0xFF;
+        if (val) {
+            unsigned tv = 0;
+            if (sscanf(val, "0x%x", &tv) == 1 || sscanf(val, "%u", &tv) == 1)
+                ctx->sess_type = (guint)tv;
+        }
+        switch (ctx->sess_type) {
+            case 0x00: info->session_messages++; break;
+            case 0x81: info->session_requests++;  break;
+            case 0x82: info->session_confirms++;  break;
+            case 0x83: info->session_rejects++;   break;
+            case 0x84: info->retargets++;         break;
+            case 0x85: info->keepalives++;        break;
+            default:   break;
+        }
+        return;
+    }
+    /* Called name (server side) */
+    if (g_strcmp0(abbrev, "nbss.called_name") == 0 && val && *val)
+        g_strlcpy(ctx->called, val, sizeof(ctx->called));
+    /* Calling name (client side) */
+    if (g_strcmp0(abbrev, "nbss.calling_name") == 0 && val && *val)
+        g_strlcpy(ctx->calling, val, sizeof(ctx->calling));
+}
+
+void packet_analyzer_free_nbss_info(nbss_info_t *info)
+{
+    if (!info) return;
+    for (GList *l = info->sessions; l; l = l->next) {
+        nbss_session_t *s = (nbss_session_t *)l->data;
+        g_free(s->calling_name); g_free(s->called_name); g_free(s);
+    }
+    g_list_free(info->sessions);
+    g_free(info);
+}
+
+nbss_info_t *packet_analyzer_extract_nbss_info(capture_file *cf,
+                                                const gchar *addr_a,
+                                                const gchar *addr_b,
+                                                gboolean addr_is_mac)
+{
+    if (!cf || cf->state != FILE_READ_DONE || !cf->provider.frames || cf->count == 0)
+        return NULL;
+    if (!addr_a || !addr_b) return NULL;
+
+    nbss_info_t *info = g_new0(nbss_info_t, 1);
+
+    epan_dissect_t  *edt = epan_dissect_new(cf->epan, TRUE, TRUE);
+    nbss_walk_ctx_t  ctx = { .info = info };
+    guint32 matched = 0;
+
+    for (guint32 framenum = 1; framenum <= cf->count; framenum++) {
+        frame_data *fdata = frame_data_sequence_find(cf->provider.frames, framenum);
+        if (!fdata || fdata->file_off < 0) continue;
+
+        int err = 0; gchar *err_info_str = NULL;
+        wtap_rec rec; gboolean read_ok;
+
+#if VERSION_MINOR >= 6
+        wtap_rec_init(&rec, fdata->cap_len);
+        read_ok = wtap_seek_read(cf->provider.wth, fdata->file_off, &rec, &err, &err_info_str);
+        if (read_ok) {
+            int fts = wtap_file_type_subtype(cf->provider.wth);
+            epan_dissect_run(edt, fts, &rec, fdata, NULL);
+#else
+        {
+            Buffer buf; ws_buffer_init(&buf, fdata->cap_len);
+            wtap_rec_init(&rec);
+            read_ok = wtap_seek_read(cf->provider.wth, fdata->file_off,
+                                     &rec, &buf, &err, &err_info_str);
+            if (read_ok) {
+                int fts = wtap_file_type_subtype(cf->provider.wth);
+                tvbuff_t *tvb = tvb_new_real_data(
+                    ws_buffer_start_ptr(&buf),
+                    rec.rec_header.packet_header.caplen,
+                    rec.rec_header.packet_header.len);
+                epan_dissect_run(edt, fts, &rec, tvb, fdata, NULL);
+#endif
+                {
+                    gchar pkt_src[MAX_ADDR_STR_LEN], pkt_dst[MAX_ADDR_STR_LEN];
+                    if (addr_is_mac) {
+                        address_to_str_buf(&edt->pi.dl_src,  pkt_src, sizeof(pkt_src));
+                        address_to_str_buf(&edt->pi.dl_dst,  pkt_dst, sizeof(pkt_dst));
+                    } else {
+                        address_to_str_buf(&edt->pi.net_src, pkt_src, sizeof(pkt_src));
+                        address_to_str_buf(&edt->pi.net_dst, pkt_dst, sizeof(pkt_dst));
+                    }
+                    gboolean addr_ok =
+                        (g_strcmp0(pkt_src, addr_a)==0 && g_strcmp0(pkt_dst, addr_b)==0) ||
+                        (g_strcmp0(pkt_src, addr_b)==0 && g_strcmp0(pkt_dst, addr_a)==0);
+                    guint32 sp = edt->pi.srcport, dp = edt->pi.destport;
+                    gboolean port_ok = sp == 139 || dp == 139;
+
+                    if (addr_ok && port_ok) {
+                        matched++;
+                        ctx.sess_type    = 0xFF;
+                        ctx.calling[0]   = '\0';
+                        ctx.called[0]    = '\0';
+                        ctx.type_counted = FALSE;
+                        proto_tree_children_foreach(edt->tree, walk_nbss_proto_tree, &ctx);
+                        /* Record session setup pairs */
+                        if (ctx.sess_type == 0x81 && *ctx.calling && *ctx.called) {
+                            nbss_session_t *s = g_new0(nbss_session_t, 1);
+                            s->calling_name = g_strdup(ctx.calling);
+                            s->called_name  = g_strdup(ctx.called);
+                            info->sessions  = g_list_append(info->sessions, s);
+                        }
+                    }
+                }
+                epan_dissect_reset(edt);
+#if VERSION_MINOR >= 6
+        }
+        wtap_rec_cleanup(&rec);
+#else
+            }
+            wtap_rec_cleanup(&rec);
+            ws_buffer_free(&buf);
+        }
+#endif
+        if (err_info_str) g_free(err_info_str);
+        if (matched % 200 == 0 && matched > 0) circle_vis_pump_events();
+    }
+
+    epan_dissect_free(edt);
+    info->matched_packets = matched;
+    info->found = (matched > 0);
+    ws_log(WS_LOG_DOMAIN, LOG_LEVEL_INFO,
+           "NBSS analysis done: %u pkts, requests=%u, confirms=%u, rejects=%u",
+           matched, info->session_requests, info->session_confirms, info->session_rejects);
+    return info;
+}
+
+/* ═══════════════════════════════════════════════════════════════════════════
+ * Generic TCP Transport Statistics
+ * ═══════════════════════════════════════════════════════════════════════════ */
+
+typedef struct {
+    tcp_stat_info_t *info;
+    gboolean         this_pkt_is_syn;   /* reset per packet */
+} tcp_stat_walk_ctx_t;
+
+static void walk_tcp_stat_tree(proto_tree *node, gpointer data)
+{
+    tcp_stat_walk_ctx_t *ctx = (tcp_stat_walk_ctx_t *)data;
+    tcp_stat_info_t     *info = ctx->info;
+    if (!node) return;
+
+    field_info *fi = PNODE_FINFO(node);
+    if (fi && fi->hfinfo && fi->hfinfo->abbrev) {
+        const gchar *abbrev = fi->hfinfo->abbrev;
+        gchar lbl[512]; lbl[0] = '\0';
+        fill_label_compat(fi, lbl);
+        guint32 uv = 0; gdouble dv = 0.0;
+
+        /* ── Flags ── */
+        if (g_strcmp0(abbrev, "tcp.flags") == 0) {
+            if (sscanf(lbl, "0x%x", &uv) == 1 || sscanf(lbl, "%u", &uv) == 1) {
+                if (uv & 0x002) { info->saw_syn = TRUE; ctx->this_pkt_is_syn = TRUE; }
+                if (uv & 0x010) info->saw_ack = TRUE;
+                if (uv & 0x001) info->saw_fin = TRUE;
+                if (uv & 0x004) info->saw_rst = TRUE;
+                if (uv & 0x008) info->saw_psh = TRUE;
+                if (uv & 0x020) info->saw_urg = TRUE;
+                if (uv & 0x040) info->saw_ece = TRUE;
+                if (uv & 0x080) info->saw_cwr = TRUE;
+            }
+        }
+        /* ── MSS (from SYN option) ── */
+        else if (g_strcmp0(abbrev, "tcp.options.mss.val") == 0) {
+            if (sscanf(lbl, "%u", &uv) == 1 && uv > 0 && info->mss == 0)
+                info->mss = uv;
+        }
+        /* ── Window size ── */
+        else if (g_strcmp0(abbrev, "tcp.window_size_value") == 0) {
+            if (sscanf(lbl, "%u", &uv) == 1) {
+                if (info->win_count == 0 || uv < info->win_min) info->win_min = uv;
+                if (uv > info->win_max)                         info->win_max = uv;
+                info->win_sum += uv;
+                info->win_count++;
+            }
+        }
+        /* ── Options negotiated ── */
+        else if (g_strcmp0(abbrev, "tcp.options.sack_perm") == 0) {
+            info->sack_permitted = TRUE;
+        }
+        else if (strncmp(abbrev, "tcp.options.timestamp", 21) == 0
+                 && g_strcmp0(abbrev, "tcp.options.timestamp.tsval") != 0
+                 && g_strcmp0(abbrev, "tcp.options.timestamp.tsecr") != 0) {
+            info->timestamps = TRUE;
+        }
+        else if (g_strcmp0(abbrev, "tcp.options.wscale.shift") == 0) {
+            if (sscanf(lbl, "%u", &uv) == 1 && info->window_scale < 0)
+                info->window_scale = (gint)uv;
+        }
+        /* ── RTT (Wireshark analysis field, seconds) ── */
+        else if (g_strcmp0(abbrev, "tcp.analysis.ack_rtt") == 0) {
+            if (sscanf(lbl, "%lf", &dv) == 1 && dv > 0.0) {
+                gdouble ms = dv * 1000.0;
+                if (info->rtt_count == 0 || ms < info->rtt_min_ms) info->rtt_min_ms = ms;
+                if (ms > info->rtt_max_ms)                          info->rtt_max_ms = ms;
+                info->rtt_sum_ms += ms;
+                info->rtt_count++;
+            }
+        }
+        /* ── Retransmissions / OOO (Wireshark analysis) ── */
+        else if (g_strcmp0(abbrev, "tcp.analysis.retransmission") == 0
+                 || g_strcmp0(abbrev, "tcp.analysis.fast_retransmission") == 0
+                 || g_strcmp0(abbrev, "tcp.analysis.spurious_retransmission") == 0) {
+            info->retrans_count++;
+        }
+        else if (g_strcmp0(abbrev, "tcp.analysis.out_of_order") == 0) {
+            info->ooo_count++;
+        }
+    }
+
+    proto_tree_children_foreach(node, walk_tcp_stat_tree, ctx);
+}
+
+tcp_stat_info_t *packet_analyzer_extract_tcp_stat_info(capture_file *cf,
+                                                        const gchar  *addr_a,
+                                                        const gchar  *addr_b,
+                                                        guint16       port,
+                                                        gboolean      addr_is_mac)
+{
+    if (!cf || cf->state != FILE_READ_DONE || !cf->provider.frames || cf->count == 0)
+        return NULL;
+    if (!addr_a || !addr_b) return NULL;
+
+    tcp_stat_info_t *info = g_new0(tcp_stat_info_t, 1);
+    info->window_scale = -1;
+    info->win_min      = G_MAXUINT32;
+
+    epan_dissect_t      *edt = epan_dissect_new(cf->epan, TRUE, TRUE);
+    tcp_stat_walk_ctx_t  ctx = { .info = info, .this_pkt_is_syn = FALSE };
+    guint32 matched = 0;
+
+    for (guint32 framenum = 1; framenum <= cf->count; framenum++) {
+        frame_data *fdata = frame_data_sequence_find(cf->provider.frames, framenum);
+        if (!fdata || fdata->file_off < 0) continue;
+
+        int err = 0; gchar *err_info_str = NULL;
+        wtap_rec rec; gboolean read_ok;
+
+#if VERSION_MINOR >= 6
+        wtap_rec_init(&rec, fdata->cap_len);
+        read_ok = wtap_seek_read(cf->provider.wth, fdata->file_off, &rec, &err, &err_info_str);
+        if (read_ok) {
+            int fts = wtap_file_type_subtype(cf->provider.wth);
+            epan_dissect_run(edt, fts, &rec, fdata, NULL);
+#else
+        {
+            Buffer buf; ws_buffer_init(&buf, fdata->cap_len);
+            wtap_rec_init(&rec);
+            read_ok = wtap_seek_read(cf->provider.wth, fdata->file_off,
+                                     &rec, &buf, &err, &err_info_str);
+            if (read_ok) {
+                int fts = wtap_file_type_subtype(cf->provider.wth);
+                tvbuff_t *tvb = tvb_new_real_data(
+                    ws_buffer_start_ptr(&buf),
+                    rec.rec_header.packet_header.caplen,
+                    rec.rec_header.packet_header.len);
+                epan_dissect_run(edt, fts, &rec, tvb, fdata, NULL);
+#endif
+                {
+                    gchar pkt_src[MAX_ADDR_STR_LEN], pkt_dst[MAX_ADDR_STR_LEN];
+                    if (addr_is_mac) {
+                        address_to_str_buf(&edt->pi.dl_src,  pkt_src, sizeof(pkt_src));
+                        address_to_str_buf(&edt->pi.dl_dst,  pkt_dst, sizeof(pkt_dst));
+                    } else {
+                        address_to_str_buf(&edt->pi.net_src, pkt_src, sizeof(pkt_src));
+                        address_to_str_buf(&edt->pi.net_dst, pkt_dst, sizeof(pkt_dst));
+                    }
+                    gboolean addr_ok =
+                        (g_strcmp0(pkt_src, addr_a)==0 && g_strcmp0(pkt_dst, addr_b)==0) ||
+                        (g_strcmp0(pkt_src, addr_b)==0 && g_strcmp0(pkt_dst, addr_a)==0);
+
+                    guint32 sp = edt->pi.srcport, dp = edt->pi.destport;
+                    gboolean port_ok = (port == 0) || (sp == port || dp == port);
+
+                    if (addr_ok && port_ok && edt->pi.ptype == PT_TCP) {
+                        matched++;
+                        ctx.this_pkt_is_syn = FALSE;
+                        proto_tree_children_foreach(edt->tree, walk_tcp_stat_tree, &ctx);
+                    }
+                }
+                epan_dissect_reset(edt);
+#if VERSION_MINOR >= 6
+        }
+        wtap_rec_cleanup(&rec);
+#else
+            }
+            wtap_rec_cleanup(&rec);
+            ws_buffer_free(&buf);
+        }
+#endif
+        if (err_info_str) g_free(err_info_str);
+        if (matched % 300 == 0 && matched > 0) circle_vis_pump_events();
+    }
+
+    epan_dissect_free(edt);
+
+    /* Sanitise mins in case no packets matched */
+    if (info->win_min == G_MAXUINT32) info->win_min = 0;
+
+    info->matched_packets = matched;
+    info->found = (matched > 0);
+    ws_log(WS_LOG_DOMAIN, LOG_LEVEL_INFO,
+           "TCP-stat analysis done: %u pkts matched, win=%u..%u, rtt_samples=%u",
+           matched, info->win_min, info->win_max, info->rtt_count);
+    return info;
+}
+
+void packet_analyzer_free_tcp_stat_info(tcp_stat_info_t *info)
+{
+    g_free(info);
+}
+
+/* ═══════════════════════════════════════════════════════════════════════════
+ * Generic UDP Transport Statistics
+ * ═══════════════════════════════════════════════════════════════════════════ */
+
+typedef struct {
+    udp_stat_info_t *info;
+    const gchar     *addr_a;   /* for direction tracking */
+    gchar            pkt_src[MAX_ADDR_STR_LEN];
+    gboolean         got_payload;
+} udp_stat_walk_ctx_t;
+
+static void walk_udp_stat_tree(proto_tree *node, gpointer data)
+{
+    udp_stat_walk_ctx_t *ctx  = (udp_stat_walk_ctx_t *)data;
+    udp_stat_info_t     *info = ctx->info;
+    if (!node) return;
+
+    field_info *fi = PNODE_FINFO(node);
+    if (fi && fi->hfinfo && fi->hfinfo->abbrev && !ctx->got_payload) {
+        const gchar *abbrev = fi->hfinfo->abbrev;
+        /* udp.length includes 8-byte header → payload = length - 8 */
+        if (g_strcmp0(abbrev, "udp.length") == 0) {
+            gchar lbl[64]; lbl[0] = '\0';
+            fill_label_compat(fi, lbl);
+            guint32 ulen = 0;
+            if (sscanf(lbl, "%u", &ulen) == 1 && ulen >= 8) {
+                guint32 payload = ulen - 8;
+                if (info->payload_count == 0 || payload < info->payload_min)
+                    info->payload_min = payload;
+                if (payload > info->payload_max)
+                    info->payload_max = payload;
+                info->payload_sum += payload;
+                info->payload_count++;
+                ctx->got_payload = TRUE;
+            }
+        }
+    }
+
+    proto_tree_children_foreach(node, walk_udp_stat_tree, ctx);
+}
+
+udp_stat_info_t *packet_analyzer_extract_udp_stat_info(capture_file *cf,
+                                                        const gchar  *addr_a,
+                                                        const gchar  *addr_b,
+                                                        guint16       port,
+                                                        gboolean      addr_is_mac)
+{
+    if (!cf || cf->state != FILE_READ_DONE || !cf->provider.frames || cf->count == 0)
+        return NULL;
+    if (!addr_a || !addr_b) return NULL;
+
+    udp_stat_info_t *info = g_new0(udp_stat_info_t, 1);
+    info->payload_min = G_MAXUINT32;
+
+    epan_dissect_t      *edt = epan_dissect_new(cf->epan, TRUE, TRUE);
+    guint32 matched = 0;
+
+    for (guint32 framenum = 1; framenum <= cf->count; framenum++) {
+        frame_data *fdata = frame_data_sequence_find(cf->provider.frames, framenum);
+        if (!fdata || fdata->file_off < 0) continue;
+
+        int err = 0; gchar *err_info_str = NULL;
+        wtap_rec rec; gboolean read_ok;
+
+#if VERSION_MINOR >= 6
+        wtap_rec_init(&rec, fdata->cap_len);
+        read_ok = wtap_seek_read(cf->provider.wth, fdata->file_off, &rec, &err, &err_info_str);
+        if (read_ok) {
+            int fts = wtap_file_type_subtype(cf->provider.wth);
+            epan_dissect_run(edt, fts, &rec, fdata, NULL);
+#else
+        {
+            Buffer buf; ws_buffer_init(&buf, fdata->cap_len);
+            wtap_rec_init(&rec);
+            read_ok = wtap_seek_read(cf->provider.wth, fdata->file_off,
+                                     &rec, &buf, &err, &err_info_str);
+            if (read_ok) {
+                int fts = wtap_file_type_subtype(cf->provider.wth);
+                tvbuff_t *tvb = tvb_new_real_data(
+                    ws_buffer_start_ptr(&buf),
+                    rec.rec_header.packet_header.caplen,
+                    rec.rec_header.packet_header.len);
+                epan_dissect_run(edt, fts, &rec, tvb, fdata, NULL);
+#endif
+                {
+                    gchar pkt_src[MAX_ADDR_STR_LEN], pkt_dst[MAX_ADDR_STR_LEN];
+                    if (addr_is_mac) {
+                        address_to_str_buf(&edt->pi.dl_src,  pkt_src, sizeof(pkt_src));
+                        address_to_str_buf(&edt->pi.dl_dst,  pkt_dst, sizeof(pkt_dst));
+                    } else {
+                        address_to_str_buf(&edt->pi.net_src, pkt_src, sizeof(pkt_src));
+                        address_to_str_buf(&edt->pi.net_dst, pkt_dst, sizeof(pkt_dst));
+                    }
+                    gboolean addr_ok =
+                        (g_strcmp0(pkt_src, addr_a)==0 && g_strcmp0(pkt_dst, addr_b)==0) ||
+                        (g_strcmp0(pkt_src, addr_b)==0 && g_strcmp0(pkt_dst, addr_a)==0);
+
+                    guint32 sp = edt->pi.srcport, dp = edt->pi.destport;
+                    gboolean port_ok = (port == 0) || (sp == port || dp == port);
+
+                    if (addr_ok && port_ok && edt->pi.ptype == PT_UDP) {
+                        matched++;
+                        /* direction */
+                        if (g_strcmp0(pkt_src, addr_a) == 0)
+                            info->pkts_a_to_b++;
+                        else
+                            info->pkts_b_to_a++;
+
+                        udp_stat_walk_ctx_t wctx = { .info = info, .addr_a = addr_a, .got_payload = FALSE };
+                        g_strlcpy(wctx.pkt_src, pkt_src, sizeof(wctx.pkt_src));
+                        proto_tree_children_foreach(edt->tree, walk_udp_stat_tree, &wctx);
+                    }
+                }
+                epan_dissect_reset(edt);
+#if VERSION_MINOR >= 6
+        }
+        wtap_rec_cleanup(&rec);
+#else
+            }
+            wtap_rec_cleanup(&rec);
+            ws_buffer_free(&buf);
+        }
+#endif
+        if (err_info_str) g_free(err_info_str);
+        if (matched % 300 == 0 && matched > 0) circle_vis_pump_events();
+    }
+
+    epan_dissect_free(edt);
+
+    if (info->payload_min == G_MAXUINT32) info->payload_min = 0;
+
+    info->matched_packets = matched;
+    info->found = (matched > 0);
+    ws_log(WS_LOG_DOMAIN, LOG_LEVEL_INFO,
+           "UDP-stat analysis done: %u pkts matched, payload=%u..%u",
+           matched, info->payload_min, info->payload_max);
+    return info;
+}
+
+void packet_analyzer_free_udp_stat_info(udp_stat_info_t *info)
+{
     g_free(info);
 }

@@ -21,6 +21,7 @@
 #include "ui_main_window.h"
 #include "ui_bridge.h"
 #include "packet_analyzer.h"
+#include <memory>
 #include <QHeaderView>
 #include <QMessageBox>
 #include <QStackedWidget>
@@ -55,6 +56,23 @@
 #include <QScreen>
 #include <algorithm>
 #include <QPainter>
+#include <QNetworkAccessManager>
+#include <QNetworkReply>
+#include <QNetworkRequest>
+#include <QAuthenticator>
+#include <QHttpMultiPart>
+#include <QCompleter>
+#include <QStringListModel>
+#include <QSslCertificate>
+#include <QSslConfiguration>
+#include <QSslSocket>
+#include <QSslError>
+#include <QJsonArray>
+#include <QJsonDocument>
+#include <QJsonObject>
+#include <QDesktopServices>
+#include <QFormLayout>
+#include <QDialogButtonBox>
 #include <epan/plugin_if.h>
 #include <cfile.h>
 
@@ -146,6 +164,11 @@ MainWindow::MainWindow(QWidget *parent)
     , m_clearFilterBtn(nullptr)
     , m_reloadDataBtn(nullptr)
     , m_savePDFBtn(nullptr)
+    , m_sendToNtopBtn(nullptr)
+    , m_sendToMalcolmBtn(nullptr)
+    , m_settingsBtn(nullptr)
+    , m_ntopEnabled(true)
+    , m_malcolmEnabled(false)
     , m_splitter(nullptr)
     , m_splitterSizesRestored(false)
     , m_viewStack(nullptr)
@@ -163,6 +186,7 @@ MainWindow::MainWindow(QWidget *parent)
     , m_pairListBlinkTimer(nullptr)
     , m_pairListBlinkState(false)
     , m_connectionPopup(nullptr)
+    , m_networkManager(nullptr)
     , m_analysisResult(NULL)
     , m_top_pairs(NULL)
     , m_circle_pairs(NULL)
@@ -235,6 +259,12 @@ void MainWindow::savePreferences()
     if (m_lineThicknessCheckBox) {
         settings.setValue("lineThickness", m_lineThicknessCheckBox->isChecked());
     }
+    settings.endGroup();
+
+    /* Integration toggles */
+    settings.beginGroup("Integrations");
+    settings.setValue("ntop_enabled",    m_ntopEnabled);
+    settings.setValue("malcolm_enabled", m_malcolmEnabled);
     settings.endGroup();
 
     settings.sync();
@@ -321,6 +351,16 @@ void MainWindow::loadPreferences()
     }
 
     settings.endGroup();
+
+    /* Integration toggles */
+    settings.beginGroup("Integrations");
+    m_ntopEnabled    = settings.value("ntop_enabled",    true).toBool();
+    m_malcolmEnabled = settings.value("malcolm_enabled", false).toBool();
+    settings.endGroup();
+
+    /* Apply visibility immediately */
+    if (m_sendToNtopBtn)    m_sendToNtopBtn->setVisible(m_ntopEnabled);
+    if (m_sendToMalcolmBtn) m_sendToMalcolmBtn->setVisible(m_malcolmEnabled);
 }
 
 void MainWindow::closeEvent(QCloseEvent *event)
@@ -394,7 +434,7 @@ void MainWindow::setupUI()
     resize(1280, 780);
     
     /* Set window title and flags */
-setWindowTitle("PacketCircle v.0.4.3"); /* WH: version bump */
+setWindowTitle("PacketCircle v.0.4.6"); /* WH: version bump */
     
     /* Create pair list blink timer for synchronized search highlighting */
     m_pairListBlinkTimer = new QTimer(this);
@@ -662,27 +702,37 @@ void MainWindow::createControls()
     m_lineThicknessCheckBox->setChecked(false);
     connect(m_lineThicknessCheckBox, &QCheckBox::toggled, this, &MainWindow::onLineThicknessToggled);
 
-    /* -- Help button (created here so it exists before being added to layout) -- */
-    QPushButton *helpBtn = new QPushButton("?", m_row1Widget);
-    helpBtn->setToolTip("Show help and controls description");
-    helpBtn->setFixedSize(26, 26);
-    helpBtn->setStyleSheet(
-        QString("QPushButton {"
-        "  background: %1;"
-        "  color: %2;"
-        "  border: 1px solid %3;"
-        "  border-radius: 13px;"
-        "  font-weight: bold;"
-        "  font-size: 15px;"
-        "}"
-        "QPushButton:hover {"
-        "  background: %4;"
-        "}")
-        .arg(m_darkTheme ? "#4a4a4a" : "#d8d8d8")
-        .arg(m_darkTheme ? "#e0e0e0" : "#333")
-        .arg(m_darkTheme ? "#666" : "#aaa")
-        .arg(m_darkTheme ? "#5a5a5a" : "#c0c0c0")
-    );
+    /* -- Shared style factory for small circular icon buttons (gear + help) -- */
+    auto makeIconBtn = [&](const QString &label, const QString &tip, QWidget *parent) {
+        QPushButton *btn = new QPushButton(label, parent);
+        btn->setToolTip(tip);
+        btn->setFixedSize(26, 26);
+        btn->setStyleSheet(
+            QString("QPushButton {"
+            "  background: %1;"
+            "  color: %2;"
+            "  border: 1px solid %3;"
+            "  border-radius: 13px;"
+            "  font-weight: bold;"
+            "  font-size: 14px;"
+            "}"
+            "QPushButton:hover {"
+            "  background: %4;"
+            "}")
+            .arg(m_darkTheme ? "#4a4a4a" : "#d8d8d8")
+            .arg(m_darkTheme ? "#e0e0e0" : "#333")
+            .arg(m_darkTheme ? "#666" : "#aaa")
+            .arg(m_darkTheme ? "#5a5a5a" : "#c0c0c0")
+        );
+        return btn;
+    };
+
+    /* -- Settings (gear) button -- */
+    m_settingsBtn = makeIconBtn("\u2699", "Open PacketCircle settings", m_row1Widget);
+    connect(m_settingsBtn, &QPushButton::clicked, this, &MainWindow::showSettingsDialog);
+
+    /* -- Help button -- */
+    QPushButton *helpBtn = makeIconBtn("?", "Show help and controls description", m_row1Widget);
     connect(helpBtn, &QPushButton::clicked, this, &MainWindow::onHelpClicked);
 
     /* Layout Row 1 */
@@ -705,6 +755,7 @@ void MainWindow::createControls()
     m_controlsRow1->addSpacing(8);
     m_controlsRow1->addWidget(m_lineThicknessCheckBox);
     m_controlsRow1->addStretch();
+    m_controlsRow1->addWidget(m_settingsBtn);
     m_controlsRow1->addWidget(helpBtn);
 
     /* === Row 2: Actions + Search === */
@@ -725,6 +776,10 @@ void MainWindow::createControls()
     m_reloadDataBtn = makeActionBtn("Reload");
     m_savePDFBtn = makeActionBtn("PDF");
     m_savePDFBtn->setToolTip("Save report as PDF with circle visualization and IP pair list");
+    m_sendToNtopBtn = makeActionBtn("Send to NTOP");
+    m_sendToNtopBtn->setToolTip("Upload current capture to ntopng for analysis");
+    m_sendToMalcolmBtn = makeActionBtn("Send to Malcolm");
+    m_sendToMalcolmBtn->setToolTip("Upload current capture to Malcolm / Arkime for deep analysis");
     m_selectSearchBtn = makeActionBtn("Select Results");
     m_selectSearchBtn->setToolTip("Select only the communication pairs matching the current search");
     m_selectSearchBtn->setEnabled(false);
@@ -736,12 +791,55 @@ void MainWindow::createControls()
     connect(m_clearFilterBtn, &QPushButton::clicked, this, &MainWindow::onClearFilterClicked);
     connect(m_reloadDataBtn, &QPushButton::clicked, this, &MainWindow::onReloadDataClicked);
     connect(m_savePDFBtn, &QPushButton::clicked, this, &MainWindow::onSavePDFClicked);
+    connect(m_sendToNtopBtn, &QPushButton::clicked, this, &MainWindow::onSendToNtopClicked);
+    connect(m_sendToMalcolmBtn, &QPushButton::clicked, this, &MainWindow::onSendToMalcolmClicked);
+    /* (ntopng right-click config removed — use ⚙ Settings instead) */
 
     /* Search bar (moved from circle container) */
     m_searchLabel = new QLabel("Search IP", m_controlsWidget);
     m_searchLineEdit = new QLineEdit(m_controlsWidget);
     m_searchLineEdit->setPlaceholderText("Partial IP or CIDR (e.g., 192.168.1 or 10.0.0.0/24)");
     m_searchLineEdit->setMinimumWidth(160);
+
+    /* Autocomplete: all known protocol + category keywords */
+    {
+        static const QStringList allKeywords = {
+            /* Layer-2 / MAC keywords */
+            "arp", "stp", "rstp", "mstp", "pvst", "pvst+",
+            "lldp", "lacp", "cdp", "vtp",
+            "llc", "802.2", "eapol", "802.1x",
+            "vlan", "802.1q", "mpls",
+            "802.3", "ethernet",
+            "macsec", "802.1ae",
+            /* IP / transport */
+            "icmp", "icmpv6", "tcp", "udp",
+            "dhcp", "bootp", "igmp",
+            "dns", "mdns",
+            "gre", "ipsec", "esp", "ah",
+            /* Protocol-info dialogs */
+            "http", "https",
+            "tls", "ssl",
+            "smb", "cifs",
+            "ftp",
+            "ssh", "sftp", "scp",
+            "telnet",
+            "smtp", "email", "mail",
+            "imap",
+            "pop3", "pop",
+            "ldap", "ldaps",
+            "snmp",
+            "syslog",
+            "kerberos", "krb5",
+            "sql", "mssql", "mysql", "postgresql", "postgres",
+            "sip", "voip",
+            "nbns", "nbdgm", "nbss", "netbios",
+        };
+        QCompleter *completer = new QCompleter(allKeywords, m_searchLineEdit);
+        completer->setCaseSensitivity(Qt::CaseInsensitive);
+        completer->setCompletionMode(QCompleter::PopupCompletion);
+        completer->setFilterMode(Qt::MatchContains);  /* match anywhere in word */
+        m_searchLineEdit->setCompleter(completer);
+    }
 
     connect(m_searchLineEdit, &QLineEdit::returnPressed, this, [this]() {
         applySearchFilter(m_searchLineEdit->text());
@@ -761,6 +859,8 @@ void MainWindow::createControls()
     m_controlsRow2->addSpacing(6);
     m_controlsRow2->addWidget(m_reloadDataBtn);
     m_controlsRow2->addWidget(m_savePDFBtn);
+    m_controlsRow2->addWidget(m_sendToNtopBtn);
+    m_controlsRow2->addWidget(m_sendToMalcolmBtn);
     m_controlsRow2->addSpacing(12);
     m_controlsRow2->addWidget(m_searchLabel);
     m_controlsRow2->addWidget(m_searchLineEdit, 1);
@@ -1938,7 +2038,7 @@ void MainWindow::onHelpClicked()
 {
     /* Use custom QDialog instead of QMessageBox for full size control */
     QDialog *helpDialog = new QDialog(this);
-helpDialog->setWindowTitle("Help - PacketCircle v.0.4.3"); /* WH: version bump */
+helpDialog->setWindowTitle("Help - PacketCircle v.0.4.6"); /* WH: version bump */
     helpDialog->setMinimumSize(600, 400);
     helpDialog->resize(900, 650);
     /* Make dialog resizable */
@@ -2367,7 +2467,7 @@ void MainWindow::onSavePDFClicked()
     QFontMetrics ffm(footerFont, &writer);
     int footerTextH = ffm.height();
     painter.drawText(0, pageH - footerTextH - mm(1), pageW, footerTextH, Qt::AlignCenter,
-QString("Generated by PacketCircle v.0.4.3 — %1") /* WH: version bump */
+QString("Generated by PacketCircle v.0.4.6 — %1") /* WH: version bump */
                          .arg(QDateTime::currentDateTime().toString("yyyy-MM-dd HH:mm:ss")));
 
     painter.end();
@@ -2375,10 +2475,1046 @@ QString("Generated by PacketCircle v.0.4.3 — %1") /* WH: version bump */
     QMessageBox::information(this, "PDF Saved", QString("Report saved to:\n%1").arg(filePath));
 }
 
+/* ------------------------------------------------------------------ */
+/* ntopng integration                                                   */
+/* ------------------------------------------------------------------ */
+
+bool MainWindow::showNtopngConfigDialog()
+{
+    QDialog dlg(this);
+    dlg.setWindowTitle("ntopng Settings");
+    dlg.setMinimumWidth(400);
+
+    QSettings settings(preferencesFilePath(), QSettings::IniFormat);
+    settings.beginGroup("ntopng");
+
+    QFormLayout *form = new QFormLayout;
+
+    QLineEdit *hostEdit = new QLineEdit(settings.value("host", "").toString());
+    hostEdit->setPlaceholderText("e.g. ntop.example.com or 192.168.1.10");
+
+    QLineEdit *portEdit = new QLineEdit(QString::number(settings.value("port", 3001).toInt()));
+    portEdit->setInputMask("99999");
+
+    QCheckBox *httpsBox = new QCheckBox("Use HTTPS");
+    httpsBox->setChecked(settings.value("use_https", true).toBool());
+
+    QLineEdit *userEdit = new QLineEdit(settings.value("username", "").toString());
+
+    QLineEdit *passEdit = new QLineEdit(settings.value("password", "").toString());
+    passEdit->setEchoMode(QLineEdit::Password);
+
+    QCheckBox *ignoreSslBox = new QCheckBox("Ignore SSL certificate errors (self-signed / internal CA)");
+    ignoreSslBox->setChecked(settings.value("ignore_ssl_errors", true).toBool());
+
+    settings.endGroup();
+
+    form->addRow("Host:", hostEdit);
+    form->addRow("Port:", portEdit);
+    form->addRow("", httpsBox);
+    form->addRow("Username:", userEdit);
+    form->addRow("Password:", passEdit);
+    form->addRow("", ignoreSslBox);
+
+    QDialogButtonBox *buttons = new QDialogButtonBox(QDialogButtonBox::Ok | QDialogButtonBox::Cancel);
+    connect(buttons, &QDialogButtonBox::accepted, &dlg, &QDialog::accept);
+    connect(buttons, &QDialogButtonBox::rejected, &dlg, &QDialog::reject);
+
+    QVBoxLayout *vbox = new QVBoxLayout(&dlg);
+    vbox->addLayout(form);
+    vbox->addWidget(buttons);
+
+    if (dlg.exec() != QDialog::Accepted)
+        return false;
+
+    QString host = hostEdit->text().trimmed();
+    int port = portEdit->text().trimmed().toInt();
+    if (port <= 0 || port > 65535) port = 3001;
+
+    settings.beginGroup("ntopng");
+    settings.setValue("host", host);
+    settings.setValue("port", port);
+    settings.setValue("use_https", httpsBox->isChecked());
+    settings.setValue("username", userEdit->text().trimmed());
+    settings.setValue("password", passEdit->text());
+    settings.setValue("ignore_ssl_errors", ignoreSslBox->isChecked());
+    settings.endGroup();
+    settings.sync();
+    return true;
+}
+
+/* ── CA Certificate dialog ──────────────────────────────────────────────── */
+void MainWindow::showCaCertConfigDialog()
+{
+    bool dark = isDarkTheme();
+    QDialog dlg(this);
+    dlg.setWindowTitle("Local CA Certificate");
+    dlg.setMinimumWidth(480);
+
+    if (dark) {
+        dlg.setStyleSheet(
+            "QDialog { background:#1e1e1e; color:#e0e0e0; }"
+            "QLabel  { color:#e0e0e0; }"
+            "QLineEdit { background:#2b2b2b; color:#e0e0e0; border:1px solid #555; padding:3px; border-radius:3px; }"
+            "QPushButton { background:#333; color:#e0e0e0; border:1px solid #555; padding:4px 12px; border-radius:3px; }"
+            "QPushButton:hover { background:#444; }"
+        );
+    }
+
+    QSettings settings(preferencesFilePath(), QSettings::IniFormat);
+    settings.beginGroup("ntopng");
+    QString current = settings.value("ca_cert_path", "").toString();
+    settings.endGroup();
+
+    QFormLayout *form = new QFormLayout;
+    QLineEdit *certEdit = new QLineEdit(current);
+    certEdit->setPlaceholderText("Optional — leave blank to use system trust store");
+    certEdit->setMinimumWidth(300);
+
+    QPushButton *browseBtn = new QPushButton("Browse\u2026");
+    QHBoxLayout *row = new QHBoxLayout;
+    row->addWidget(certEdit);
+    row->addWidget(browseBtn);
+    connect(browseBtn, &QPushButton::clicked, &dlg, [&dlg, certEdit]() {
+        QString path = QFileDialog::getOpenFileName(&dlg, "Select CA Certificate",
+            QString(), "Certificates (*.pem *.crt *.cer);;All files (*)");
+        if (!path.isEmpty())
+            certEdit->setText(path);
+    });
+
+    QLabel *note = new QLabel(
+        "Used when connecting to ntopng with a custom or self-signed CA.\n"
+        "Leave blank to rely on the system trust store.");
+    note->setWordWrap(true);
+    if (dark) note->setStyleSheet("color:#aaa;font-size:11px;");
+    else      note->setStyleSheet("color:#555;font-size:11px;");
+
+    QDialogButtonBox *buttons = new QDialogButtonBox(QDialogButtonBox::Ok | QDialogButtonBox::Cancel);
+    connect(buttons, &QDialogButtonBox::accepted, &dlg, &QDialog::accept);
+    connect(buttons, &QDialogButtonBox::rejected, &dlg, &QDialog::reject);
+
+    QVBoxLayout *vbox = new QVBoxLayout(&dlg);
+    form->addRow("CA Certificate:", row);
+    vbox->addLayout(form);
+    vbox->addWidget(note);
+    vbox->addSpacing(6);
+    vbox->addWidget(buttons);
+
+    if (dlg.exec() != QDialog::Accepted) return;
+
+    settings.beginGroup("ntopng");
+    settings.setValue("ca_cert_path", certEdit->text().trimmed());
+    settings.endGroup();
+    settings.sync();
+}
+
+/* ── Settings dialog ────────────────────────────────────────────────────── */
+void MainWindow::showSettingsDialog()
+{
+    bool dark = isDarkTheme();
+    QDialog dlg(this);
+    dlg.setWindowTitle("PacketCircle Settings");
+    dlg.setMinimumWidth(420);
+
+    if (dark) {
+        dlg.setStyleSheet(
+            "QDialog { background:#1e1e1e; color:#e0e0e0; }"
+            "QLabel  { color:#e0e0e0; }"
+            "QGroupBox { color:#e0e0e0; border:1px solid #444; border-radius:4px; margin-top:8px; }"
+            "QGroupBox::title { subcontrol-origin:margin; left:10px; padding:0 4px; color:#90caf9; }"
+            "QCheckBox { color:#e0e0e0; }"
+            "QCheckBox:disabled { color:#555; }"
+            "QPushButton { background:#333; color:#e0e0e0; border:1px solid #555; padding:4px 14px; border-radius:3px; }"
+            "QPushButton:hover:enabled { background:#444; }"
+            "QPushButton:disabled { color:#555; border-color:#444; background:#2a2a2a; }"
+        );
+    }
+
+    QVBoxLayout *main = new QVBoxLayout(&dlg);
+    main->setSpacing(12);
+    main->setContentsMargins(14, 12, 14, 12);
+
+    /* ── Reset ──────────────────────────────────────────────────────── */
+    QGroupBox *resetGrp = new QGroupBox("Reset");
+    QVBoxLayout *resetBox = new QVBoxLayout(resetGrp);
+    QPushButton *resetBtn = new QPushButton("\u27f3  Reset All Settings to Defaults");
+    resetBtn->setToolTip("Clears all saved settings — window position, display options, and integration toggles");
+    resetBox->addWidget(resetBtn);
+    main->addWidget(resetGrp);
+
+    /* ── Integrations ───────────────────────────────────────────────── */
+    QGroupBox *intGrp = new QGroupBox("Integrations");
+    QVBoxLayout *intBox = new QVBoxLayout(intGrp);
+    intBox->setSpacing(6);
+
+    /* ntopng row */
+    QCheckBox *ntopChk = new QCheckBox("Enable ntopng");
+    ntopChk->setChecked(m_ntopEnabled);
+    QPushButton *cfgNtopBtn = new QPushButton("Configure ntopng\u2026");
+    cfgNtopBtn->setEnabled(m_ntopEnabled);
+
+    QHBoxLayout *ntopRow = new QHBoxLayout;
+    ntopRow->addSpacing(20);
+    ntopRow->addWidget(cfgNtopBtn);
+    ntopRow->addStretch();
+
+    intBox->addWidget(ntopChk);
+    intBox->addLayout(ntopRow);
+    intBox->addSpacing(6);
+
+    /* Malcolm / Arkime row */
+    QCheckBox *malcolmChk = new QCheckBox("Enable Malcolm / Arkime");
+    malcolmChk->setChecked(m_malcolmEnabled);
+    QPushButton *cfgMalcolmBtn = new QPushButton("Configure Malcolm / Arkime\u2026");
+    cfgMalcolmBtn->setEnabled(m_malcolmEnabled);
+
+    QHBoxLayout *malcolmRow = new QHBoxLayout;
+    malcolmRow->addSpacing(20);
+    malcolmRow->addWidget(cfgMalcolmBtn);
+    malcolmRow->addStretch();
+
+    intBox->addWidget(malcolmChk);
+    intBox->addLayout(malcolmRow);
+
+    main->addWidget(intGrp);
+
+    /* ── Security / Certificates ────────────────────────────────────── */
+    QGroupBox *certGrp = new QGroupBox("Security / Certificates");
+    QVBoxLayout *certBox = new QVBoxLayout(certGrp);
+    QPushButton *cfgCertBtn = new QPushButton("Configure Local CA Certificate\u2026");
+    cfgCertBtn->setToolTip("Set a custom CA certificate for TLS connections to ntopng");
+    certBox->addWidget(cfgCertBtn);
+    main->addWidget(certGrp);
+
+    /* ── Close ──────────────────────────────────────────────────────── */
+    main->addStretch();
+    QHBoxLayout *btnRow = new QHBoxLayout;
+    btnRow->addStretch();
+    QPushButton *closeBtn = new QPushButton("Close");
+    btnRow->addWidget(closeBtn);
+    main->addLayout(btnRow);
+
+    /* ── Wiring ─────────────────────────────────────────────────────── */
+
+    /* ntopng checkbox toggles button + main window NTOP button */
+    QObject::connect(ntopChk, &QCheckBox::toggled, [&](bool on) {
+        cfgNtopBtn->setEnabled(on);
+        m_ntopEnabled = on;
+        if (m_sendToNtopBtn) m_sendToNtopBtn->setVisible(on);
+    });
+
+    QObject::connect(cfgNtopBtn, &QPushButton::clicked, [&]() {
+        showNtopngConfigDialog();
+    });
+
+    /* Malcolm / Arkime checkbox toggles button + main window Malcolm button */
+    QObject::connect(malcolmChk, &QCheckBox::toggled, [&](bool on) {
+        cfgMalcolmBtn->setEnabled(on);
+        m_malcolmEnabled = on;
+        if (m_sendToMalcolmBtn) m_sendToMalcolmBtn->setVisible(on);
+    });
+
+    QObject::connect(cfgMalcolmBtn, &QPushButton::clicked, [&]() {
+        showMalcolmConfigDialog();
+    });
+
+    QObject::connect(cfgCertBtn, &QPushButton::clicked, [&]() {
+        showCaCertConfigDialog();
+    });
+
+    QObject::connect(resetBtn, &QPushButton::clicked, [&]() {
+        auto reply = QMessageBox::question(&dlg,
+            "Reset Settings",
+            "Reset all window, display, and integration settings to their defaults?\n\n"
+            "ntopng connection settings (host, port, credentials) are preserved.",
+            QMessageBox::Yes | QMessageBox::Cancel,
+            QMessageBox::Cancel);
+        if (reply != QMessageBox::Yes) return;
+
+        /* Delete the INI file — next load will use all defaults */
+        QFile::remove(preferencesFilePath());
+
+        /* Reset display members */
+        m_topN    = 10;
+        m_useBytes = FALSE;
+        m_useMAC   = FALSE;
+        m_ntopEnabled    = true;
+        m_malcolmEnabled = false;
+
+        /* Reset toolbar controls */
+        if (m_top10Btn)  m_top10Btn->setChecked(true);
+        if (m_top25Btn)  m_top25Btn->setChecked(false);
+        if (m_top50Btn)  m_top50Btn->setChecked(false);
+        if (m_packetsBtn) m_packetsBtn->setChecked(true);
+        if (m_bytesBtn)   m_bytesBtn->setChecked(false);
+        if (m_ipBtn)  m_ipBtn->setChecked(true);
+        if (m_macBtn) m_macBtn->setChecked(false);
+        if (m_circleBtn) m_circleBtn->setChecked(true);
+        if (m_tableBtn)  m_tableBtn->setChecked(false);
+        if (m_viewStack) m_viewStack->setCurrentIndex(0);
+        if (m_lineThicknessCheckBox) m_lineThicknessCheckBox->setChecked(false);
+        updateSearchBarForMode();
+
+        /* Reset integrations */
+        if (m_sendToNtopBtn)    m_sendToNtopBtn->setVisible(true);
+        if (m_sendToMalcolmBtn) m_sendToMalcolmBtn->setVisible(false);
+        ntopChk->setChecked(true);
+        cfgNtopBtn->setEnabled(true);
+        malcolmChk->setChecked(false);
+        cfgMalcolmBtn->setEnabled(false);
+
+        /* Reset window size */
+        resize(1280, 780);
+
+        QMessageBox::information(&dlg, "Reset Complete",
+            "Settings have been reset to defaults.");
+    });
+
+    QObject::connect(closeBtn, &QPushButton::clicked, &dlg, &QDialog::reject);
+
+    dlg.exec();
+
+    /* Persist whatever state the checkboxes were left in */
+    savePreferences();
+}
+
+void MainWindow::onSendToNtopClicked()
+{
+    /* 1. Get capture file path via bridge */
+    const char *path_c = circle_vis_get_capture_filename();
+    if (!path_c) {
+        QMessageBox::warning(this, "Send to NTOP",
+            "No capture file is currently loaded.\nPlease open a PCAP file in Wireshark first.");
+        return;
+    }
+    QString capturePath = QString::fromUtf8(path_c);
+    g_free((gpointer)path_c);
+
+    /* 2. Check file size (ntopng limit: 25 MB) */
+    QFileInfo fi(capturePath);
+    if (!fi.exists()) {
+        QMessageBox::warning(this, "Send to NTOP",
+            QString("Capture file not found:\n%1").arg(capturePath));
+        return;
+    }
+    const qint64 NTOP_MAX_BYTES = 26214400LL; /* 25 MB */
+    if (fi.size() > NTOP_MAX_BYTES) {
+        QMessageBox::warning(this, "Send to NTOP",
+            QString("Capture file is %1 MB — ntopng has a 25 MB upload limit.\n\n"
+                    "Consider applying a display filter first, then saving a filtered copy.")
+                .arg(fi.size() / 1048576));
+        return;
+    }
+
+    /* 3. Load ntopng settings */
+    QSettings settings(preferencesFilePath(), QSettings::IniFormat);
+    settings.beginGroup("ntopng");
+    QString host          = settings.value("host", "").toString();
+    int     port          = settings.value("port", 3001).toInt();
+    bool    useHttps      = settings.value("use_https", true).toBool();
+    QString username      = settings.value("username", "").toString();
+    QString password      = settings.value("password", "").toString();
+    bool    ignoreSsl     = settings.value("ignore_ssl_errors", true).toBool();
+    QString caCertPath    = settings.value("ca_cert_path", "").toString();
+    settings.endGroup();
+
+    /* 4. Prompt for config if missing */
+    if (host.isEmpty() || username.isEmpty()) {
+        if (!showNtopngConfigDialog()) return;
+        settings.beginGroup("ntopng");
+        host       = settings.value("host", "").toString();
+        port       = settings.value("port", 3001).toInt();
+        useHttps   = settings.value("use_https", true).toBool();
+        username   = settings.value("username", "").toString();
+        password   = settings.value("password", "").toString();
+        ignoreSsl  = settings.value("ignore_ssl_errors", true).toBool();
+        caCertPath = settings.value("ca_cert_path", "").toString();
+        settings.endGroup();
+    }
+
+    if (host.isEmpty() || username.isEmpty()) {
+        QMessageBox::warning(this, "Send to NTOP",
+            "Please configure ntopng host and credentials first.\n\n"
+            "Tip: Right-click the 'Send to NTOP' button to open settings.");
+        return;
+    }
+
+    /* 5. Upload */
+    m_sendToNtopBtn->setEnabled(false);
+    m_sendToNtopBtn->setText("Uploading...");
+    uploadToNtopng(capturePath, host, port, useHttps, username, password, ignoreSsl, caCertPath);
+}
+
+void MainWindow::uploadToNtopng(const QString &filePath, const QString &host, int port,
+                                 bool useHttps, const QString &username, const QString &password,
+                                 bool ignoreSslErrors, const QString &caCertPath)
+{
+    static const QString NTOP_TIP =
+        "\n\nTip: Right-click the 'Send to NTOP' button to reconfigure settings.";
+
+    QString scheme  = useHttps ? "https" : "http";
+    QString baseUrl = QString("%1://%2:%3").arg(scheme, host).arg(port);
+    QUrl uploadUrl(baseUrl + "/lua/rest/v2/add/ntopng/analyze_pcap.lua?create_new_interface=true");
+
+    /* Read the entire capture file into memory (25 MB guard applied above). */
+    QFile file(filePath);
+    if (!file.open(QIODevice::ReadOnly)) {
+        QMessageBox::warning(this, "Send to NTOP",
+            QString("Cannot read capture file:\n%1%2").arg(filePath, NTOP_TIP));
+        m_sendToNtopBtn->setEnabled(true);
+        m_sendToNtopBtn->setText("Send to NTOP");
+        return;
+    }
+    QByteArray fileData = file.readAll();
+    file.close();
+
+    /* Build the multipart body manually as a single QByteArray.
+     *
+     * QHttpMultiPart falls back to Transfer-Encoding: chunked even when all
+     * part bodies are in-memory, because it streams through an internal device.
+     * ntopng's embedded HTTP server (mongoose) does not support chunked
+     * incoming bodies: it reads until the parser stalls, returns 400, and the
+     * remaining bytes are misinterpreted as a second HTTP request — producing
+     * the doubled response seen in the logs.
+     *
+     * By building the body ourselves and posting a plain QByteArray we force
+     * Qt to set Content-Length and never use chunked encoding. */
+    /* Filename includes a short datetime stamp so each capture gets its own
+     * slot on ntopng (e.g. "PacketCircle-20260316-143022.pcap").
+     * The 500 fallback still reuses an existing interface if the exact same
+     * filename was already uploaded in this session. */
+    QString safeFilename = QStringLiteral("PacketCircle-") +
+                           QDateTime::currentDateTime().toString("yyyyMMdd-HHmmss") +
+                           QStringLiteral(".pcap");
+    QByteArray boundary = "----PacketCircleBoundary" +
+                          QByteArray::number(QDateTime::currentMSecsSinceEpoch());
+    QByteArray body;
+    body += "--" + boundary + "\r\n";
+    body += "Content-Disposition: form-data; name=\"pcap_file\"; filename=\""
+            + safeFilename.toUtf8() + "\"\r\n";
+    body += "\r\n";
+    body += fileData;
+    body += "\r\n--" + boundary + "--\r\n";
+
+    /* Build request with Basic Auth */
+    QNetworkRequest request(uploadUrl);
+    QByteArray credentials = (username + ":" + password).toUtf8().toBase64();
+    request.setRawHeader("Authorization", "Basic " + credentials);
+    request.setHeader(QNetworkRequest::ContentTypeHeader,
+        "multipart/form-data; boundary=" + boundary);
+    request.setHeader(QNetworkRequest::ContentLengthHeader, body.size());
+
+    /* SSL configuration */
+    QSslConfiguration sslConf = QSslConfiguration::defaultConfiguration();
+    /* Accept TLS 1.0+ so we negotiate with whatever the server offers */
+    sslConf.setProtocol(QSsl::TlsV1_2OrLater);
+    if (!caCertPath.isEmpty()) {
+        QList<QSslCertificate> certs = QSslCertificate::fromPath(caCertPath);
+        if (!certs.isEmpty()) {
+            sslConf.addCaCertificates(certs);
+            qDebug() << "[NTOP] Loaded" << certs.size() << "CA cert(s) from" << caCertPath;
+        } else {
+            qDebug() << "[NTOP] WARNING: No certificates loaded from" << caCertPath;
+        }
+    }
+    if (ignoreSslErrors)
+        sslConf.setPeerVerifyMode(QSslSocket::VerifyNone);
+    request.setSslConfiguration(sslConf);
+
+    if (!m_networkManager)
+        m_networkManager = new QNetworkAccessManager(this);
+
+    qDebug() << "[NTOP] POST" << uploadUrl.toString()
+             << "| file:" << filePath
+             << "| user:" << username
+             << "| ignoreSsl:" << ignoreSslErrors
+             << "| caCert:" << (caCertPath.isEmpty() ? "(none)" : caCertPath);
+
+    QNetworkReply *reply = m_networkManager->post(request, body);
+
+    /* ignoreSslErrors() MUST be called synchronously right after post(),
+     * before the event loop runs — calling it inside the sslErrors signal
+     * lambda is too late and the handshake will have already been aborted. */
+    if (ignoreSslErrors)
+        reply->ignoreSslErrors();
+
+    /* SSL error logging (for diagnostics even when ignoring) */
+    connect(reply, &QNetworkReply::sslErrors, reply,
+        [ignoreSslErrors](const QList<QSslError> &errors) {
+            qDebug() << "[NTOP] SSL errors" << (ignoreSslErrors ? "(ignored):" : "(NOT ignored — check cert):");
+            for (const QSslError &e : errors)
+                qDebug() << "  " << e.errorString();
+        });
+
+    connect(reply, &QNetworkReply::finished, this,
+        [this, reply, uploadUrl, baseUrl, safeFilename, sslConf, credentials, ignoreSslErrors]() {
+        reply->deleteLater();
+        m_sendToNtopBtn->setEnabled(true);
+        m_sendToNtopBtn->setText("Send to NTOP");
+
+        static const QString NTOP_TIP =
+            "\n\nTip: Right-click the 'Send to NTOP' button to reconfigure settings.";
+
+        int httpStatus = reply->attribute(QNetworkRequest::HttpStatusCodeAttribute).toInt();
+        QByteArray responseData = reply->readAll();
+
+        qDebug() << "[NTOP] HTTP status:" << httpStatus;
+        qDebug() << "[NTOP] Network error code:" << reply->error()
+                 << reply->errorString();
+        qDebug() << "[NTOP] Response body:" << responseData.left(1000);
+
+        /* ---- Parse the JSON body (present even on HTTP error responses) ---- */
+        QJsonObject respObj;
+        QJsonDocument respDoc = QJsonDocument::fromJson(responseData);
+        if (!respDoc.isNull() && respDoc.isObject())
+            respObj = respDoc.object();
+
+        QString rcStr = respObj["rc_str"].toString();
+
+        /* ---- 500 INTERNAL_ERROR = "same pcap already uploaded" ------------- */
+        if (httpStatus == 500 && rcStr == "INTERNAL_ERROR") {
+            qDebug() << "[NTOP] PCAP already uploaded — looking up existing interface for:" << safeFilename;
+
+            QUrl ifacesUrl(baseUrl + "/lua/rest/v2/get/ntopng/interfaces.lua");
+            QNetworkRequest ifaceReq(ifacesUrl);
+            ifaceReq.setRawHeader("Authorization", "Basic " + credentials);
+            ifaceReq.setSslConfiguration(sslConf);
+
+            QNetworkReply *ifaceReply = m_networkManager->get(ifaceReq);
+            if (ignoreSslErrors)
+                ifaceReply->ignoreSslErrors();
+
+            connect(ifaceReply, &QNetworkReply::finished, this,
+                [this, ifaceReply, baseUrl, safeFilename, sslConf, credentials, ignoreSslErrors]() {
+                ifaceReply->deleteLater();
+
+                static const QString NTOP_TIP =
+                    "\n\nTip: Right-click the 'Send to NTOP' button to reconfigure settings.";
+
+                QJsonDocument ifDoc = QJsonDocument::fromJson(ifaceReply->readAll());
+                if (!ifDoc.isNull() && ifDoc.isObject()) {
+                    const QJsonArray ifaces = ifDoc.object()["rsp"].toArray();
+                    for (const QJsonValue &v : ifaces) {
+                        QJsonObject iface = v.toObject();
+                        if (iface["is_pcap_interface"].toBool() &&
+                            iface["name"].toString() == safeFilename) {
+                            int ifid = iface["ifid"].toInt(-1);
+                            if (ifid >= 0) {
+                                /* Activate the interface */
+                                QUrl activateUrl(
+                                    QString("%1/lua/rest/v2/set/ntopng/active_interface.lua?ifid=%2")
+                                    .arg(baseUrl).arg(ifid));
+                                QNetworkRequest activateReq(activateUrl);
+                                activateReq.setRawHeader("Authorization", "Basic " + credentials);
+                                activateReq.setSslConfiguration(sslConf);
+                                QNetworkReply *actReply = m_networkManager->get(activateReq);
+                                if (ignoreSslErrors)
+                                    actReply->ignoreSslErrors();
+                                connect(actReply, &QNetworkReply::finished,
+                                        actReply, &QObject::deleteLater);
+                                qDebug() << "[NTOP] Sent activate request for existing ifid" << ifid;
+
+                                /* Open the Apps (nDPI) page */
+                                QString resultsUrl =
+                                    QString("%1/lua/if_stats.lua?ifid=%2&page=ndpi")
+                                    .arg(baseUrl).arg(ifid);
+                                qDebug() << "[NTOP] Found existing ifid" << ifid << "— opening:" << resultsUrl;
+                                QDesktopServices::openUrl(QUrl(resultsUrl));
+                                return;
+                            }
+                        }
+                    }
+                }
+                /* Interface not found in list */
+                QMessageBox::warning(this, "Send to NTOP",
+                    QString("This PCAP was already uploaded to ntopng but its interface "
+                            "could not be found in the interface list.\n\n"
+                            "File: %1%2").arg(safeFilename, NTOP_TIP));
+            });
+            return;
+        }
+
+        /* ---- Generic HTTP error ------------------------------------------- */
+        if (reply->error() != QNetworkReply::NoError) {
+            QString ntopMsg = respObj["rc_str_hr"].toString();
+            if (ntopMsg.isEmpty()) ntopMsg = rcStr;
+            if (ntopMsg.isEmpty()) ntopMsg = QString::fromUtf8(responseData.left(200));
+
+            QMessageBox::warning(this, "Send to NTOP",
+                QString("Upload failed (HTTP %1):\n%2\n\nntopng says: %3\n\nURL: %4%5")
+                    .arg(httpStatus)
+                    .arg(reply->errorString())
+                    .arg(ntopMsg)
+                    .arg(uploadUrl.toString())
+                    .arg(NTOP_TIP));
+            return;
+        }
+
+        /* ---- Unexpected non-JSON response ---------------------------------- */
+        if (respObj.isEmpty()) {
+            QMessageBox::warning(this, "Send to NTOP",
+                QString("Unexpected response from ntopng (HTTP %1).\n\nURL: %2\n\nResponse:\n%3%4")
+                    .arg(httpStatus)
+                    .arg(uploadUrl.toString())
+                    .arg(QString::fromUtf8(responseData.left(300)))
+                    .arg(NTOP_TIP));
+            return;
+        }
+
+        /* ---- ntopng-level error (rc != 0) ---------------------------------- */
+        int rc = respObj["rc"].toInt(-1);
+        qDebug() << "[NTOP] JSON rc:" << rc << "| rsp:" << respObj["rsp"];
+        if (rc != 0) {
+            QString errMsg = respObj["rc_str_hr"].toString();
+            if (errMsg.isEmpty()) errMsg = rcStr;
+            QMessageBox::warning(this, "Send to NTOP",
+                QString("ntopng returned an error (rc=%1):\n%2%3")
+                    .arg(rc).arg(errMsg).arg(NTOP_TIP));
+            return;
+        }
+
+        /* ---- Success ------------------------------------------------------- */
+        int ifid = respObj["rsp"].toObject()["new_ifid"].toInt(-1);
+        if (ifid < 0) {
+            qDebug() << "[NTOP] rsp object:" << respObj["rsp"];
+            QMessageBox::warning(this, "Send to NTOP",
+                QString("ntopng accepted the file but returned an invalid interface ID.\n\nrsp: %1%2")
+                    .arg(QString::fromUtf8(QJsonDocument(respObj["rsp"].toObject()).toJson()))
+                    .arg(NTOP_TIP));
+            return;
+        }
+
+        /* Activate the new interface so ntopng starts processing it */
+        QUrl activateUrl(QString("%1/lua/rest/v2/set/ntopng/active_interface.lua?ifid=%2")
+                         .arg(baseUrl).arg(ifid));
+        QNetworkRequest activateReq(activateUrl);
+        activateReq.setRawHeader("Authorization", "Basic " + credentials);
+        activateReq.setSslConfiguration(sslConf);
+        QNetworkReply *actReply = m_networkManager->get(activateReq);
+        if (ignoreSslErrors)
+            actReply->ignoreSslErrors();
+        connect(actReply, &QNetworkReply::finished, actReply, &QObject::deleteLater);
+        qDebug() << "[NTOP] Sent activate request for ifid" << ifid;
+
+        /* Open the Apps (nDPI protocol breakdown) page for the new interface */
+        QString resultsUrl = QString("%1/lua/if_stats.lua?ifid=%2&page=ndpi")
+                             .arg(baseUrl).arg(ifid);
+        qDebug() << "[NTOP] Success! Opening:" << resultsUrl;
+        QDesktopServices::openUrl(QUrl(resultsUrl));
+    });
+}
+
+/* ══════════════════════════════════════════════════════════════════════════
+ * Malcolm / Arkime Integration
+ * ══════════════════════════════════════════════════════════════════════════ */
+
+/* Read the first and last packet timestamps from a plain PCAP file.
+ * Returns true if at least one packet was found; sets *startTime and
+ * *stopTime to Unix epoch seconds.  Works with both little-endian and
+ * big-endian PCAP files.  pcapng (magic 0x0a0d0d0a) is not supported. */
+static bool pcap_read_timestamps(const QString &path,
+                                 quint32 *startTime, quint32 *stopTime)
+{
+    QFile f(path);
+    if (!f.open(QIODevice::ReadOnly))
+        return false;
+
+    /* Read only the global header first (24 bytes) */
+    QByteArray hdr = f.read(24);
+    if (hdr.size() < 24) { f.close(); return false; }
+
+    const uchar *h = (const uchar *)hdr.constData();
+    quint32 magic = (quint32)h[0] | ((quint32)h[1]<<8) |
+                    ((quint32)h[2]<<16) | ((quint32)h[3]<<24);
+
+    bool swapped = false;
+    if (magic == 0xa1b2c3d4 || magic == 0xa1b23c4d) {
+        swapped = false; /* little-endian PCAP (native on x86/arm) */
+    } else if (magic == 0xd4c3b2a1 || magic == 0x4d3cb2a1) {
+        swapped = true;  /* big-endian PCAP */
+    } else {
+        f.close(); return false; /* unknown / pcapng */
+    }
+
+    auto le32 = [&](const uchar *p) -> quint32 {
+        return (quint32)p[0] | ((quint32)p[1]<<8) |
+               ((quint32)p[2]<<16) | ((quint32)p[3]<<24);
+    };
+    auto be32 = [&](const uchar *p) -> quint32 {
+        return ((quint32)p[0]<<24) | ((quint32)p[1]<<16) |
+               ((quint32)p[2]<<8)  | (quint32)p[3];
+    };
+    auto rd32 = [&](const uchar *p) -> quint32 {
+        return swapped ? be32(p) : le32(p);
+    };
+
+    quint32 first = 0, last = 0;
+    bool found = false;
+
+    /* Stream packet records without loading the whole file */
+    while (!f.atEnd()) {
+        QByteArray rechdr = f.read(16);
+        if (rechdr.size() < 16) break;
+        const uchar *r = (const uchar *)rechdr.constData();
+        quint32 ts_sec  = rd32(r);      /* seconds since epoch */
+        quint32 incl_len = rd32(r + 8); /* captured length     */
+
+        if (incl_len > 65536) break;    /* sanity — corrupt data */
+
+        if (!found) { first = ts_sec; found = true; }
+        last = ts_sec;
+
+        /* Skip packet data */
+        f.seek(f.pos() + incl_len);
+    }
+    f.close();
+
+    if (!found) return false;
+    *startTime = first;
+    *stopTime  = last;
+    return true;
+}
+
+bool MainWindow::showMalcolmConfigDialog()
+{
+    bool dark = isDarkTheme();
+    QDialog dlg(this);
+    dlg.setWindowTitle("Configure Malcolm / Arkime");
+    dlg.setMinimumWidth(400);
+
+    if (dark) {
+        dlg.setStyleSheet(
+            "QDialog { background:#1e1e1e; color:#e0e0e0; }"
+            "QLabel  { color:#e0e0e0; }"
+            "QLineEdit { background:#2d2d2d; color:#e0e0e0; border:1px solid #555; padding:3px; }"
+            "QCheckBox { color:#e0e0e0; }"
+            "QPushButton { background:#333; color:#e0e0e0; border:1px solid #555;"
+            "  padding:4px 14px; border-radius:3px; }"
+            "QPushButton:hover { background:#444; }"
+        );
+    }
+
+    QSettings settings(preferencesFilePath(), QSettings::IniFormat);
+    settings.beginGroup("malcolm");
+    QString savedHost    = settings.value("host",             "").toString();
+    int     savedPort    = settings.value("port",             443).toInt();
+    bool    savedHttps   = settings.value("use_https",        true).toBool();
+    QString savedUser    = settings.value("username",         "").toString();
+    QString savedPass    = settings.value("password",         "").toString();
+    bool    savedIgnSsl  = settings.value("ignore_ssl_errors",true).toBool();
+    settings.endGroup();
+
+    QVBoxLayout *main = new QVBoxLayout(&dlg);
+    main->setSpacing(10);
+    main->setContentsMargins(14, 12, 14, 12);
+
+    QFormLayout *form = new QFormLayout;
+    form->setFieldGrowthPolicy(QFormLayout::ExpandingFieldsGrow);
+
+    QLineEdit *hostEdit = new QLineEdit(savedHost);
+    hostEdit->setPlaceholderText("e.g. malcolm.example.com");
+    form->addRow("Host:", hostEdit);
+
+    QLineEdit *portEdit = new QLineEdit(QString::number(savedPort));
+    portEdit->setPlaceholderText("443");
+    form->addRow("Port:", portEdit);
+
+    QCheckBox *httpsChk = new QCheckBox("Use HTTPS");
+    httpsChk->setChecked(savedHttps);
+    form->addRow("", httpsChk);
+
+    QLineEdit *userEdit = new QLineEdit(savedUser);
+    userEdit->setPlaceholderText("Malcolm username");
+    form->addRow("Username:", userEdit);
+
+    QLineEdit *passEdit = new QLineEdit(savedPass);
+    passEdit->setEchoMode(QLineEdit::Password);
+    passEdit->setPlaceholderText("Malcolm password");
+    form->addRow("Password:", passEdit);
+
+    QCheckBox *ignSslChk = new QCheckBox("Ignore SSL certificate errors");
+    ignSslChk->setChecked(savedIgnSsl);
+    ignSslChk->setToolTip("Enable for self-signed certificates (e.g. lab deployments)");
+    form->addRow("", ignSslChk);
+
+    main->addLayout(form);
+    main->addSpacing(4);
+
+    QDialogButtonBox *bb = new QDialogButtonBox(
+        QDialogButtonBox::Ok | QDialogButtonBox::Cancel);
+    if (dark) {
+        bb->setStyleSheet(
+            "QPushButton { background:#333; color:#e0e0e0; border:1px solid #555;"
+            "  padding:4px 14px; border-radius:3px; }"
+            "QPushButton:hover { background:#444; }"
+        );
+    }
+    main->addWidget(bb);
+
+    QObject::connect(bb, &QDialogButtonBox::accepted, &dlg, &QDialog::accept);
+    QObject::connect(bb, &QDialogButtonBox::rejected, &dlg, &QDialog::reject);
+
+    if (dlg.exec() != QDialog::Accepted)
+        return false;
+
+    QString host = hostEdit->text().trimmed();
+    int     port = portEdit->text().toInt();
+    if (port <= 0 || port > 65535) port = 443;
+
+    settings.beginGroup("malcolm");
+    settings.setValue("host",              host);
+    settings.setValue("port",              port);
+    settings.setValue("use_https",         httpsChk->isChecked());
+    settings.setValue("username",          userEdit->text());
+    settings.setValue("password",          passEdit->text());
+    settings.setValue("ignore_ssl_errors", ignSslChk->isChecked());
+    settings.endGroup();
+    settings.sync();
+
+    return !host.isEmpty();
+}
+
+void MainWindow::onSendToMalcolmClicked()
+{
+    /* 1. Get capture file path via bridge */
+    const char *path_c = circle_vis_get_capture_filename();
+    if (!path_c) {
+        QMessageBox::warning(this, "Send to Malcolm",
+            "No capture file is currently loaded.\n"
+            "Please open a PCAP file in Wireshark first.");
+        return;
+    }
+    QString capturePath = QString::fromUtf8(path_c);
+    g_free((gpointer)path_c);
+
+    /* 2. Verify file exists */
+    QFileInfo fi(capturePath);
+    if (!fi.exists()) {
+        QMessageBox::warning(this, "Send to Malcolm",
+            QString("Capture file not found:\n%1").arg(capturePath));
+        return;
+    }
+
+    /* 3. Load Malcolm settings */
+    QSettings settings(preferencesFilePath(), QSettings::IniFormat);
+    settings.beginGroup("malcolm");
+    QString host       = settings.value("host",             "").toString();
+    int     port       = settings.value("port",             443).toInt();
+    bool    useHttps   = settings.value("use_https",        true).toBool();
+    QString username   = settings.value("username",         "").toString();
+    QString password   = settings.value("password",         "").toString();
+    bool    ignoreSsl  = settings.value("ignore_ssl_errors",true).toBool();
+    settings.endGroup();
+
+    /* 4. Prompt for configuration if not set */
+    if (host.isEmpty() || username.isEmpty()) {
+        int ret = QMessageBox::question(this, "Send to Malcolm",
+            "Malcolm / Arkime is not yet configured.\n"
+            "Open settings now?",
+            QMessageBox::Yes | QMessageBox::Cancel,
+            QMessageBox::Yes);
+        if (ret != QMessageBox::Yes) return;
+        if (!showMalcolmConfigDialog()) return;
+
+        settings.beginGroup("malcolm");
+        host      = settings.value("host",             "").toString();
+        port      = settings.value("port",             443).toInt();
+        useHttps  = settings.value("use_https",        true).toBool();
+        username  = settings.value("username",         "").toString();
+        password  = settings.value("password",         "").toString();
+        ignoreSsl = settings.value("ignore_ssl_errors",true).toBool();
+        settings.endGroup();
+
+        if (host.isEmpty()) return;
+    }
+
+    /* 5. Extract first/last packet timestamps for Arkime filter */
+    quint32 startTime = 0, stopTime = 0;
+    bool hasTimestamps = pcap_read_timestamps(capturePath, &startTime, &stopTime);
+    if (!hasTimestamps) {
+        qDebug() << "[MALCOLM] Could not extract PCAP timestamps from" << capturePath;
+        /* Continue without timestamps — Arkime will open without a time filter */
+    }
+
+    /* 6. Disable button and start upload */
+    m_sendToMalcolmBtn->setEnabled(false);
+    m_sendToMalcolmBtn->setText("Uploading...");
+    uploadToMalcolm(capturePath, host, port, useHttps, username, password,
+                    ignoreSsl, startTime, stopTime);
+}
+
+void MainWindow::uploadToMalcolm(const QString &filePath,
+                                  const QString &host, int port,
+                                  bool useHttps,
+                                  const QString &username, const QString &password,
+                                  bool ignoreSslErrors,
+                                  quint32 startTime, quint32 stopTime)
+{
+    QString scheme  = useHttps ? "https" : "http";
+    QString baseUrl = QString("%1://%2:%3").arg(scheme, host).arg(port);
+
+    /* Embed credentials in the URL — Qt QNAM reads user:pass@host and injects
+     * the Authorization header on every request including after redirects.
+     * This is the most reliable Basic Auth approach in Qt. */
+    QUrl uploadUrl;
+    uploadUrl.setScheme(scheme);
+    uploadUrl.setHost(host);
+    uploadUrl.setPort(port);
+    uploadUrl.setPath("/upload/server/php/submit.php");
+    uploadUrl.setUserName(username);
+    uploadUrl.setPassword(password);
+
+    /* baseUrl without credentials, used for error messages and Arkime URL */
+    QString baseUrlClean = QString("%1://%2:%3").arg(scheme, host).arg(port);
+
+    /* Read the capture file into memory */
+    QFile file(filePath);
+    if (!file.open(QIODevice::ReadOnly)) {
+        QMessageBox::warning(this, "Send to Malcolm",
+            QString("Cannot read capture file:\n%1").arg(filePath));
+        m_sendToMalcolmBtn->setEnabled(true);
+        m_sendToMalcolmBtn->setText("Send to Malcolm");
+        return;
+    }
+    QByteArray fileData = file.readAll();
+    file.close();
+
+    /* Build filename with datetime stamp */
+    QString safeFilename = QStringLiteral("PacketCircle-") +
+                           QDateTime::currentDateTime().toString("yyyyMMdd-HHmmss") +
+                           QStringLiteral(".pcap");
+
+    /* Build multipart body manually (avoid chunked transfer encoding) */
+    QByteArray boundary = "----MalcolmBoundary" +
+                          QByteArray::number(QDateTime::currentMSecsSinceEpoch());
+    QByteArray body;
+    /* tags field — labels all sessions from this upload in Arkime */
+    body += "--" + boundary + "\r\n";
+    body += "Content-Disposition: form-data; name=\"tags\"\r\n\r\nPacketCircle\r\n";
+    /* filepond file field */
+    body += "--" + boundary + "\r\n";
+    body += "Content-Disposition: form-data; name=\"filepond\"; filename=\""
+            + safeFilename.toUtf8() + "\"\r\n";
+    body += "Content-Type: application/vnd.tcpdump.pcap\r\n";
+    body += "\r\n";
+    body += fileData;
+    body += "\r\n--" + boundary + "--\r\n";
+
+    /* Build request — credentials are in the URL so QNAM handles auth natively.
+     * Also set a pre-emptive Authorization header to avoid the round-trip. */
+    QNetworkRequest request(uploadUrl);
+    QByteArray credentials = (username + ":" + password).toUtf8().toBase64();
+    request.setRawHeader("Authorization", "Basic " + credentials);
+    request.setHeader(QNetworkRequest::ContentTypeHeader,
+        "multipart/form-data; boundary=" + boundary);
+    request.setHeader(QNetworkRequest::ContentLengthHeader, body.size());
+    request.setAttribute(QNetworkRequest::RedirectPolicyAttribute,
+                         QNetworkRequest::SameOriginRedirectPolicy);
+
+    /* SSL configuration */
+    QSslConfiguration sslConf = QSslConfiguration::defaultConfiguration();
+    sslConf.setProtocol(QSsl::TlsV1_2OrLater);
+    if (ignoreSslErrors)
+        sslConf.setPeerVerifyMode(QSslSocket::VerifyNone);
+    request.setSslConfiguration(sslConf);
+
+    if (!m_networkManager)
+        m_networkManager = new QNetworkAccessManager(this);
+
+    /* Also wire authenticationRequired so Qt's challenge path works too */
+    auto authConn = std::make_shared<QMetaObject::Connection>();
+    *authConn = connect(m_networkManager, &QNetworkAccessManager::authenticationRequired,
+        this, [username, password, authConn](QNetworkReply*, QAuthenticator *auth) {
+            auth->setUser(username);
+            auth->setPassword(password);
+            QObject::disconnect(*authConn);
+        });
+
+    qDebug() << "[MALCOLM] POST" << baseUrlClean + "/upload/server/php/submit.php"
+             << "| file:" << filePath
+             << "| user:" << username
+             << "| passEmpty:" << password.isEmpty()
+             << "| ignoreSsl:" << ignoreSslErrors
+             << "| startTime:" << startTime << "stopTime:" << stopTime;
+
+    QNetworkReply *reply = m_networkManager->post(request, body);
+
+    if (ignoreSslErrors)
+        reply->ignoreSslErrors();
+
+    connect(reply, &QNetworkReply::sslErrors, reply,
+        [ignoreSslErrors](const QList<QSslError> &errors) {
+            qDebug() << "[MALCOLM] SSL errors"
+                     << (ignoreSslErrors ? "(ignored):" : "(NOT ignored):");
+            for (const QSslError &e : errors)
+                qDebug() << "  " << e.errorString();
+        });
+
+    connect(reply, &QNetworkReply::finished, this,
+        [this, reply, baseUrlClean, startTime, stopTime]() {
+        reply->deleteLater();
+        m_sendToMalcolmBtn->setEnabled(true);
+        m_sendToMalcolmBtn->setText("Send to Malcolm");
+
+        int httpStatus = reply->attribute(
+            QNetworkRequest::HttpStatusCodeAttribute).toInt();
+        QByteArray responseData = reply->readAll();
+
+        qDebug() << "[MALCOLM] HTTP status:" << httpStatus;
+        qDebug() << "[MALCOLM] Network error:" << reply->error()
+                 << reply->errorString();
+        qDebug() << "[MALCOLM] Response body:" << responseData.left(500);
+
+        if (reply->error() != QNetworkReply::NoError) {
+            QMessageBox::warning(this, "Send to Malcolm",
+                QString("Upload failed (HTTP %1):\n%2\n\nURL: %3\n\n"
+                        "Check host, port, and credentials in Settings \u2699.")
+                    .arg(httpStatus)
+                    .arg(reply->errorString())
+                    .arg(baseUrlClean + "/upload/server/php/submit.php"));
+            return;
+        }
+
+        /* Success — open Arkime sessions view with time filter + PacketCircle tag */
+        QString arkimeUrl;
+        /* expression=tags==PacketCircle filters to sessions from this upload.
+         * Malcolm auto-tags based on filename components and the explicit tags
+         * field we posted, so "PacketCircle" will always be present. */
+        QString expr = QUrl::toPercentEncoding("tags==PacketCircle");
+        if (startTime > 0 && stopTime > 0) {
+            /* Add a 30-second buffer on each side to account for clock drift */
+            quint32 t0 = (startTime > 30) ? startTime - 30 : 0;
+            quint32 t1 = stopTime + 30;
+            arkimeUrl = QString("%1/arkime/sessions?startTime=%2&stopTime=%3&expression=%4")
+                            .arg(baseUrlClean).arg(t0).arg(t1).arg(expr);
+        } else {
+            arkimeUrl = QString("%1/arkime/sessions?expression=%2")
+                            .arg(baseUrlClean, expr);
+        }
+
+        qDebug() << "[MALCOLM] Upload succeeded. Opening Arkime:" << arkimeUrl;
+
+        QMessageBox::information(this, "Send to Malcolm",
+            QString("Upload complete!\n\n"
+                    "Opening Arkime sessions view%1.\n\n"
+                    "\u23f3  Malcolm processes uploaded PCAPs in the background \u2014 "
+                    "it may take a moment before sessions appear.\n"
+                    "If Arkime shows no results, wait a few seconds and reload the browser page.")
+                .arg(startTime > 0
+                     ? QString(" filtered to the capture time window (%1 \u2013 %2)")
+                           .arg(QDateTime::fromSecsSinceEpoch(startTime)
+                                    .toString("yyyy-MM-dd HH:mm:ss"))
+                           .arg(QDateTime::fromSecsSinceEpoch(stopTime)
+                                    .toString("HH:mm:ss"))
+                     : QString()));
+
+        QDesktopServices::openUrl(QUrl(arkimeUrl));
+    });
+}
+
 void MainWindow::onReloadDataClicked()
 {
     qDebug() << "MainWindow::onReloadDataClicked: Reloading data";
-    /* Call the bridge function to reload data from current capture file */
     circle_vis_reload_data();
 }
 
@@ -2730,15 +3866,32 @@ void MainWindow::showSearchHelp()
         html += "<table cellpadding='0' cellspacing='0'>";
         html += krow("ARP",                  "ARP / RARP broadcasts");
         html += krow("ICMP",                 "ICMP / ICMPv6 echo, errors");
+        html += krow("DNS",                  "DNS (port 53) — shows DNS info popup");
+        html += krow("DHCP",                 "DHCP / BOOTP (ports 67 / 68) — shows DHCP info popup");
         html += krow("TCP",                  "All TCP sessions");
         html += krow("UDP",                  "All UDP flows");
-        html += krow("DHCP",                 "DHCP / BOOTP (ports 67 / 68)");
         html += krow("IGMP",                 "Multicast group management (v1 / v2 / v3)");
         html += krow("GRE",                  "GRE tunnel endpoints");
         html += krow("IPSEC  /  ESP  /  AH", "IPsec encrypted / authenticated traffic");
         html += krow("Routing",              "RIP, OSPF, BGP, EIGRP, IS-IS, PIM, VRRP, HSRP");
-        html += krow("Infrastructure",       "All routing + bridge/switching + GRE + DHCP (STP, LLDP, LACP, CDP, VTP, MPLS + routing)");
+        html += krow("Infrastructure",       "All routing + bridge/switching + GRE + DHCP");
         html += krow("Unknown",              "Unclassified / generic IP pairs");
+        html += "</table>";
+
+        html += QString("<p style='color:%1; margin:6px 0 2px 0;'>"
+                        "<b>Protocol info keywords</b> (show pairs with info popup):</p>").arg(head);
+        html += "<table cellpadding='0' cellspacing='0'>";
+        html += krow("TLS  /  SSL  /  HTTPS",  "TLS/SSL sessions (ports 443, 465, 993, 995, 8443)");
+        html += krow("HTTP",                    "HTTP sessions (ports 80, 8080, 8000, 8888)");
+        html += krow("SMB  /  CIFS",            "SMB/CIFS file sharing (ports 445, 139)");
+        html += krow("Kerberos  /  KRB",        "Kerberos authentication (port 88)");
+        html += krow("SMTP  /  email  /  mail", "SMTP mail sessions (ports 25, 465, 587)");
+        html += krow("IMAP",                    "IMAP mail sessions (ports 143, 993)");
+        html += krow("POP3  /  POP",            "POP3 mail sessions (ports 110, 995)");
+        html += krow("SQL  /  MSSQL",           "Microsoft SQL Server (port 1433)");
+        html += krow("MySQL",                   "MySQL / MariaDB (port 3306)");
+        html += krow("PostgreSQL  /  PGSQL",    "PostgreSQL (port 5432)");
+        html += krow("VoIP  /  SIP",            "VoIP / SIP signaling (ports 5060, 5061)");
         html += "</table>";
 
         html += QString("<p style='color:%1; margin:6px 0 2px 0;'><b>Port search:</b></p>").arg(head);
@@ -2770,8 +3923,9 @@ void MainWindow::showSearchHelp()
         html += krow("VTP",                 "VLAN Trunking Protocol");
         html += krow("Infrastructure",      "All bridge/switching + routing protocols (STP, LLDP, LACP, CDP, VTP, MPLS, OSPF, BGP …)");
         html += krow("LLC  /  802.2",       "IEEE 802.2 LLC-encapsulated frames");
-        html += krow("EAPOL  /  802.1X",    "Port-based authentication");
-        html += krow("VLAN  /  802.1Q",     "IEEE 802.1Q tagged frames");
+        html += krow("EAPOL  /  802.1X",    "Port-based authentication — shows EAP info popup");
+        html += krow("VLAN  /  802.1Q",     "IEEE 802.1Q tagged frames — shows VLAN info popup");
+        html += krow("MACsec  /  802.1AE",  "MACsec encrypted frames (0x88E5) — shows MACsec info popup");
         html += krow("MPLS",                "MPLS labeled frames");
         html += krow("802.3  /  Ethernet",  "All Ethernet pairs");
         html += "</table>";
@@ -2783,6 +3937,13 @@ void MainWindow::showSearchHelp()
         html += "</table>";
     }
 
+    html += QString("<br><div style='color:%1; font-size:10px;'>"
+                    "<b>Wireshark display filter fallback:</b> If a search term returns no results, "
+                    "PacketCircle will offer to apply it as a Wireshark display filter "
+                    "(e.g. <span style='font-family:monospace;'>http.host contains \"github\"</span>, "
+                    "<span style='font-family:monospace;'>ip.ttl &lt; 10</span>). "
+                    "This reloads the PacketCircle view with only the matching packets."
+                    "</div>").arg(dim);
     html += QString("<br><div style='color:%1; font-size:10px; font-style:italic;'>"
                     "Type <b>?</b> and press Enter to show this help.</div>").arg(dim);
     html += "</div>";
@@ -2977,14 +4138,32 @@ void MainWindow::applySearchFilter(const QString &query)
                 "lldp", "lacp", "cdp", "vtp",
                 "llc", "802.2", "eapol", "802.1x",
                 "vlan", "802.1q", "mpls",
-                "802.3", "ethernet"
+                "802.3", "ethernet",
+                "macsec", "802.1ae"
             };
             static const QStringList ipOnlyKeywords = {
                 "icmp", "icmpv6", "tcp", "udp",
                 "dhcp", "bootp", "igmp",
                 "dns", "mdns",
                 "gre", "ipsec", "esp", "ah",
-                "routing", "unknown"
+                "routing", "unknown",
+                /* Protocol-info keywords (map to known port ranges) */
+                "tls", "ssl", "https",
+                "http",
+                "smb", "cifs",
+                "ftp",
+                "telnet",
+                "kerberos", "krb", "krb5",
+                "smtp", "email", "mail",
+                "imap",
+                "pop3", "pop",
+                "sql", "mssql", "mysql", "postgresql", "pgsql", "postgres",
+                "voip", "sip",
+                "ssh", "sftp", "scp",
+                "ldap", "ldaps",
+                "snmp",
+                "syslog",
+                "nbns", "nbdgm", "nbss", "netbios"
             };
             static const QRegularExpression portSearchRx(
                 "^(?:port|tcp|udp)\\s*\\d+$", QRegularExpression::CaseInsensitiveOption);
@@ -3171,6 +4350,8 @@ void MainWindow::applySearchFilter(const QString &query)
                                    << "LLDP" << "LACP" << "CDP" << "VTP" << "MPLS"
                                    << "OSPF" << "BGP" << "RIP" << "RIPv2" << "EIGRP"
                                    << "ISIS" << "IS-IS" << "PIM" << "VRRP" << "HSRP";
+            else if (lower == "macsec" || lower == "802.1ae")
+                category_protocols << "MACsec";
             else if (lower == "802.3" || lower == "ethernet")
                 category_match_all_mac = true;  /* match ALL MAC-mode pairs */
             if (!category_protocols.isEmpty() || category_match_all_mac)
@@ -3187,8 +4368,100 @@ void MainWindow::applySearchFilter(const QString &query)
         }
     }
 
+    /* ── Protocol-info port search ───────────────────────────────────────────── *
+     * Maps friendly keywords to the port(s) used by protocols that have a       *
+     * protocol information popup in PacketCircle.  Matching is done against the  *
+     * per-pair dst_ports hash table (same mechanism as the existing port search). *
+     * Only active in IP mode (non-MAC, non-Wi-Fi).                              */
+    bool is_proto_info_search = false;
+    QList<guint16> proto_info_ports;
+    bool proto_info_tcp_only = false;  /* true → require TCP; false → accept TCP or UDP */
+
+    if (!is_port_search && !is_signal_search && !is_ap_search
+            && !is_category_search && !m_useMAC && !m_wifiMode) {
+        QString lower = trimmed.toLower();
+        if (lower == "tls" || lower == "ssl" || lower == "https") {
+            proto_info_ports << 443 << 465 << 993 << 995 << 8443;
+            proto_info_tcp_only = true;
+            is_proto_info_search = true;
+        } else if (lower == "http") {
+            proto_info_ports << 80 << 8080 << 8000 << 8888;
+            proto_info_tcp_only = true;
+            is_proto_info_search = true;
+        } else if (lower == "smb" || lower == "cifs") {
+            proto_info_ports << 445 << 135;
+            proto_info_tcp_only = true;
+            is_proto_info_search = true;
+        } else if (lower == "kerberos" || lower == "krb" || lower == "krb5") {
+            proto_info_ports << 88;   /* TCP + UDP both valid */
+            is_proto_info_search = true;
+        } else if (lower == "smtp" || lower == "email" || lower == "mail") {
+            proto_info_ports << 25 << 465 << 587;
+            proto_info_tcp_only = true;
+            is_proto_info_search = true;
+        } else if (lower == "imap") {
+            proto_info_ports << 143 << 993;
+            proto_info_tcp_only = true;
+            is_proto_info_search = true;
+        } else if (lower == "pop3" || lower == "pop") {
+            proto_info_ports << 110 << 995;
+            proto_info_tcp_only = true;
+            is_proto_info_search = true;
+        } else if (lower == "sql" || lower == "mssql") {
+            proto_info_ports << 1433;
+            proto_info_tcp_only = true;
+            is_proto_info_search = true;
+        } else if (lower == "mysql") {
+            proto_info_ports << 3306;
+            proto_info_tcp_only = true;
+            is_proto_info_search = true;
+        } else if (lower == "postgresql" || lower == "pgsql" || lower == "postgres") {
+            proto_info_ports << 5432;
+            proto_info_tcp_only = true;
+            is_proto_info_search = true;
+        } else if (lower == "voip" || lower == "sip") {
+            proto_info_ports << 5060 << 5061;   /* TCP + UDP */
+            is_proto_info_search = true;
+        } else if (lower == "ssh" || lower == "sftp" || lower == "scp") {
+            proto_info_ports << 22;
+            proto_info_tcp_only = true;
+            is_proto_info_search = true;
+        } else if (lower == "ftp") {
+            proto_info_ports << 21 << 20;
+            proto_info_tcp_only = true;
+            is_proto_info_search = true;
+        } else if (lower == "telnet") {
+            proto_info_ports << 23;
+            proto_info_tcp_only = true;
+            is_proto_info_search = true;
+        } else if (lower == "ldap" || lower == "ldaps") {
+            proto_info_ports << 389 << 636 << 3268 << 3269;
+            proto_info_tcp_only = true;
+            is_proto_info_search = true;
+        } else if (lower == "snmp") {
+            proto_info_ports << 161 << 162;   /* TCP + UDP */
+            is_proto_info_search = true;
+        } else if (lower == "syslog") {
+            proto_info_ports << 514 << 6514;  /* UDP 514, TLS 6514 */
+            is_proto_info_search = true;
+        } else if (lower == "nbns" || lower == "netbios-ns") {
+            proto_info_ports << 137;          /* UDP */
+            proto_info_tcp_only = false;
+            is_proto_info_search = true;
+        } else if (lower == "nbdgm" || lower == "netbios" || lower == "netbios-dgm"
+                   || lower == "netbios-datagram") {
+            proto_info_ports << 138;          /* UDP */
+            proto_info_tcp_only = false;
+            is_proto_info_search = true;
+        } else if (lower == "nbss" || lower == "netbios-ssn" || lower == "netbios-session") {
+            proto_info_ports << 139;          /* TCP */
+            proto_info_tcp_only = true;
+            is_proto_info_search = true;
+        }
+    }
+
     bool is_cidr = !is_port_search && !is_signal_search && !is_ap_search
-                && !is_category_search
+                && !is_category_search && !is_proto_info_search
                 && trimmed.contains('/') && parse_cidr(trimmed, nullptr, nullptr);
 
     /* ---- Validate query: reject unrecognised strings before running the pair loop ---- *
@@ -3196,19 +4469,30 @@ void MainWindow::applySearchFilter(const QString &query)
      * or any string containing only address characters (digits, dots, colons, hex).      *
      * Purely alphabetic strings that don't match a known keyword are reported invalid.   */
     bool is_valid_search = (is_signal_search || is_ap_search || is_port_search
-                         || is_category_search || is_cidr);
+                         || is_category_search || is_cidr || is_proto_info_search);
     if (!is_valid_search) {
         /* Accept partial IP / MAC / IPv6 addresses — digits, dots, colons, hex chars */
         static const QRegularExpression addrRx("^[0-9a-fA-F.:]+$");
         is_valid_search = addrRx.match(trimmed).hasMatch() && trimmed.length() >= 2;
     }
     if (!is_valid_search) {
-        QMessageBox::warning(this, "Invalid Search Argument",
-            QString("Unrecognised search: <b>%1</b><br><br>"
-                    "Type <b>?</b> and press Enter for valid search options.")
-                .arg(trimmed.toHtmlEscaped()));
-        showSearchHelp();
-        if (m_searchLineEdit) m_searchLineEdit->clear();
+        /* Not a recognised PacketCircle search term — offer Wireshark display filter delegation */
+        auto ans = QMessageBox::question(this,
+            "Try as Wireshark Display Filter?",
+            QString("<b>%1</b> is not a recognised PacketCircle search term.<br><br>"
+                    "Would you like to apply it as a <b>Wireshark display filter</b> and "
+                    "reload the PacketCircle view?<br><br>"
+                    "<small>\u26a0 Note: Applying a display filter requires Wireshark to "
+                    "re-process the capture. This may take additional time on large captures.</small>")
+                .arg(trimmed.toHtmlEscaped()),
+            QMessageBox::Yes | QMessageBox::No,
+            QMessageBox::Yes);
+        if (ans == QMessageBox::Yes) {
+            applyAsDisplayFilter(trimmed);
+        } else {
+            showSearchHelp();
+            if (m_searchLineEdit) m_searchLineEdit->clear();
+        }
         return;
     }
 
@@ -3298,6 +4582,43 @@ void MainWindow::applySearchFilter(const QString &query)
                     highlighted_labels.insert(src);
                     highlighted_labels.insert(dst);
                 }
+            } else if (is_proto_info_search) {
+                /* Protocol-info keyword search: check against known port list */
+                auto checkProtoPorts = [&](comm_pair_t *p) -> bool {
+                    if (!p || !p->dst_ports) return false;
+                    for (guint16 chkPort : proto_info_ports) {
+                        gpointer port_key = GUINT_TO_POINTER((guint)chkPort);
+                        port_stats_t *ps = (port_stats_t *)g_hash_table_lookup(
+                                              p->dst_ports, port_key);
+                        if (!ps) continue;
+                        if (proto_info_tcp_only) {
+                            if (ps->is_tcp) return true;
+                        } else {
+                            if (ps->is_tcp || ps->is_udp) return true;
+                        }
+                    }
+                    return false;
+                };
+
+                match = checkProtoPorts(pair);
+
+                /* Also check the reverse pair so bidirectional flows are found */
+                if (!match && m_analysisResult && m_analysisResult->pairs) {
+                    for (GList *gl = m_analysisResult->pairs; gl; gl = gl->next) {
+                        comm_pair_t *rp = (comm_pair_t *)gl->data;
+                        if (rp && rp != pair &&
+                            g_strcmp0(rp->src_addr, pair->dst_addr) == 0 &&
+                            g_strcmp0(rp->dst_addr, pair->src_addr) == 0) {
+                            match = checkProtoPorts(rp);
+                            break;
+                        }
+                    }
+                }
+
+                if (match) {
+                    highlighted_labels.insert(QString::fromUtf8(pair->src_addr));
+                    highlighted_labels.insert(QString::fromUtf8(pair->dst_addr));
+                }
             } else {
                 /* Address search (IP, MAC, CIDR) + Wi-Fi SSID/BSSID */
                 QString src = QString::fromUtf8(pair->src_addr);
@@ -3385,6 +4706,24 @@ void MainWindow::applySearchFilter(const QString &query)
                     };
                     match = checkPortsFull(pair);
 
+                } else if (is_proto_info_search) {
+                    auto checkProtoPortsFull = [&](comm_pair_t *p) -> bool {
+                        if (!p || !p->dst_ports) return false;
+                        for (guint16 chkPort : proto_info_ports) {
+                            gpointer port_key = GUINT_TO_POINTER((guint)chkPort);
+                            port_stats_t *ps = (port_stats_t *)g_hash_table_lookup(
+                                                  p->dst_ports, port_key);
+                            if (!ps) continue;
+                            if (proto_info_tcp_only) {
+                                if (ps->is_tcp) return true;
+                            } else {
+                                if (ps->is_tcp || ps->is_udp) return true;
+                            }
+                        }
+                        return false;
+                    };
+                    match = checkProtoPortsFull(pair);
+
                 } else {
                     /* Address / CIDR search */
                     QString src = QString::fromUtf8(pair->src_addr);
@@ -3466,19 +4805,86 @@ void MainWindow::applySearchFilter(const QString &query)
             }
         }
 
-        /* Standard "no results" message (only if we didn't already show the
-         * "found in full buffer" dialog above)                               */
-        if (!offeredOverride && (!m_wifiMode || is_signal_search || is_ap_search)) {
-            QMessageBox::information(this, "No Results",
-                QString("No pairs matching <b>%1</b> found in the current capture.<br><br>"
-                        "Type <b>?</b> and press Enter for search options.")
-                    .arg(trimmed.toHtmlEscaped()));
+        /* No results anywhere in the capture buffer.
+         * In non-Wi-Fi mode: offer to delegate the query to Wireshark as a
+         * display filter.  In Wi-Fi signal/AP mode: fall back to a plain message. */
+        if (!offeredOverride) {
+            if (!m_wifiMode) {
+                auto ans = QMessageBox::question(this,
+                    "Try as Wireshark Display Filter?",
+                    QString("No pairs matching <b>%1</b> found in the current capture.<br><br>"
+                            "Would you like to apply it as a <b>Wireshark display filter</b> and "
+                            "reload the PacketCircle view?<br><br>"
+                            "<small>\u26a0 Note: Applying a display filter requires Wireshark to "
+                            "re-process the capture. This may take additional time on large captures.</small>")
+                        .arg(trimmed.toHtmlEscaped()),
+                    QMessageBox::Yes | QMessageBox::No,
+                    QMessageBox::No);
+                if (ans == QMessageBox::Yes) {
+                    applyAsDisplayFilter(trimmed);
+                    return;
+                }
+            } else if (is_signal_search || is_ap_search) {
+                QMessageBox::information(this, "No Results",
+                    QString("No pairs matching <b>%1</b> found in the current capture.<br><br>"
+                            "Type <b>?</b> and press Enter for search options.")
+                        .arg(trimmed.toHtmlEscaped()));
+            }
         }
     }
 
     if (m_circleWidget) {
         m_circleWidget->setHighlightedLabels(highlighted_labels);
     }
+}
+
+/* ─────────────────────────────────────────────────────────────────────────── *
+ * applyAsDisplayFilter()                                                       *
+ *                                                                               *
+ * Delegates the search query to Wireshark as a display filter, then schedules  *
+ * a PacketCircle reload so the view reflects only the matching packets.         *
+ *                                                                               *
+ * Flow:                                                                         *
+ *   1. Apply the filter string to Wireshark's filter bar via plugin_if.         *
+ *   2. Clear the search field (the display filter takes over).                  *
+ *   3. After a short delay (giving Wireshark time to process the filter),       *
+ *      re-run packet_analyzer_analyze() on the now-filtered capture file.       *
+ *   4. If the analysis returns pairs → update the PacketCircle view normally.   *
+ *   5. If it returns 0 pairs → show ":-( no packets found in the buffer".       *
+ * ─────────────────────────────────────────────────────────────────────────── */
+void MainWindow::applyAsDisplayFilter(const QString &filter)
+{
+    QByteArray filterBytes = filter.toUtf8();
+    plugin_if_apply_filter(filterBytes.constData(), true);
+
+    /* Clear the search bar — from here the Wireshark filter bar drives the view */
+    if (m_searchLineEdit) m_searchLineEdit->clear();
+
+    /* Give Wireshark a moment to process the filter before we re-analyse.
+     * plugin_if_apply_filter posts to Wireshark's event queue on most
+     * platforms; 400 ms is enough for the filter to be applied before
+     * packet_analyzer_analyze() re-taps the (now filtered) capture.        */
+    QTimer::singleShot(400, this, [this]() {
+        capture_file *cf = (capture_file *)plugin_if_get_capture_file(
+                               extract_capture_file, NULL);
+        if (!cf) {
+            QMessageBox::information(this, "Display Filter Applied",
+                ":-( no packets found in the buffer");
+            return;
+        }
+
+        analysis_result_t *result = packet_analyzer_analyze(cf, m_useMAC);
+
+        if (!result || !result->pairs || g_list_length(result->pairs) == 0) {
+            if (result) packet_analyzer_free_result(result);
+            QMessageBox::information(this, "Display Filter Applied",
+                ":-( no packets found in the buffer");
+            return;
+        }
+
+        /* Pairs found — update the PacketCircle view */
+        updateAnalysis(result);
+    });
 }
 
 void MainWindow::onPairSelectionChanged(QList<comm_pair_t*> selected)
@@ -5285,21 +6691,11 @@ void ConnectionPopup::showContextMenu(const QPoint &pos)
     }
     /* Light theme: no custom stylesheet — use native platform menu */
 
-    QAction *filterAction = menu.addAction("Apply Filter in Wireshark");
-    QAction *followAction = menu.addAction("Follow TCP Stream");
+    QAction *filterAction     = menu.addAction("Apply Filter in Wireshark");
+    QAction *followAction     = menu.addAction("Follow TCP Stream");
     menu.addSeparator();
     QAction *throughputAction = menu.addAction("TCP Throughput Graph");
-    QAction *rttAction = menu.addAction("TCP Round-Trip Time Graph");
-    menu.addSeparator();
-    QAction *tlsInfoAction = menu.addAction("TLS Information");
-    QAction *httpInfoAction = menu.addAction("HTTP Information");
-    QAction *smbInfoAction = menu.addAction("SMB / DCE-RPC Information");
-    QAction *krbInfoAction = menu.addAction("Kerberos Information");
-    QAction *emailInfoAction = menu.addAction("Email Protocol Information");
-    QAction *sqlInfoAction = menu.addAction("SQL Database Information");
-    QAction *voipInfoAction = menu.addAction("VoIP / SIP Information");
-    QAction *dhcpInfoAction = menu.addAction("DHCP Information");
-    QAction *dnsInfoAction  = menu.addAction("DNS Information");
+    QAction *rttAction        = menu.addAction("TCP Round-Trip Time Graph");
 
     /* Disable TCP-only actions for non-TCP rows */
     const RowData &rd = m_rowData[row];
@@ -5313,103 +6709,66 @@ void ConnectionPopup::showContextMenu(const QPoint &pos)
         rttAction->setText("TCP Round-Trip Time Graph (TCP only)");
     }
 
-    /* TLS Information: enabled for TCP or UDP on port 443 */
-    bool tlsCandidate = (rd.isTcp || rd.isUdp) && rd.port == 443;
-    tlsInfoAction->setEnabled(tlsCandidate);
-    if (!tlsCandidate) {
-        tlsInfoAction->setText("TLS Information (port 443 only)");
+    /* ── Direct protocol info action for the clicked port ─────────────
+     * Map the row's port to the appropriate protocol info function.
+     * If the port matches a known protocol, a labelled action is added
+     * directly to the menu — no intermediate dialog needed.             */
+    struct ProtoMatch { int id; QString label; };
+    auto matchProto = [&]() -> ProtoMatch {
+        quint16 p  = rd.port;
+        bool tcp   = rd.isTcp;
+        bool udp   = rd.isUdp;
+        if (tcp && p == 22)                                                 return { 13, "SSH / SFTP / SCP" };
+        if ((tcp||udp) && p == 443)                                         return {  1, "TLS / HTTPS" };
+        if (tcp && p == 80)                                                 return {  2, "HTTP" };
+        if (tcp && (p == 445 || p == 135))                                  return {  3, "SMB / DCE-RPC" };
+        if ((tcp||udp) && p == 88)                                          return {  4, "Kerberos" };
+        if (tcp && (p == 25 || p == 465 || p == 587))                      return {  5, "SMTP / Email" };
+        if (tcp && (p == 143 || p == 993))                                  return {  5, "IMAP / Email" };
+        if (tcp && (p == 110 || p == 995))                                  return {  5, "POP3 / Email" };
+        if (tcp && (p == 1433 || p == 3306 || p == 5432))                  return {  6, "SQL Database" };
+        if ((tcp||udp) && (p == 5060 || p == 5061))                        return {  7, "VoIP / SIP" };
+        if (udp && (p == 67 || p == 68))                                    return {  8, "DHCP" };
+        if ((udp||tcp) && p == 53)                                          return {  9, "DNS" };
+        if (tcp && (p == 389 || p == 636 || p == 3268 || p == 3269))       return { 10, "LDAP" };
+        if ((udp||tcp) && (p == 161 || p == 162))                          return { 11, "SNMP" };
+        if ((udp||tcp) && (p == 514 || p == 601 || p == 6514))             return { 12, "Syslog" };
+        if (tcp && (p == 21 || p == 20 || p == 990))                       return { 14, "FTP" };
+        if (tcp && (p == 23 || p == 992))                                   return { 15, "Telnet" };
+        if (udp && p == 137)                                                return { 16, "NBNS" };
+        if (udp && p == 138)                                                return { 17, "NetBIOS Datagram" };
+        if (tcp && p == 139)                                                return { 18, "NetBIOS Session (NBSS)" };
+        return { 0, {} };
+    };
+    ProtoMatch pm = matchProto();
+
+    /* ── Application-layer protocol info (port-specific) ── */
+    QAction *protoDirectAction = nullptr;
+    if (pm.id > 0) {
+        menu.addSeparator();
+        protoDirectAction = menu.addAction(pm.label + " Protocol Information");
     }
 
-    /* HTTP Information: enabled for TCP on port 80 */
-    bool httpCandidate = rd.isTcp && rd.port == 80;
-    httpInfoAction->setEnabled(httpCandidate);
-    if (!httpCandidate) {
-        httpInfoAction->setText("HTTP Information (port 80 only)");
+    /* ── Generic TCP/UDP transport info (always available) ── */
+    menu.addSeparator();
+    QAction *tcpStatAction = nullptr;
+    QAction *udpStatAction = nullptr;
+    if (isTCP) {
+        tcpStatAction = menu.addAction("TCP Transport Details\u2026");
+    } else if (!isTCP && rd.isUdp) {
+        udpStatAction = menu.addAction("UDP Transport Details\u2026");
     }
 
-    /* SMB / DCE-RPC Information: enabled for TCP on port 445, 139, or 135 */
-    bool smbCandidate = rd.isTcp && (rd.port == 445 || rd.port == 139 || rd.port == 135);
-    smbInfoAction->setEnabled(smbCandidate);
-    if (!smbCandidate) {
-        smbInfoAction->setText("SMB / DCE-RPC Information (port 445/139/135 only)");
-    } else if (rd.port == 135) {
-        smbInfoAction->setText("DCE/RPC Information");
-    } else {
-        smbInfoAction->setText("SMB Information");
-    }
+    menu.addSeparator();
+    QAction *supportedProtosAction = menu.addAction("Supported Protocols\u2026");
 
-    /* Kerberos Information: enabled for TCP or UDP on port 88 */
-    bool krbCandidate = (rd.isTcp || rd.isUdp) && rd.port == 88;
-    krbInfoAction->setEnabled(krbCandidate);
-    if (!krbCandidate) {
-        krbInfoAction->setText("Kerberos Information (port 88 only)");
-    }
-
-    /* Email Protocol Information: SMTP(25/587/465), IMAP(143/993), POP3(110/995) */
-    bool emailCandidate = rd.isTcp &&
-        (rd.port == 25  || rd.port == 587 || rd.port == 465 ||
-         rd.port == 143 || rd.port == 993 ||
-         rd.port == 110 || rd.port == 995);
-    emailInfoAction->setEnabled(emailCandidate);
-    if (!emailCandidate) {
-        emailInfoAction->setText("Email Protocol Information (SMTP/IMAP/POP3)");
-    } else if (rd.port == 25 || rd.port == 587 || rd.port == 465) {
-        emailInfoAction->setText("SMTP Information");
-    } else if (rd.port == 143 || rd.port == 993) {
-        emailInfoAction->setText("IMAP Information");
-    } else {
-        emailInfoAction->setText("POP3 Information");
-    }
-
-    /* SQL Database Information: MSSQL(1433), MySQL(3306), PostgreSQL(5432) */
-    bool sqlCandidate = rd.isTcp &&
-        (rd.port == 1433 || rd.port == 3306 || rd.port == 5432);
-    sqlInfoAction->setEnabled(sqlCandidate);
-    if (!sqlCandidate) {
-        sqlInfoAction->setText("SQL Database Information (port 1433/3306/5432)");
-    } else if (rd.port == 1433) {
-        sqlInfoAction->setText("MSSQL / TDS Information");
-    } else if (rd.port == 3306) {
-        sqlInfoAction->setText("MySQL / MariaDB Information");
-    } else {
-        sqlInfoAction->setText("PostgreSQL Information");
-    }
-
-    /* VoIP / SIP Information: SIP(5060/5061) */
-    bool voipCandidate = (rd.isTcp || rd.isUdp) &&
-        (rd.port == 5060 || rd.port == 5061);
-    voipInfoAction->setEnabled(voipCandidate);
-    if (!voipCandidate) {
-        voipInfoAction->setText("VoIP / SIP Information (port 5060/5061)");
-    } else if (rd.port == 5061) {
-        voipInfoAction->setText("SIP / TLS Information");
-    } else {
-        voipInfoAction->setText("SIP / VoIP Information");
-    }
-
-    /* DHCP Information: UDP port 67 (server) or 68 (client) */
-    bool dhcpCandidate = rd.isUdp && (rd.port == 67 || rd.port == 68);
-    dhcpInfoAction->setEnabled(dhcpCandidate);
-    if (!dhcpCandidate)
-        dhcpInfoAction->setText("DHCP Information (port 67/68 only)");
-
-    /* DNS Information: UDP or TCP port 53 */
-    bool dnsCandidate = (rd.isUdp || rd.isTcp) && rd.port == 53;
-    dnsInfoAction->setEnabled(dnsCandidate);
-    if (!dnsCandidate)
-        dnsInfoAction->setText("DNS Information (port 53 only)");
-
-    /* Guard: prevent auto-close timer
-     * while QMenu::exec()'s nested event loop is running.                  */
+    /* Guard: prevent auto-close timer while QMenu::exec()'s event loop runs */
     m_contextMenuActive = true;
     m_autoCloseTimer->stop();
 
     QAction *selected = menu.exec(m_table->viewport()->mapToGlobal(pos));
     /* NOTE: Do NOT reset m_contextMenuActive here.  All action branches call
-     * deleteLater() themselves.  Resetting it here would let leaveEvent restart
-     * the auto-close timer which can fire during a heavy frame-scan
-     * (circle_vis_pump_events) and free 'this' before the sub-function returns,
-     * causing SIGSEGV in hide()/exec().  Only the dismiss branch resets it.    */
+     * deleteLater() themselves.  Only the dismiss branch resets it.          */
 
     if (selected == filterAction) {
         applyFilterForRow(row);
@@ -5419,29 +6778,239 @@ void ConnectionPopup::showContextMenu(const QPoint &pos)
         openTcpStreamGraph(row, "Throughput");
     } else if (selected == rttAction) {
         openTcpStreamGraph(row, "Round Trip Time");
-    } else if (selected == tlsInfoAction) {
-        showTlsInfoForRow(row);
-    } else if (selected == httpInfoAction) {
-        showHttpInfoForRow(row);
-    } else if (selected == smbInfoAction) {
-        showSmbInfoForRow(row);
-    } else if (selected == krbInfoAction) {
-        showKerberosInfoForRow(row);
-    } else if (selected == emailInfoAction) {
-        showEmailInfoForRow(row);
-    } else if (selected == sqlInfoAction) {
-        showSqlInfoForRow(row);
-    } else if (selected == voipInfoAction) {
-        showVoipInfoForRow(row);
-    } else if (selected == dhcpInfoAction) {
-        showDhcpInfoForRow(row);
-    } else if (selected == dnsInfoAction) {
-        showDnsInfoForRow(row);
+    } else if (pm.id > 0 && selected == protoDirectAction) {
+        switch (pm.id) {
+            case  1: showTlsInfoForRow(row);      break;
+            case  2: showHttpInfoForRow(row);     break;
+            case  3: showSmbInfoForRow(row);      break;
+            case  4: showKerberosInfoForRow(row); break;
+            case  5: showEmailInfoForRow(row);    break;
+            case  6: showSqlInfoForRow(row);      break;
+            case  7: showVoipInfoForRow(row);     break;
+            case  8: showDhcpInfoForRow(row);     break;
+            case  9: showDnsInfoForRow(row);      break;
+            case 10: showLdapInfoForRow(row);     break;
+            case 11: showSnmpInfoForRow(row);     break;
+            case 12: showSyslogInfoForRow(row);   break;
+            case 13: showSshInfoForRow(row);      break;
+            case 14: showFtpInfoForRow(row);      break;
+            case 15: showTelnetInfoForRow(row);   break;
+            case 16: showNbnsInfoForRow(row);     break;
+            case 17: showNbdgmInfoForRow(row);    break;
+            case 18: showNbssInfoForRow(row);     break;
+            default: break;
+        }
+    } else if (selected == tcpStatAction) {
+        showTcpStatInfoForRow(row);
+    } else if (selected == udpStatAction) {
+        showUdpStatInfoForRow(row);
+    } else if (selected == supportedProtosAction) {
+        showProtocolInfoBrowserForRow(row);
     } else {
         /* User dismissed without selecting; reset guard and restart auto-close */
         m_contextMenuActive = false;
         m_autoCloseTimer->start();
     }
+}
+
+/* ── Protocol Information Browser ──────────────────────────────────────────
+ * Presents all supported protocol info dialogs in a single picker window.
+ * The user selects a protocol from the list, then the corresponding existing
+ * info dialog opens (same code path as before — just reached from one place). */
+void ConnectionPopup::showProtocolInfoBrowserForRow(int row)
+{
+    if (row < 0 || row >= m_rowData.size() || !m_pair)
+        return;
+
+    const RowData &rd = m_rowData[row];
+    bool dark = isDarkTheme();
+
+    /* All IP-mode protocols with their port applicability */
+    struct ProtoEntry {
+        int     id;
+        QString name;
+        QString hint;      /* "(port N)" shown only for non-applicable entries */
+        bool    applicable;
+    };
+
+    QList<ProtoEntry> protocols = {
+        {  1, "TLS Information",            "(port 443)",
+           (rd.isTcp || rd.isUdp) && rd.port == 443 },
+        {  2, "HTTP Information",           "(port 80)",
+           rd.isTcp && rd.port == 80 },
+        {  3, "SMB / DCE-RPC Information",  "(port 445/135)",
+           rd.isTcp && (rd.port == 445 || rd.port == 135) },
+        {  4, "Kerberos Information",       "(port 88)",
+           (rd.isTcp || rd.isUdp) && rd.port == 88 },
+        {  5, "Email Protocol Information", "(SMTP/IMAP/POP3)",
+           rd.isTcp && (rd.port == 25 || rd.port == 587 || rd.port == 465 ||
+                        rd.port == 143 || rd.port == 993 ||
+                        rd.port == 110 || rd.port == 995) },
+        {  6, "SQL Database Information",   "(port 1433/3306/5432)",
+           rd.isTcp && (rd.port == 1433 || rd.port == 3306 || rd.port == 5432) },
+        {  7, "VoIP / SIP Information",     "(port 5060/5061)",
+           (rd.isTcp || rd.isUdp) && (rd.port == 5060 || rd.port == 5061) },
+        {  8, "DHCP Information",           "(port 67/68 UDP)",
+           rd.isUdp && (rd.port == 67 || rd.port == 68) },
+        {  9, "DNS Information",            "(port 53)",
+           (rd.isUdp || rd.isTcp) && rd.port == 53 },
+        { 10, "LDAP Information",           "(port 389/636/3268/3269)",
+           rd.isTcp && (rd.port == 389 || rd.port == 636 ||
+                        rd.port == 3268 || rd.port == 3269) },
+        { 11, "SNMP Information",           "(port 161/162)",
+           (rd.isUdp || rd.isTcp) && (rd.port == 161 || rd.port == 162) },
+        { 12, "Syslog Information",         "(port 514/601/6514)",
+           (rd.isUdp || rd.isTcp) &&
+           (rd.port == 514 || rd.port == 601 || rd.port == 6514) },
+        { 13, "SSH / SFTP / SCP Information","(port 22)",
+           rd.isTcp && rd.port == 22 },
+        { 14, "FTP Information",            "(port 21/20/990)",
+           rd.isTcp && (rd.port == 21 || rd.port == 20 || rd.port == 990) },
+        { 15, "Telnet Information",         "(port 23/992)",
+           rd.isTcp && (rd.port == 23 || rd.port == 992) },
+        { 16, "NBNS Information",           "(port 137 UDP)",
+           rd.isUdp && rd.port == 137 },
+        { 17, "NetBIOS Datagram Information","(port 138 UDP)",
+           rd.isUdp && rd.port == 138 },
+        { 18, "NetBIOS Session Information", "(port 139 TCP)",
+           rd.isTcp && rd.port == 139 },
+    };
+
+    /* Build the dialog */
+    QDialog browser(nullptr);   /* not parented — same safety pattern as QMenu */
+    browser.setWindowTitle("Supported Protocols");
+    browser.resize(420, 480);
+
+    QVBoxLayout *mainLayout = new QVBoxLayout(&browser);
+    mainLayout->setSpacing(8);
+    mainLayout->setContentsMargins(14, 12, 14, 12);
+
+    /* Intro text explaining the purpose of this dialog */
+    QLabel *introLbl = new QLabel(
+        "<b>PacketCircle Protocol Analyses</b><br>"
+        "<span style='color:#888; font-size:11px;'>"
+        "Right-click any connection row to open the analysis directly.<br>"
+        "Protocols matching the selected port are shown in <b>bold</b>.</span>",
+        &browser);
+    introLbl->setTextFormat(Qt::RichText);
+    introLbl->setWordWrap(true);
+    mainLayout->addWidget(introLbl);
+
+    /* Connection header */
+    QString src = QString::fromUtf8(m_pair->src_addr);
+    QString dst = QString::fromUtf8(m_pair->dst_addr);
+    QLabel *headerLbl = new QLabel(
+        QString("Connection: <b>%1</b> &nbsp;&#8596;&nbsp; <b>%2</b>"
+                "&nbsp;&nbsp;&mdash;&nbsp;&nbsp;port&nbsp;<b>%3</b>")
+            .arg(src.toHtmlEscaped(), dst.toHtmlEscaped(), QString::number(rd.port)),
+        &browser);
+    headerLbl->setTextFormat(Qt::RichText);
+    mainLayout->addWidget(headerLbl);
+
+    /* ── INFO note ─────────────────────────────────────────────────── */
+    QColor noteBg   = dark ? QColor(0x1a, 0x2a, 0x3a) : QColor(0xe8, 0xf4, 0xff);
+    QColor noteFg   = dark ? QColor(0x8a, 0xc8, 0xf0) : QColor(0x1a, 0x5a, 0x9a);
+    QLabel *infoLbl = new QLabel(
+        "<b>INFO:</b>  Right-click any connection row with a matching protocol "
+        "to open its analysis directly from the context menu.<br>"
+        "Protocols matching the current port are shown in <b>bold</b> below.",
+        &browser);
+    infoLbl->setTextFormat(Qt::RichText);
+    infoLbl->setWordWrap(true);
+    infoLbl->setContentsMargins(10, 7, 10, 7);
+    QPalette infoPal = infoLbl->palette();
+    infoPal.setColor(QPalette::Window,     noteBg);
+    infoPal.setColor(QPalette::WindowText, noteFg);
+    infoLbl->setPalette(infoPal);
+    infoLbl->setAutoFillBackground(true);
+    mainLayout->addWidget(infoLbl);
+
+    /* ── Protocol list — read-only reference, no selection ─────────── */
+    QListWidget *list = new QListWidget(&browser);
+    list->setSelectionMode(QAbstractItemView::NoSelection);
+    list->setFocusPolicy(Qt::NoFocus);
+    list->setAlternatingRowColors(false);
+
+    QColor applicableColor = dark ? QColor(0xe8, 0xe8, 0xe8) : QColor(0x1a, 0x1a, 0x1a);
+    QColor otherColor      = dark ? QColor(0xaa, 0xaa, 0xaa) : QColor(0x55, 0x55, 0x55);
+    QColor sepColor        = dark ? QColor(0x77, 0x77, 0x88) : QColor(0x88, 0x88, 0x99);
+
+    /* Applicable protocols first — bold, clearly readable */
+    bool hasApplicable = false;
+    for (const auto &p : protocols) {
+        if (!p.applicable) continue;
+        QListWidgetItem *item = new QListWidgetItem(p.name + "  " + p.hint, list);
+        item->setFlags(Qt::ItemIsEnabled);
+        QFont f = item->font();
+        f.setBold(true);
+        f.setPointSize(f.pointSize() + 1);
+        item->setFont(f);
+        item->setForeground(applicableColor);
+        hasApplicable = true;
+    }
+
+    /* Visual separator */
+    if (hasApplicable) {
+        QListWidgetItem *sep = new QListWidgetItem(
+            "\u2500\u2500\u2500  All supported protocols  \u2500\u2500\u2500", list);
+        sep->setFlags(Qt::ItemIsEnabled);
+        sep->setForeground(sepColor);
+        QFont sf = sep->font();
+        sf.setItalic(true);
+        sep->setFont(sf);
+    }
+
+    /* All protocols (applicable already shown above — skip them here,
+     * list everything so the full catalogue is always visible) */
+    for (const auto &p : protocols) {
+        QListWidgetItem *item = new QListWidgetItem(
+            p.name + "  " + p.hint, list);
+        item->setFlags(Qt::ItemIsEnabled);
+        QFont f = item->font();
+        if (p.applicable) f.setBold(true);
+        item->setFont(f);
+        item->setForeground(p.applicable ? applicableColor : otherColor);
+    }
+
+    mainLayout->addWidget(list, 1);
+
+    /* Dark theme stylesheet */
+    if (dark) {
+        browser.setStyleSheet(
+            "QDialog { background:#1e1e1e; color:#e0e0e0; }"
+            "QLabel  { color:#e0e0e0; }"
+            "QListWidget {"
+            "  background:#2b2b2b; border:1px solid #444;"
+            "  outline:0;"
+            "}"
+            "QListWidget::item { padding:3px 6px; }"
+            "QListWidget::item:hover { background:#333; }"
+            "QPushButton {"
+            "  background:#333; color:#e0e0e0; border:1px solid #555;"
+            "  padding:4px 16px; border-radius:3px;"
+            "}"
+            "QPushButton:hover { background:#444; }"
+        );
+    }
+
+    /* Close button only — details are accessed via right-click, not here */
+    QHBoxLayout *btnRow = new QHBoxLayout;
+    btnRow->addStretch(1);
+    QPushButton *closeBtn = new QPushButton("Close", &browser);
+    btnRow->addWidget(closeBtn);
+    mainLayout->addLayout(btnRow);
+
+    QObject::connect(closeBtn, &QPushButton::clicked, &browser, &QDialog::reject);
+
+    /* Stop auto-close while browser is open */
+    m_contextMenuActive = true;
+    if (m_autoCloseTimer) m_autoCloseTimer->stop();
+
+    browser.exec();
+
+    /* Always resume auto-close after closing — no dispatch from this dialog */
+    m_contextMenuActive = false;
+    if (m_autoCloseTimer) m_autoCloseTimer->start();
 }
 
 QString ConnectionPopup::buildFilterForRow(int row)
@@ -9434,6 +11003,2011 @@ void ConnectionPopup::showDnsInfoForRow(int row)
 
     addCloseButton(mainLayout, dlg, dark);
     packet_analyzer_free_dns_info(di);
+
+    if (m_autoCloseTimer) m_autoCloseTimer->stop();
+    m_contextMenuActive = true;
+    hide();
+    dlg->exec();
+    deleteLater();
+}
+
+/* ── LDAP Session Information dialog ───────────────────────────────────── */
+void ConnectionPopup::showLdapInfoForRow(int row)
+{
+    if (row < 0 || row >= m_rowData.size() || !m_pair)
+        return;
+
+    const RowData &rd = m_rowData[row];
+
+    capture_file *cf = (capture_file *)plugin_if_get_capture_file(
+        extract_capture_file, NULL);
+
+    QString src = QString::fromUtf8(m_pair->src_addr);
+    QString dst = QString::fromUtf8(m_pair->dst_addr);
+
+    /* Friendly port label */
+    QString portLabel;
+    switch (rd.port) {
+        case  389: portLabel = "LDAP";          break;
+        case  636: portLabel = "LDAPS";         break;
+        case 3268: portLabel = "Global Catalog"; break;
+        case 3269: portLabel = "GC / TLS";      break;
+        default:   portLabel = QString("port %1").arg(rd.port); break;
+    }
+
+    QString dlgTitle = QString("LDAP Information  \u2014  %1 \u2194 %2  (%3)")
+                           .arg(src, dst, portLabel);
+
+    if (!cf) {
+        QMessageBox::warning(this, dlgTitle,
+            "No capture file is currently loaded in Wireshark.");
+        return;
+    }
+
+    bool looksLikeMAC = (src.count(':') == 5 && dst.count(':') == 5);
+
+    ldap_info_t *li = packet_analyzer_extract_ldap_info(
+        cf, m_pair->src_addr, m_pair->dst_addr,
+        (guint16)rd.port, looksLikeMAC ? TRUE : FALSE);
+
+    bool dark = isDarkTheme();
+    QVBoxLayout *mainLayout;
+    QDialog *dlg = createInfoDialog(dlgTitle, dark, &mainLayout);
+
+    if (!li || !li->found) {
+        QString note;
+        if (li && li->is_tls)
+            note = " (traffic may be TLS-encrypted — no plaintext LDAP fields visible)";
+        addSorryPlaceholder(mainLayout, dlg, dark,
+                            QString("LDAP") + note,
+                            li ? li->matched_packets : 0);
+    } else {
+        QString html;
+        QString headingColor = dark ? "#90caf9" : "#1565c0";
+        QString textColor    = dark ? "#e0e0e0" : "#222";
+        QString dimColor     = dark ? "#999"    : "#666";
+        QString valColor     = dark ? "#c8e6c9" : "#1b5e20";
+        QString warnColor    = dark ? "#ffcc80" : "#c05800";
+        QString alertColor   = dark ? "#ef9a9a" : "#b71c1c";
+        QString monoStyle    = "font-family:monospace;";
+
+        html += QString("<div style='color:%1;'>").arg(textColor);
+
+        /* ── Section 1: Session Summary ─────────────────────────── */
+        html += QString("<h3 style='color:%1; margin-bottom:4px;'>Session Summary</h3>")
+                    .arg(headingColor);
+        html += "<table cellpadding='3'>";
+        html += QString("<tr><td style='color:%1;'>Protocol:</td>"
+                        "<td><b>%2</b></td></tr>")
+                    .arg(dimColor, portLabel);
+        if (li->is_tls)
+            html += QString("<tr><td style='color:%1;'>Transport security:</td>"
+                            "<td style='color:%2;'>TLS encrypted</td></tr>")
+                        .arg(dimColor, valColor);
+        html += QString("<tr><td style='color:%1;'>Total LDAP frames:</td>"
+                        "<td><b>%2</b></td></tr>")
+                    .arg(dimColor).arg(li->matched_packets);
+        if (li->bind_count)
+            html += QString("<tr><td style='color:%1;'>Bind operations:</td>"
+                            "<td><b>%2</b></td></tr>")
+                        .arg(dimColor).arg(li->bind_count);
+        if (li->search_count)
+            html += QString("<tr><td style='color:%1;'>Search requests:</td>"
+                            "<td><b>%2</b></td></tr>")
+                        .arg(dimColor).arg(li->search_count);
+        if (li->search_res_entry_count)
+            html += QString("<tr><td style='color:%1;'>Entries returned:</td>"
+                            "<td><b>%2</b></td></tr>")
+                        .arg(dimColor).arg(li->search_res_entry_count);
+        if (li->modify_count)
+            html += QString("<tr><td style='color:%1;'>Modify operations:</td>"
+                            "<td><b>%2</b></td></tr>")
+                        .arg(dimColor).arg(li->modify_count);
+        if (li->add_count)
+            html += QString("<tr><td style='color:%1;'>Add operations:</td>"
+                            "<td><b>%2</b></td></tr>")
+                        .arg(dimColor).arg(li->add_count);
+        if (li->delete_count)
+            html += QString("<tr><td style='color:%1;'>Delete operations:</td>"
+                            "<td style='color:%2;'><b>%3</b></td></tr>")
+                        .arg(dimColor, warnColor).arg(li->delete_count);
+        html += "</table><br>";
+
+        /* ── Section 2: Authentication ──────────────────────────── */
+        if (li->bind_count > 0) {
+            html += QString("<h3 style='color:%1; margin-bottom:4px;'>Authentication</h3>")
+                        .arg(headingColor);
+            html += "<table cellpadding='3'>";
+
+            if (li->has_simple_bind && li->has_anonymous_bind)
+                html += QString("<tr><td style='color:%1;'>Auth type:</td>"
+                                "<td>Simple &amp; Anonymous</td></tr>")
+                            .arg(dimColor);
+            else if (li->has_anonymous_bind)
+                html += QString("<tr><td style='color:%1;'>Auth type:</td>"
+                                "<td style='color:%2;'>Anonymous bind</td></tr>")
+                            .arg(dimColor, warnColor);
+            else if (li->has_simple_bind)
+                html += QString("<tr><td style='color:%1;'>Auth type:</td>"
+                                "<td>Simple</td></tr>")
+                            .arg(dimColor);
+            if (li->has_sasl_bind)
+                html += QString("<tr><td style='color:%1;'>Auth type:</td>"
+                                "<td style='color:%2;'>SASL</td></tr>")
+                            .arg(dimColor, valColor);
+
+            /* SASL mechanisms */
+            if (li->sasl_mechanisms) {
+                html += QString("<tr><td style='color:%1; vertical-align:top;'>"
+                                "SASL mechanisms:</td><td>").arg(dimColor);
+                for (GList *l = li->sasl_mechanisms; l; l = l->next) {
+                    if (l != li->sasl_mechanisms) html += ", ";
+                    html += QString("<b style='%1'>%2</b>")
+                                .arg(monoStyle,
+                                     QString::fromUtf8((const gchar *)l->data)
+                                     .toHtmlEscaped());
+                }
+                html += "</td></tr>";
+            }
+
+            /* Bind DNs */
+            if (li->bind_dns) {
+                html += "</table><br>";
+                html += QString("<h3 style='color:%1; margin-bottom:4px;'>Bind DNs</h3>")
+                            .arg(headingColor);
+                html += "<table cellpadding='3'>";
+                int shown = 0;
+                for (GList *l = li->bind_dns; l; l = l->next) {
+                    if (shown >= 20) {
+                        html += QString("<tr><td colspan='2' style='color:%1;'>"
+                                        "&hellip; and %2 more</td></tr>")
+                                    .arg(dimColor)
+                                    .arg((int)g_list_length(li->bind_dns) - shown);
+                        break;
+                    }
+                    html += QString("<tr><td style='%1 color:%2;'>%3</td></tr>")
+                                .arg(monoStyle, textColor,
+                                     QString::fromUtf8((const gchar *)l->data)
+                                     .toHtmlEscaped());
+                    shown++;
+                }
+            }
+            html += "</table><br>";
+        }
+
+        /* ── Section 3: Search Bases ────────────────────────────── */
+        if (li->base_dns) {
+            html += QString("<h3 style='color:%1; margin-bottom:4px;'>Search Bases</h3>")
+                        .arg(headingColor);
+            html += "<table cellpadding='3'>";
+            int shown = 0;
+            for (GList *l = li->base_dns; l; l = l->next) {
+                if (shown >= 25) {
+                    html += QString("<tr><td style='color:%1;'>&hellip; and %2 more</td></tr>")
+                                .arg(dimColor)
+                                .arg((int)g_list_length(li->base_dns) - shown);
+                    break;
+                }
+                html += QString("<tr><td style='%1 color:%2;'>%3</td></tr>")
+                            .arg(monoStyle, textColor,
+                                 QString::fromUtf8((const gchar *)l->data).toHtmlEscaped());
+                shown++;
+            }
+            html += "</table><br>";
+        }
+
+        /* ── Section 4: Search Filters ──────────────────────────── */
+        if (li->search_filters) {
+            guint total = g_list_length(li->search_filters);
+            html += QString("<h3 style='color:%1; margin-bottom:4px;'>Search Filters"
+                            "<span style='font-weight:normal; font-size:10px;'>"
+                            " (%2 unique)</span></h3>")
+                        .arg(headingColor).arg(total);
+            html += "<table cellpadding='3'>";
+            int shown = 0;
+            for (GList *l = li->search_filters; l; l = l->next) {
+                if (shown >= 30) {
+                    html += QString("<tr><td style='color:%1;'>"
+                                    "&hellip; and %2 more</td></tr>")
+                                .arg(dimColor).arg(total - 30);
+                    break;
+                }
+                html += QString("<tr><td style='%1 color:%2;'>%3</td></tr>")
+                            .arg(monoStyle, dimColor,
+                                 QString::fromUtf8((const gchar *)l->data).toHtmlEscaped());
+                shown++;
+            }
+            html += "</table><br>";
+        }
+
+        /* ── Section 5: Result Codes ────────────────────────────── */
+        if (li->result_counts && g_hash_table_size(li->result_counts) > 0) {
+            html += QString("<h3 style='color:%1; margin-bottom:4px;'>Result Codes</h3>")
+                        .arg(headingColor);
+            html += "<table cellpadding='3'>";
+
+            struct RcRow { QString name; guint count; };
+            QVector<RcRow> rows;
+            GHashTableIter iter;
+            gpointer k, v;
+            g_hash_table_iter_init(&iter, li->result_counts);
+            while (g_hash_table_iter_next(&iter, &k, &v))
+                rows.append({ QString::fromUtf8((const gchar *)k), *(const guint *)v });
+            std::sort(rows.begin(), rows.end(),
+                [](const RcRow &a, const RcRow &b){ return a.count > b.count; });
+
+            for (const auto &r : rows) {
+                bool isSuccess = (r.name == "success");
+                bool isCrit    = r.name.contains("Credentials") ||
+                                 r.name.contains("Access")      ||
+                                 r.name.contains("Anonymous");
+                QString color  = isSuccess ? valColor
+                               : isCrit    ? alertColor
+                               :             warnColor;
+                html += QString("<tr>"
+                                "<td style='%1 color:%2; padding-right:12px;'>%3</td>"
+                                "<td style='color:%4;'><b>%5</b></td>"
+                                "</tr>")
+                            .arg(monoStyle, dimColor, r.name.toHtmlEscaped(),
+                                 color).arg(r.count);
+            }
+            html += "</table><br>";
+        }
+
+        html += "</div>";
+        addHtmlTextEdit(mainLayout, dlg, dark, html);
+    }
+
+    addCloseButton(mainLayout, dlg, dark);
+    packet_analyzer_free_ldap_info(li);
+
+    if (m_autoCloseTimer) m_autoCloseTimer->stop();
+    m_contextMenuActive = true;
+    hide();
+    dlg->exec();
+    deleteLater();
+}
+
+/* ── SNMP Session Information dialog ───────────────────────────────────── */
+void ConnectionPopup::showSnmpInfoForRow(int row)
+{
+    if (row < 0 || row >= m_rowData.size() || !m_pair)
+        return;
+
+    const RowData &rd = m_rowData[row];
+
+    capture_file *cf = (capture_file *)plugin_if_get_capture_file(
+        extract_capture_file, NULL);
+
+    QString src = QString::fromUtf8(m_pair->src_addr);
+    QString dst = QString::fromUtf8(m_pair->dst_addr);
+    QString portLabel = (rd.port == 162) ? "SNMP Traps" : "SNMP";
+    QString dlgTitle  = QString("SNMP Information  \u2014  %1 \u2194 %2  (port %3)")
+                            .arg(src, dst).arg(rd.port);
+
+    if (!cf) {
+        QMessageBox::warning(this, dlgTitle,
+            "No capture file is currently loaded in Wireshark.");
+        return;
+    }
+
+    bool looksLikeMAC = (src.count(':') == 5 && dst.count(':') == 5);
+
+    snmp_info_t *si = packet_analyzer_extract_snmp_info(
+        cf, m_pair->src_addr, m_pair->dst_addr,
+        (guint16)rd.port, looksLikeMAC ? TRUE : FALSE);
+
+    bool dark = isDarkTheme();
+    QVBoxLayout *mainLayout;
+    QDialog *dlg = createInfoDialog(dlgTitle, dark, &mainLayout);
+
+    if (!si || !si->found) {
+        addSorryPlaceholder(mainLayout, dlg, dark, "SNMP", si ? si->matched_packets : 0);
+    } else {
+        QString html;
+        QString headingColor = dark ? "#90caf9" : "#1565c0";
+        QString textColor    = dark ? "#e0e0e0" : "#222";
+        QString dimColor     = dark ? "#999"    : "#666";
+        QString valColor     = dark ? "#c8e6c9" : "#1b5e20";
+        QString warnColor    = dark ? "#ffcc80" : "#c05800";
+        QString alertColor   = dark ? "#ef9a9a" : "#b71c1c";
+        QString monoStyle    = "font-family:monospace;";
+
+        html += QString("<div style='color:%1;'>").arg(textColor);
+
+        /* ── Section 1: Session Summary ─────────────────────────── */
+        html += QString("<h3 style='color:%1; margin-bottom:4px;'>Session Summary</h3>")
+                    .arg(headingColor);
+        html += "<table cellpadding='3'>";
+        html += QString("<tr><td style='color:%1;'>Total SNMP frames:</td>"
+                        "<td><b>%2</b></td></tr>")
+                    .arg(dimColor).arg(si->matched_packets);
+
+        /* Version breakdown */
+        if (si->v1_count)
+            html += QString("<tr><td style='color:%1;'>SNMPv1:</td>"
+                            "<td><b>%2</b></td></tr>").arg(dimColor).arg(si->v1_count);
+        if (si->v2c_count)
+            html += QString("<tr><td style='color:%1;'>SNMPv2c:</td>"
+                            "<td><b>%2</b></td></tr>").arg(dimColor).arg(si->v2c_count);
+        if (si->v3_count)
+            html += QString("<tr><td style='color:%1;'>SNMPv3:</td>"
+                            "<td style='color:%2;'><b>%3</b></td></tr>")
+                        .arg(dimColor, valColor).arg(si->v3_count);
+        html += "</table><br>";
+
+        /* ── Section 2: PDU Types ───────────────────────────────── */
+        if (si->pdu_counts && g_hash_table_size(si->pdu_counts) > 0) {
+            html += QString("<h3 style='color:%1; margin-bottom:4px;'>PDU Operations</h3>")
+                        .arg(headingColor);
+            html += "<table cellpadding='3'>";
+
+            struct PduRow { QString name; guint count; };
+            QVector<PduRow> prows;
+            GHashTableIter iter;
+            gpointer k, v;
+            g_hash_table_iter_init(&iter, si->pdu_counts);
+            while (g_hash_table_iter_next(&iter, &k, &v))
+                prows.append({ QString::fromUtf8((const gchar *)k), *(const guint *)v });
+            std::sort(prows.begin(), prows.end(),
+                [](const PduRow &a, const PduRow &b){ return a.count > b.count; });
+
+            for (const auto &r : prows) {
+                bool isSet  = r.name.startsWith("Set");
+                bool isTrap = r.name.startsWith("Trap");
+                QString color = isSet  ? warnColor
+                              : isTrap ? alertColor
+                              :          textColor;
+                html += QString("<tr>"
+                                "<td style='%1 color:%2; padding-right:12px;'>%3</td>"
+                                "<td style='color:%4;'><b>%5</b></td>"
+                                "</tr>")
+                            .arg(monoStyle, dimColor, r.name.toHtmlEscaped(),
+                                 color).arg(r.count);
+            }
+            html += "</table><br>";
+        }
+
+        /* ── Section 3: Community Strings (v1/v2c) ──────────────── */
+        if (si->communities) {
+            html += QString("<h3 style='color:%1; margin-bottom:4px;'>"
+                            "Community Strings"
+                            "<span style='font-weight:normal; font-size:10px;'>"
+                            " (v1/v2c authentication)</span></h3>")
+                        .arg(headingColor);
+            if (si->has_default_community)
+                html += QString("<div style='color:%1; font-size:10px; margin-bottom:4px;'>"
+                                "&#9888;&nbsp;Default community detected ("
+                                "<b>public</b> / <b>private</b>). "
+                                "These are well-known defaults and indicate weak security.</div>")
+                            .arg(alertColor);
+            html += "<table cellpadding='3'>";
+            int shown = 0;
+            for (GList *l = si->communities; l; l = l->next) {
+                if (shown >= 20) {
+                    html += QString("<tr><td style='color:%1;'>&hellip; and more</td></tr>")
+                                .arg(dimColor);
+                    break;
+                }
+                const gchar *cs = (const gchar *)l->data;
+                bool isDefault = (g_strcmp0(cs, "public") == 0 ||
+                                  g_strcmp0(cs, "private") == 0);
+                html += QString("<tr><td style='%1 color:%2;'>%3</td></tr>")
+                            .arg(monoStyle,
+                                 isDefault ? alertColor : textColor,
+                                 QString::fromUtf8(cs).toHtmlEscaped());
+                shown++;
+            }
+            html += "</table><br>";
+        }
+
+        /* ── Section 4: SNMPv3 Users ────────────────────────────── */
+        if (si->v3_usernames) {
+            html += QString("<h3 style='color:%1; margin-bottom:4px;'>SNMPv3 Users</h3>")
+                        .arg(headingColor);
+            html += "<table cellpadding='3'>";
+            for (GList *l = si->v3_usernames; l; l = l->next)
+                html += QString("<tr><td style='%1 color:%2;'>%3</td></tr>")
+                            .arg(monoStyle, valColor,
+                                 QString::fromUtf8((const gchar *)l->data).toHtmlEscaped());
+            html += "</table><br>";
+        }
+
+        /* ── Section 5: Top OIDs ────────────────────────────────── */
+        if (si->oid_counts && g_hash_table_size(si->oid_counts) > 0) {
+            guint totalOids = g_hash_table_size(si->oid_counts);
+            html += QString("<h3 style='color:%1; margin-bottom:4px;'>Variable Bindings"
+                            "<span style='font-weight:normal; font-size:10px;'>"
+                            " (%2 unique OIDs)</span></h3>")
+                        .arg(headingColor).arg(totalOids);
+
+            struct OidRow { QString name; guint count; };
+            QVector<OidRow> orows;
+            GHashTableIter oiter;
+            gpointer ok, ov;
+            g_hash_table_iter_init(&oiter, si->oid_counts);
+            while (g_hash_table_iter_next(&oiter, &ok, &ov))
+                orows.append({ QString::fromUtf8((const gchar *)ok), *(const guint *)ov });
+            std::sort(orows.begin(), orows.end(),
+                [](const OidRow &a, const OidRow &b){ return a.count > b.count; });
+
+            html += "<table cellpadding='3'>";
+            int shown = 0;
+            for (const auto &r : orows) {
+                if (shown >= 30) {
+                    html += QString("<tr><td colspan='2' style='color:%1;'>"
+                                    "&hellip; and %2 more OIDs</td></tr>")
+                                .arg(dimColor).arg((int)orows.size() - shown);
+                    break;
+                }
+                html += QString("<tr>"
+                                "<td style='%1 color:%2;'>%3</td>"
+                                "<td style='color:%4; padding-left:8px;'>&times;%5</td>"
+                                "</tr>")
+                            .arg(monoStyle, textColor,
+                                 r.name.toHtmlEscaped(), dimColor).arg(r.count);
+                shown++;
+            }
+            html += "</table><br>";
+        }
+
+        /* ── Section 6: Errors ──────────────────────────────────── */
+        if (si->error_total > 0 && si->error_counts &&
+            g_hash_table_size(si->error_counts) > 0) {
+            html += QString("<h3 style='color:%1; margin-bottom:4px;'>SNMP Errors"
+                            "<span style='font-weight:normal; font-size:10px;'>"
+                            " (%2 total)</span></h3>")
+                        .arg(headingColor).arg(si->error_total);
+            html += "<table cellpadding='3'>";
+
+            struct ErrRow { QString name; guint count; };
+            QVector<ErrRow> erows;
+            GHashTableIter eiter;
+            gpointer ek, ev;
+            g_hash_table_iter_init(&eiter, si->error_counts);
+            while (g_hash_table_iter_next(&eiter, &ek, &ev))
+                erows.append({ QString::fromUtf8((const gchar *)ek), *(const guint *)ev });
+            std::sort(erows.begin(), erows.end(),
+                [](const ErrRow &a, const ErrRow &b){ return a.count > b.count; });
+
+            for (const auto &r : erows)
+                html += QString("<tr>"
+                                "<td style='%1 color:%2; padding-right:12px;'>%3</td>"
+                                "<td style='color:%4;'><b>%5</b></td>"
+                                "</tr>")
+                            .arg(monoStyle, dimColor, r.name.toHtmlEscaped(),
+                                 alertColor).arg(r.count);
+            html += "</table><br>";
+        }
+
+        html += "</div>";
+        addHtmlTextEdit(mainLayout, dlg, dark, html);
+    }
+
+    addCloseButton(mainLayout, dlg, dark);
+    packet_analyzer_free_snmp_info(si);
+
+    if (m_autoCloseTimer) m_autoCloseTimer->stop();
+    m_contextMenuActive = true;
+    hide();
+    dlg->exec();
+    deleteLater();
+}
+
+/* ── Syslog Information dialog ──────────────────────────────────────────── */
+void ConnectionPopup::showSyslogInfoForRow(int row)
+{
+    if (row < 0 || row >= m_rowData.size() || !m_pair)
+        return;
+
+    const RowData &rd = m_rowData[row];
+
+    capture_file *cf = (capture_file *)plugin_if_get_capture_file(
+        extract_capture_file, NULL);
+
+    QString src = QString::fromUtf8(m_pair->src_addr);
+    QString dst = QString::fromUtf8(m_pair->dst_addr);
+
+    QString portLabel;
+    switch (rd.port) {
+        case  514: portLabel = "Syslog (514)";      break;
+        case  601: portLabel = "Syslog/TCP (601)";  break;
+        case 6514: portLabel = "Syslog/TLS (6514)"; break;
+        default:   portLabel = QString("port %1").arg(rd.port); break;
+    }
+
+    QString dlgTitle = QString("Syslog Information  \u2014  %1 \u2194 %2  (%3)")
+                           .arg(src, dst, portLabel);
+
+    if (!cf) {
+        QMessageBox::warning(this, dlgTitle,
+            "No capture file is currently loaded in Wireshark.");
+        return;
+    }
+
+    bool looksLikeMAC = (src.count(':') == 5 && dst.count(':') == 5);
+
+    syslog_info_t *sl = packet_analyzer_extract_syslog_info(
+        cf, m_pair->src_addr, m_pair->dst_addr,
+        (guint16)rd.port, looksLikeMAC ? TRUE : FALSE);
+
+    bool dark = isDarkTheme();
+    QVBoxLayout *mainLayout;
+    QDialog *dlg = createInfoDialog(dlgTitle, dark, &mainLayout);
+
+    if (!sl || !sl->found) {
+        addSorryPlaceholder(mainLayout, dlg, dark, "Syslog", sl ? sl->matched_packets : 0);
+    } else {
+        QString html;
+        QString headingColor = dark ? "#90caf9" : "#1565c0";
+        QString textColor    = dark ? "#e0e0e0" : "#222";
+        QString dimColor     = dark ? "#999"    : "#666";
+        QString valColor     = dark ? "#c8e6c9" : "#1b5e20";
+        QString warnColor    = dark ? "#ffcc80" : "#c05800";
+        QString alertColor   = dark ? "#ef9a9a" : "#b71c1c";
+        QString monoStyle    = "font-family:monospace;";
+
+        /* Severity color helper */
+        auto sevColor = [&](int sev) -> QString {
+            if (sev <= 1) return alertColor;
+            if (sev <= 3) return warnColor;
+            if (sev == 4) return (dark ? "#ffe082" : "#f57f17");
+            return dimColor;
+        };
+
+        html += QString("<div style='color:%1;'>").arg(textColor);
+
+        /* ── Section 1: Session Summary ─────────────────────────── */
+        html += QString("<h3 style='color:%1; margin-bottom:4px;'>Session Summary</h3>")
+                    .arg(headingColor);
+        html += "<table cellpadding='3'>";
+        html += QString("<tr><td style='color:%1;'>Total syslog frames:</td>"
+                        "<td><b>%2</b></td></tr>")
+                    .arg(dimColor).arg(sl->matched_packets);
+        if (sl->rfc3164_count && sl->rfc5424_count) {
+            html += QString("<tr><td style='color:%1;'>Format:</td>"
+                            "<td>RFC 3164: <b>%2</b>&nbsp;&nbsp;RFC 5424: <b>%3</b></td></tr>")
+                        .arg(dimColor).arg(sl->rfc3164_count).arg(sl->rfc5424_count);
+        } else if (sl->rfc5424_count) {
+            html += QString("<tr><td style='color:%1;'>Format:</td>"
+                            "<td>RFC 5424 (structured syslog)</td></tr>").arg(dimColor);
+        } else {
+            html += QString("<tr><td style='color:%1;'>Format:</td>"
+                            "<td>RFC 3164 (BSD syslog)</td></tr>").arg(dimColor);
+        }
+        html += "</table><br>";
+
+        /* ── Section 2: Severity Breakdown ──────────────────────── */
+        static const char *sevNames[8] = {
+            "Emergency (0)", "Alert (1)", "Critical (2)", "Error (3)",
+            "Warning (4)",   "Notice (5)", "Informational (6)", "Debug (7)"
+        };
+        guint32 totalSev = 0;
+        for (int i = 0; i < 8; i++) totalSev += sl->severity_counts[i];
+
+        if (totalSev > 0) {
+            html += QString("<h3 style='color:%1; margin-bottom:4px;'>Severity Distribution"
+                            "<span style='font-weight:normal; font-size:10px;'>"
+                            " (%2 messages)</span></h3>")
+                        .arg(headingColor).arg(totalSev);
+            html += "<table cellpadding='3'>";
+            for (int i = 0; i < 8; i++) {
+                if (!sl->severity_counts[i]) continue;
+                guint32 pct = (sl->severity_counts[i] * 100) / totalSev;
+                html += QString("<tr>"
+                                "<td style='color:%1; min-width:160px;'>%2</td>"
+                                "<td style='color:%3;'><b>%4</b></td>"
+                                "<td style='color:%5; padding-left:6px; font-size:10px;'>"
+                                "%6%</td>"
+                                "</tr>")
+                            .arg(sevColor(i))
+                            .arg(QString::fromUtf8(sevNames[i]).toHtmlEscaped())
+                            .arg(sevColor(i)).arg(sl->severity_counts[i])
+                            .arg(dimColor).arg(pct);
+            }
+            html += "</table><br>";
+        }
+
+        /* ── Section 3: Facility Breakdown ──────────────────────── */
+        if (sl->facility_counts && g_hash_table_size(sl->facility_counts) > 0) {
+            html += QString("<h3 style='color:%1; margin-bottom:4px;'>Facility Breakdown</h3>")
+                        .arg(headingColor);
+
+            struct FacRow { QString name; guint count; };
+            QVector<FacRow> frows;
+            GHashTableIter fiter;
+            gpointer fk, fv;
+            g_hash_table_iter_init(&fiter, sl->facility_counts);
+            while (g_hash_table_iter_next(&fiter, &fk, &fv))
+                frows.append({ QString::fromUtf8((const gchar *)fk), *(const guint *)fv });
+            std::sort(frows.begin(), frows.end(),
+                [](const FacRow &a, const FacRow &b){ return a.count > b.count; });
+
+            html += "<table cellpadding='3'>";
+            for (const auto &r : frows)
+                html += QString("<tr>"
+                                "<td style='%1 color:%2; padding-right:12px;'>%3</td>"
+                                "<td><b>%4</b></td>"
+                                "</tr>")
+                            .arg(monoStyle, dimColor,
+                                 r.name.toHtmlEscaped()).arg(r.count);
+            html += "</table><br>";
+        }
+
+        /* ── Section 4: Source Hostnames ────────────────────────── */
+        if (sl->hostnames) {
+            html += QString("<h3 style='color:%1; margin-bottom:4px;'>Source Hosts</h3>")
+                        .arg(headingColor);
+            html += "<table cellpadding='3'>";
+            int shown = 0;
+            for (GList *l = sl->hostnames; l; l = l->next) {
+                if (shown >= 20) {
+                    html += QString("<tr><td style='color:%1;'>&hellip; and more</td></tr>")
+                                .arg(dimColor);
+                    break;
+                }
+                html += QString("<tr><td style='%1 color:%2;'>%3</td></tr>")
+                            .arg(monoStyle, valColor,
+                                 QString::fromUtf8((const gchar *)l->data).toHtmlEscaped());
+                shown++;
+            }
+            html += "</table><br>";
+        }
+
+        /* ── Section 5: Application / Process Names ─────────────── */
+        if (sl->app_names) {
+            html += QString("<h3 style='color:%1; margin-bottom:4px;'>Applications / Processes</h3>")
+                        .arg(headingColor);
+            html += "<table cellpadding='3'>";
+            int shown = 0;
+            for (GList *l = sl->app_names; l; l = l->next) {
+                if (shown >= 30) {
+                    html += QString("<tr><td style='color:%1;'>&hellip; and more</td></tr>")
+                                .arg(dimColor);
+                    break;
+                }
+                html += QString("<tr><td style='%1 color:%2;'>%3</td></tr>")
+                            .arg(monoStyle, textColor,
+                                 QString::fromUtf8((const gchar *)l->data).toHtmlEscaped());
+                shown++;
+            }
+            html += "</table><br>";
+        }
+
+        /* ── Section 6: Critical Message Samples ────────────────── */
+        if (sl->critical_msgs) {
+            guint total = g_list_length(sl->critical_msgs);
+            html += QString("<h3 style='color:%1; margin-bottom:4px;'>"
+                            "Critical / Error Messages"
+                            "<span style='font-weight:normal; font-size:10px;'>"
+                            " (severity 0\u20133, up to 15 samples)</span></h3>")
+                        .arg(headingColor);
+            html += QString("<div style='font-size:10px; color:%1; margin-bottom:6px;'>"
+                            "&#9888;&nbsp;These messages had Emergency / Alert / Critical"
+                            " / Error severity and warrant investigation.</div>")
+                        .arg(warnColor);
+            int shown = 0;
+            for (GList *l = sl->critical_msgs; l; l = l->next) {
+                const gchar *msg = (const gchar *)l->data;
+                if (!msg) continue;
+                shown++;
+                /* Colorize by embedded severity label */
+                QString msgStr = QString::fromUtf8(msg);
+                QString color  = msgStr.startsWith("[Emergency") || msgStr.startsWith("[Alert")
+                               ? alertColor : warnColor;
+                html += QString("<div style='%1 color:%2; padding:2px 0 2px 8px;'>"
+                                "&#8226;&nbsp;%3</div>")
+                            .arg(monoStyle, color, msgStr.toHtmlEscaped());
+            }
+            if ((guint)shown < total)
+                html += QString("<div style='color:%1; padding-left:8px;'>"
+                                "&hellip; and %2 more</div>")
+                            .arg(dimColor).arg(total - shown);
+            html += "<br>";
+        }
+
+        html += "</div>";
+        addHtmlTextEdit(mainLayout, dlg, dark, html);
+    }
+
+    addCloseButton(mainLayout, dlg, dark);
+    packet_analyzer_free_syslog_info(sl);
+
+    if (m_autoCloseTimer) m_autoCloseTimer->stop();
+    m_contextMenuActive = true;
+    hide();
+    dlg->exec();
+    deleteLater();
+}
+
+/* ── SSH / SFTP / SCP Information dialog ───────────────────────────────── */
+void ConnectionPopup::showSshInfoForRow(int row)
+{
+    if (row < 0 || row >= m_rowData.size() || !m_pair)
+        return;
+
+    const RowData &rd = m_rowData[row];
+
+    capture_file *cf = (capture_file *)plugin_if_get_capture_file(
+        extract_capture_file, NULL);
+
+    QString src = QString::fromUtf8(m_pair->src_addr);
+    QString dst = QString::fromUtf8(m_pair->dst_addr);
+
+    QString dlgTitle = QString("SSH Information  \u2014  %1 \u2194 %2  (port %3)")
+                           .arg(src, dst, QString::number(rd.port));
+
+    if (!cf) {
+        QMessageBox::warning(this, dlgTitle,
+            "No capture file is currently loaded in Wireshark.");
+        return;
+    }
+
+    bool looksLikeMAC = (src.count(':') == 5 && dst.count(':') == 5);
+
+    ssh_info_t *si = packet_analyzer_extract_ssh_info(
+        cf, m_pair->src_addr, m_pair->dst_addr,
+        (guint16)rd.port, looksLikeMAC ? TRUE : FALSE);
+
+    bool dark = isDarkTheme();
+    QVBoxLayout *mainLayout;
+    QDialog *dlg = createInfoDialog(dlgTitle, dark, &mainLayout);
+
+    if (!si || !si->found) {
+        addSorryPlaceholder(mainLayout, dlg, dark, "SSH", si ? si->matched_packets : 0);
+    } else {
+        QString headingColor = dark ? "#90caf9" : "#1565c0";
+        QString textColor    = dark ? "#e0e0e0" : "#222";
+        QString dimColor     = dark ? "#999"    : "#666";
+        QString valColor     = dark ? "#e0e0e0" : "#1a1a1a";
+        QString warnColor    = dark ? "#ffcc80" : "#c05800";
+        QString alertColor   = dark ? "#ef9a9a" : "#b71c1c";
+        QString okColor      = dark ? "#a5d6a7" : "#2e7d32";
+        QString monoStyle    = "font-family:monospace; font-size:12px;";
+        const QString tableStyle = "border-collapse:collapse; width:100%;";
+        const QString cellStyle  = "padding:3px 6px 3px 0;";
+
+        /* Is channel / auth data available (requires Wireshark decryption keys)? */
+        bool hasDecryptedData =
+            si->usernames        || si->auth_methods       ||
+            si->auth_success_count > 0 || si->auth_failure_count > 0 ||
+            si->has_shell        || si->has_exec            ||
+            si->has_sftp         || si->has_scp             ||
+            si->has_x11_forwarding || si->has_tcp_forwarding ||
+            si->has_agent_forwarding;
+
+        QString html = "<div style='font-family:sans-serif; font-size:13px;'>";
+
+        /* Encryption notice when payload is opaque */
+        if (!hasDecryptedData) {
+            html += QString("<div style='background:%1; color:%2; padding:6px 10px; "
+                            "border-radius:4px; margin-bottom:10px;'>"
+                            "<b>\U0001f512 Encrypted Traffic</b> &mdash; SSH payload is "
+                            "encrypted.  Only handshake data (version strings &amp; "
+                            "algorithm negotiation) is visible.  Provide a decryption "
+                            "key file in Wireshark preferences to reveal auth and channel "
+                            "details.</div>")
+                        .arg(dark ? "#332a00" : "#fffbe0", warnColor);
+        }
+
+        /* ── Section 1: Session Summary ─────────────────────────────── */
+        html += QString("<h3 style='color:%1; margin-bottom:4px;'>Session Summary</h3>")
+                    .arg(headingColor);
+        html += QString("<table style='%1'>").arg(tableStyle);
+
+        html += QString("<tr><td style='color:%1; %2'>SSH frames:</td>"
+                        "<td style='%3'><b>%4</b></td></tr>")
+                    .arg(dimColor, cellStyle, monoStyle).arg(si->matched_packets);
+
+        guint bannerIdx = 0;
+        for (GList *n = si->banners; n; n = n->next, bannerIdx++) {
+            QString banner = QString::fromUtf8((gchar *)n->data);
+            QString role   = (bannerIdx == 0) ? "Banner (1st seen)" : "Banner (2nd seen)";
+            html += QString("<tr><td style='color:%1; %2'>%3:</td>"
+                            "<td style='%4 color:%5;'>%6</td></tr>")
+                        .arg(dimColor, cellStyle, role,
+                             monoStyle, valColor, banner.toHtmlEscaped());
+        }
+
+        if (si->banners) {
+            QString protoLabel = si->protocol_v2
+                ? QString("<b style='color:%1;'>SSH-2 (secure)</b>").arg(okColor)
+                : QString("<b style='color:%1;'>SSH-1 (legacy \u2014 insecure!)</b>").arg(alertColor);
+            html += QString("<tr><td style='color:%1; %2'>Protocol:</td>"
+                            "<td>%3</td></tr>")
+                        .arg(dimColor, cellStyle, protoLabel);
+        }
+
+        if (si->kexinit_count > 2) {
+            /* Both sides send KEXINIT so /2 gives re-key count */
+            html += QString("<tr><td style='color:%1; %2'>Re-key events:</td>"
+                            "<td style='%3'><b>%4</b></td></tr>")
+                        .arg(dimColor, cellStyle, monoStyle)
+                        .arg(si->kexinit_count / 2);
+        }
+        if (si->disconnect_count > 0)
+            html += QString("<tr><td style='color:%1; %2'>Disconnects:</td>"
+                            "<td style='color:%3;'>%4</td></tr>")
+                        .arg(dimColor, cellStyle, alertColor).arg(si->disconnect_count);
+
+        html += "</table><br>";
+
+        /* ── Section 2: Key Exchange & Algorithms ──────────────────── */
+        bool hasHandshake = si->kex_algorithms || si->host_key_algorithms ||
+                            si->ciphers_c2s    || si->ciphers_s2c         ||
+                            si->macs_c2s       || si->macs_s2c;
+        if (hasHandshake) {
+            html += QString("<h3 style='color:%1; margin-bottom:4px;'>"
+                            "Key Exchange &amp; Algorithms</h3>").arg(headingColor);
+
+            auto fmtAlgList = [&](GList *lst, int maxShow = 5) -> QString {
+                if (!lst) return QString("<span style='color:%1;'>n/a</span>").arg(dimColor);
+                QString s;
+                int shown = 0;
+                for (GList *n = lst; n && shown < maxShow; n = n->next, shown++) {
+                    if (shown > 0) s += "<br>";
+                    s += QString("<span style='%1 color:%2;'>%3</span>")
+                             .arg(monoStyle, shown == 0 ? valColor : dimColor,
+                                  QString::fromUtf8((gchar *)n->data).toHtmlEscaped());
+                }
+                int total = (int)g_list_length(lst);
+                if (total > maxShow)
+                    s += QString("<br><span style='color:%1;'>\u2026 +%2 more</span>")
+                             .arg(dimColor).arg(total - maxShow);
+                return s;
+            };
+
+            html += QString("<table style='%1'>").arg(tableStyle);
+            if (si->kex_algorithms)
+                html += QString("<tr><td style='color:%1; %2 vertical-align:top;'>KEX algorithms:</td>"
+                                "<td>%3</td></tr>")
+                            .arg(dimColor, cellStyle, fmtAlgList(si->kex_algorithms));
+            if (si->host_key_algorithms)
+                html += QString("<tr><td style='color:%1; %2 vertical-align:top;'>Host key types:</td>"
+                                "<td>%3</td></tr>")
+                            .arg(dimColor, cellStyle, fmtAlgList(si->host_key_algorithms));
+            if (si->ciphers_c2s)
+                html += QString("<tr><td style='color:%1; %2 vertical-align:top;'>Ciphers (C&#8594;S):</td>"
+                                "<td>%3</td></tr>")
+                            .arg(dimColor, cellStyle, fmtAlgList(si->ciphers_c2s));
+            if (si->ciphers_s2c)
+                html += QString("<tr><td style='color:%1; %2 vertical-align:top;'>Ciphers (S&#8594;C):</td>"
+                                "<td>%3</td></tr>")
+                            .arg(dimColor, cellStyle, fmtAlgList(si->ciphers_s2c));
+            if (si->macs_c2s)
+                html += QString("<tr><td style='color:%1; %2 vertical-align:top;'>MACs (C&#8594;S):</td>"
+                                "<td>%3</td></tr>")
+                            .arg(dimColor, cellStyle, fmtAlgList(si->macs_c2s));
+            if (si->macs_s2c)
+                html += QString("<tr><td style='color:%1; %2 vertical-align:top;'>MACs (S&#8594;C):</td>"
+                                "<td>%3</td></tr>")
+                            .arg(dimColor, cellStyle, fmtAlgList(si->macs_s2c));
+            if (si->compress_c2s || si->compress_s2c) {
+                QString compVal = si->compression_enabled
+                    ? QString("<span style='color:%1;'>Enabled</span>").arg(okColor)
+                    : QString("<span style='color:%1;'>None / disabled</span>").arg(dimColor);
+                html += QString("<tr><td style='color:%1; %2'>Compression:</td>"
+                                "<td>%3</td></tr>")
+                            .arg(dimColor, cellStyle, compVal);
+            }
+            html += "</table><br>";
+        }
+
+        /* ── Section 3: Authentication ─────────────────────────────── */
+        bool hasAuth = si->usernames || si->auth_methods ||
+                       si->auth_success_count > 0 || si->auth_failure_count > 0;
+        if (hasAuth) {
+            html += QString("<h3 style='color:%1; margin-bottom:4px;'>Authentication</h3>")
+                        .arg(headingColor);
+            html += QString("<table style='%1'>").arg(tableStyle);
+
+            for (GList *n = si->usernames; n; n = n->next) {
+                html += QString("<tr><td style='color:%1; %2'>Username:</td>"
+                                "<td style='%3 color:%4;'>%5</td></tr>")
+                            .arg(dimColor, cellStyle, monoStyle, valColor,
+                                 QString::fromUtf8((gchar *)n->data).toHtmlEscaped());
+            }
+
+            if (si->auth_methods) {
+                QStringList methods;
+                for (GList *n = si->auth_methods; n; n = n->next)
+                    methods << QString::fromUtf8((gchar *)n->data);
+                html += QString("<tr><td style='color:%1; %2'>Methods used:</td>"
+                                "<td style='%3 color:%4;'>%5</td></tr>")
+                            .arg(dimColor, cellStyle, monoStyle, valColor,
+                                 methods.join(", ").toHtmlEscaped());
+            }
+
+            if (si->auth_success_count > 0)
+                html += QString("<tr><td style='color:%1; %2'>Auth successes:</td>"
+                                "<td style='color:%3;'><b>%4</b></td></tr>")
+                            .arg(dimColor, cellStyle, okColor).arg(si->auth_success_count);
+            if (si->auth_failure_count > 0)
+                html += QString("<tr><td style='color:%1; %2'>Auth failures:</td>"
+                                "<td style='color:%3;'><b>%4</b></td></tr>")
+                            .arg(dimColor, cellStyle,
+                                 si->auth_failure_count > 5 ? alertColor : warnColor)
+                            .arg(si->auth_failure_count);
+
+            html += "</table><br>";
+        }
+
+        /* ── Section 4: Channel Usage & Features ───────────────────── */
+        if (hasDecryptedData || si->channel_count > 0) {
+            html += QString("<h3 style='color:%1; margin-bottom:4px;'>"
+                            "Channel Usage &amp; Features</h3>").arg(headingColor);
+            html += QString("<table style='%1'>").arg(tableStyle);
+
+            if (si->channel_count > 0)
+                html += QString("<tr><td style='color:%1; %2'>Channels opened:</td>"
+                                "<td style='%3'><b>%4</b></td></tr>")
+                            .arg(dimColor, cellStyle, monoStyle).arg(si->channel_count);
+
+            auto featureRow = [&](const QString &name, gboolean present,
+                                  const QString &note = {}) {
+                QString icon  = present ? "\u2705" : "\u274c";
+                QString color = present ? okColor  : dimColor;
+                QString noteHtml = note.isEmpty() ? ""
+                    : QString(" <span style='color:%1; font-size:11px;'>%2</span>")
+                          .arg(warnColor, note.toHtmlEscaped());
+                html += QString("<tr><td style='color:%1; %2'>%3:</td>"
+                                "<td style='color:%4;'>%5%6</td></tr>")
+                            .arg(dimColor, cellStyle, name.toHtmlEscaped(),
+                                 color, icon, noteHtml);
+            };
+
+            featureRow("Shell session",        si->has_shell);
+            featureRow("Exec channel",         si->has_exec);
+            featureRow("SFTP subsystem",        si->has_sftp);
+            featureRow("SCP file transfer",     si->has_scp);
+            featureRow("X11 forwarding",        si->has_x11_forwarding,
+                       si->has_x11_forwarding ? "X Window System tunnel active" : "");
+            featureRow("TCP port forwarding",   si->has_tcp_forwarding,
+                       si->has_tcp_forwarding ? "tunnel-in-tunnel detected" : "");
+            featureRow("SSH agent forwarding",  si->has_agent_forwarding,
+                       si->has_agent_forwarding ? "credential forwarding active" : "");
+
+            html += "</table><br>";
+        }
+
+        /* ── Section 5: Subsystems ─────────────────────────────────── */
+        if (si->subsystems) {
+            html += QString("<h3 style='color:%1; margin-bottom:4px;'>Subsystems</h3>")
+                        .arg(headingColor);
+            html += "<ul style='margin:0 0 8px 16px; padding:0;'>";
+            for (GList *n = si->subsystems; n; n = n->next)
+                html += QString("<li style='%1 color:%2;'>%3</li>")
+                            .arg(monoStyle, valColor,
+                                 QString::fromUtf8((gchar *)n->data).toHtmlEscaped());
+            html += "</ul><br>";
+        }
+
+        /* ── Section 6: Exec Command Samples ──────────────────────── */
+        if (si->exec_commands) {
+            html += QString("<h3 style='color:%1; margin-bottom:4px;'>"
+                            "Exec Commands (sampled)</h3>").arg(headingColor);
+            for (GList *n = si->exec_commands; n; n = n->next) {
+                QString cmd   = QString::fromUtf8((gchar *)n->data);
+                bool    isScp = cmd.startsWith("scp ");
+                html += QString("<div style='%1 color:%2; padding:2px 0 2px 8px;'>"
+                                "&#8226;&nbsp;%3</div>")
+                            .arg(monoStyle, isScp ? warnColor : valColor,
+                                 cmd.toHtmlEscaped());
+            }
+            html += "<br>";
+        }
+
+        html += "</div>";
+        addHtmlTextEdit(mainLayout, dlg, dark, html);
+    }
+
+    addCloseButton(mainLayout, dlg, dark);
+    packet_analyzer_free_ssh_info(si);
+
+    if (m_autoCloseTimer) m_autoCloseTimer->stop();
+    m_contextMenuActive = true;
+    hide();
+    dlg->exec();
+    deleteLater();
+}
+
+
+/* ── FTP Information dialog ─────────────────────────────────────────────── */
+void ConnectionPopup::showFtpInfoForRow(int row)
+{
+    if (row < 0 || row >= m_rowData.size() || !m_pair) return;
+    const RowData &rd = m_rowData[row];
+
+    capture_file *cf = (capture_file *)plugin_if_get_capture_file(
+        extract_capture_file, NULL);
+
+    QString src = QString::fromUtf8(m_pair->src_addr);
+    QString dst = QString::fromUtf8(m_pair->dst_addr);
+    QString dlgTitle = QString("FTP Information  \u2014  %1 \u2194 %2  (port %3)")
+                           .arg(src, dst, QString::number(rd.port));
+
+    if (!cf) {
+        QMessageBox::warning(this, dlgTitle,
+            "No capture file is currently loaded in Wireshark.");
+        return;
+    }
+
+    bool looksLikeMAC = (src.count(':') == 5 && dst.count(':') == 5);
+    bool dark = isDarkTheme();
+
+    ftp_info_t *fi = packet_analyzer_extract_ftp_info(
+        cf, m_pair->src_addr, m_pair->dst_addr,
+        (guint16)rd.port, looksLikeMAC ? TRUE : FALSE);
+
+    QVBoxLayout *mainLayout;
+    QDialog *dlg = createInfoDialog(dlgTitle, dark, &mainLayout);
+
+    if (!fi || !fi->found) {
+        addSorryPlaceholder(mainLayout, dlg, dark, "FTP", fi ? fi->matched_packets : 0);
+    } else {
+        QString headingColor = dark ? "#90caf9" : "#1565c0";
+        QString valColor     = dark ? "#e0e0e0" : "#1a1a1a";
+        QString alertColor   = dark ? "#ef9a9a" : "#b71c1c";
+        QString warnColor    = dark ? "#ffcc80" : "#c05800";
+        QString okColor      = dark ? "#a5d6a7" : "#2e7d32";
+
+        QString html;
+
+        /* ── 1. Session Summary ──────────────────────────────────── */
+        html += QString("<h3 style='color:%1;margin:0 0 6px 0;'>Session Summary</h3>")
+                    .arg(headingColor);
+        html += "<table style='border-collapse:collapse;'>";
+        html += QString("<tr><td style='padding:2px 12px 2px 0;'>Packets analysed</td>"
+                        "<td><b style='color:%1;'>%2</b></td></tr>")
+                    .arg(valColor).arg(fi->matched_packets);
+
+        QString loginStatus;
+        if (fi->login_success)
+            loginStatus = QString("<b style='color:%1;'>Success (230)</b>").arg(okColor);
+        else if (fi->login_failed)
+            loginStatus = QString("<b style='color:%1;'>Failed (530)</b>").arg(alertColor);
+        else
+            loginStatus = "<i style='color:#888;'>Not observed</i>";
+        html += "<tr><td style='padding:2px 12px 2px 0;'>Login result</td><td>"
+                + loginStatus + "</td></tr>";
+
+        if (fi->username && *fi->username)
+            html += QString("<tr><td style='padding:2px 12px 2px 0;'>Username</td>"
+                            "<td><b style='color:%1;'>%2</b></td></tr>")
+                        .arg(alertColor)
+                        .arg(QString::fromUtf8(fi->username).toHtmlEscaped());
+        if (fi->password && *fi->password)
+            html += QString("<tr><td style='padding:2px 12px 2px 0;'>Password</td>"
+                            "<td><b style='color:%1;'>%2</b>&nbsp;"
+                            "<span style='font-size:10px;color:%3;'>(cleartext!)</span></td></tr>")
+                        .arg(alertColor)
+                        .arg(QString::fromUtf8(fi->password).toHtmlEscaped())
+                        .arg(alertColor);
+
+        QString dataMode;
+        if (fi->passive_mode && fi->active_mode) dataMode = "Active + Passive";
+        else if (fi->passive_mode) dataMode = "Passive (PASV/EPSV)";
+        else if (fi->active_mode)  dataMode = "Active (PORT/EPRT)";
+        else                        dataMode = "—";
+        html += QString("<tr><td style='padding:2px 12px 2px 0;'>Data mode</td>"
+                        "<td><b>%1</b></td></tr>").arg(dataMode);
+
+        html += QString("<tr><td style='padding:2px 12px 2px 0;'>Downloads (RETR)</td>"
+                        "<td><b>%1</b></td></tr>").arg(fi->retr_count);
+        html += QString("<tr><td style='padding:2px 12px 2px 0;'>Uploads (STOR/STOU)</td>"
+                        "<td><b>%1</b></td></tr>").arg(fi->stor_count);
+        html += QString("<tr><td style='padding:2px 12px 2px 0;'>Responses 2xx</td>"
+                        "<td><b style='color:%1;'>%2</b></td></tr>")
+                    .arg(okColor).arg(fi->success_count);
+        html += QString("<tr><td style='padding:2px 12px 2px 0;'>Responses 4xx/5xx</td>"
+                        "<td><b style='color:%1;'>%2</b></td></tr>")
+                    .arg(fi->error_count ? alertColor : valColor).arg(fi->error_count);
+        if (fi->server_banner && *fi->server_banner)
+            html += QString("<tr><td style='padding:2px 12px 2px 0;'>Server banner</td>"
+                            "<td><i>%1</i></td></tr>")
+                        .arg(QString::fromUtf8(fi->server_banner).toHtmlEscaped());
+        if (fi->system_type && *fi->system_type)
+            html += QString("<tr><td style='padding:2px 12px 2px 0;'>System (SYST)</td>"
+                            "<td>%1</td></tr>")
+                        .arg(QString::fromUtf8(fi->system_type).toHtmlEscaped());
+        html += "</table>";
+
+        /* ── 2. FEAT ──────────────────────────────────────────────── */
+        if (fi->features) {
+            html += QString("<h3 style='color:%1;margin:12px 0 4px 0;'>Server Features (FEAT)</h3>")
+                        .arg(headingColor);
+            html += "<ul style='margin:0;padding-left:18px;'>";
+            for (GList *n = fi->features; n; n = n->next)
+                html += "<li>" + QString::fromUtf8((gchar *)n->data).toHtmlEscaped() + "</li>";
+            html += "</ul>";
+        }
+
+        /* ── 3. Data Ports ───────────────────────────────────────── */
+        if (fi->pasv_addrs || fi->port_addrs) {
+            html += QString("<h3 style='color:%1;margin:12px 0 4px 0;'>Data Ports Negotiated</h3>")
+                        .arg(headingColor);
+            html += "<table style='border-collapse:collapse;'>";
+            for (GList *n = fi->pasv_addrs; n; n = n->next)
+                html += QString("<tr><td style='padding:2px 12px 2px 0;'>PASV/EPSV</td>"
+                                "<td><b style='color:%1;'>%2</b></td></tr>")
+                            .arg(valColor)
+                            .arg(QString::fromUtf8((gchar *)n->data).toHtmlEscaped());
+            for (GList *n = fi->port_addrs; n; n = n->next)
+                html += QString("<tr><td style='padding:2px 12px 2px 0;'>PORT/EPRT</td>"
+                                "<td><b style='color:%1;'>%2</b></td></tr>")
+                            .arg(warnColor)
+                            .arg(QString::fromUtf8((gchar *)n->data).toHtmlEscaped());
+            html += "</table>";
+        }
+
+        /* ── 4. Command Usage ─────────────────────────────────────── */
+        if (g_hash_table_size(fi->cmd_counts) > 0) {
+            html += QString("<h3 style='color:%1;margin:12px 0 4px 0;'>Command Usage</h3>")
+                        .arg(headingColor);
+            html += "<table style='border-collapse:collapse;'>";
+            GList *keys = g_hash_table_get_keys(fi->cmd_counts);
+            auto cmpDesc = [](gconstpointer a, gconstpointer b, gpointer ht) -> gint {
+                guint ca = GPOINTER_TO_UINT(g_hash_table_lookup((GHashTable*)ht, a));
+                guint cb = GPOINTER_TO_UINT(g_hash_table_lookup((GHashTable*)ht, b));
+                return (gint)cb - (gint)ca;
+            };
+            keys = g_list_sort_with_data(keys, cmpDesc, fi->cmd_counts);
+            for (GList *n = keys; n; n = n->next) {
+                const gchar *cmd = (gchar *)n->data;
+                guint cnt = GPOINTER_TO_UINT(g_hash_table_lookup(fi->cmd_counts, cmd));
+                QString c = QString::fromUtf8(cmd);
+                QString color = (c=="PASS") ? alertColor :
+                                (c=="RETR"||c=="STOR") ? okColor : valColor;
+                html += QString("<tr><td style='padding:2px 16px 2px 0;'>"
+                                "<b style='color:%1;font-family:monospace;'>%2</b></td>"
+                                "<td>%3&times;</td></tr>")
+                            .arg(color, c.toHtmlEscaped()).arg(cnt);
+            }
+            g_list_free(keys);
+            html += "</table>";
+        }
+
+        /* ── 5. Files / Paths ─────────────────────────────────────── */
+        if (fi->filenames) {
+            html += QString("<h3 style='color:%1;margin:12px 0 4px 0;'>Files / Paths</h3>")
+                        .arg(headingColor);
+            html += "<ul style='margin:0;padding-left:18px;font-family:monospace;font-size:12px;'>";
+            guint shown = 0;
+            for (GList *n = fi->filenames; n && shown < 40; n = n->next, shown++)
+                html += "<li>" + QString::fromUtf8((gchar *)n->data).toHtmlEscaped() + "</li>";
+            guint total = g_list_length(fi->filenames);
+            if (total > 40)
+                html += QString("<li><i>… and %1 more</i></li>").arg(total - 40);
+            html += "</ul>";
+        }
+
+        /* ── 6. Full Command Log ──────────────────────────────────── */
+        if (fi->command_log) {
+            html += QString("<h3 style='color:%1;margin:12px 0 4px 0;'>Command Log</h3>")
+                        .arg(headingColor);
+            html += "<div style='font-family:monospace;font-size:11px;line-height:1.5;'>";
+            for (GList *n = fi->command_log; n; n = n->next) {
+                QString entry = QString::fromUtf8((gchar *)n->data).toHtmlEscaped();
+                QString color = entry.startsWith("USER") || entry.startsWith("PASS")
+                                ? alertColor
+                                : entry.startsWith("RETR") || entry.startsWith("STOR")
+                                  ? okColor
+                                  : (dark ? "#c0c0c0" : "#333");
+                html += QString("<div style='color:%1;'>%2</div>").arg(color, entry);
+            }
+            html += "</div>";
+        }
+
+        addHtmlTextEdit(mainLayout, dlg, dark, html);
+    }
+
+    addCloseButton(mainLayout, dlg, dark);
+    packet_analyzer_free_ftp_info(fi);
+
+    if (m_autoCloseTimer) m_autoCloseTimer->stop();
+    m_contextMenuActive = true;
+    hide();
+    dlg->exec();
+    deleteLater();
+}
+
+/* ── Telnet Information dialog ──────────────────────────────────────────── */
+void ConnectionPopup::showTelnetInfoForRow(int row)
+{
+    if (row < 0 || row >= m_rowData.size() || !m_pair) return;
+    const RowData &rd = m_rowData[row];
+
+    capture_file *cf = (capture_file *)plugin_if_get_capture_file(
+        extract_capture_file, NULL);
+
+    QString src = QString::fromUtf8(m_pair->src_addr);
+    QString dst = QString::fromUtf8(m_pair->dst_addr);
+    QString dlgTitle = QString("Telnet Information  \u2014  %1 \u2194 %2  (port %3)")
+                           .arg(src, dst, QString::number(rd.port));
+
+    if (!cf) {
+        QMessageBox::warning(this, dlgTitle,
+            "No capture file is currently loaded in Wireshark.");
+        return;
+    }
+
+    bool looksLikeMAC = (src.count(':') == 5 && dst.count(':') == 5);
+    bool dark = isDarkTheme();
+
+    telnet_info_t *ti = packet_analyzer_extract_telnet_info(
+        cf, m_pair->src_addr, m_pair->dst_addr,
+        (guint16)rd.port, looksLikeMAC ? TRUE : FALSE);
+
+    QVBoxLayout *mainLayout;
+    QDialog *dlg = createInfoDialog(dlgTitle, dark, &mainLayout);
+    /* Make it slightly taller to accommodate the session data section */
+    dlg->resize(720, 640);
+
+    if (!ti || !ti->found) {
+        addSorryPlaceholder(mainLayout, dlg, dark, "Telnet", ti ? ti->matched_packets : 0);
+    } else {
+        QString headingColor = dark ? "#90caf9" : "#1565c0";
+        QString valColor     = dark ? "#e0e0e0" : "#1a1a1a";
+        QString alertColor   = dark ? "#ef9a9a" : "#b71c1c";
+        QString warnColor    = dark ? "#ffcc80" : "#c05800";
+        QString okColor      = dark ? "#a5d6a7" : "#2e7d32";
+
+        QString html;
+
+        /* Cleartext security notice */
+        html += QString("<div style='background:%1;color:%2;padding:5px 10px;"
+                        "border-radius:3px;margin-bottom:8px;font-size:11px;'>"
+                        "<b>\u26a0 CLEARTEXT PROTOCOL:</b> All traffic including "
+                        "credentials is transmitted unencrypted.</div>")
+                    .arg(dark ? "#3a1a1a" : "#fff0f0",
+                         dark ? "#ff9999" : "#aa0000");
+
+        /* ── 1. Session Summary ──────────────────────────────────── */
+        html += QString("<h3 style='color:%1;margin:0 0 6px 0;'>Session Summary</h3>")
+                    .arg(headingColor);
+        html += "<table style='border-collapse:collapse;'>";
+        html += QString("<tr><td style='padding:2px 12px 2px 0;'>Packets analysed</td>"
+                        "<td><b style='color:%1;'>%2</b></td></tr>")
+                    .arg(valColor).arg(ti->matched_packets);
+        html += QString("<tr><td style='padding:2px 12px 2px 0;'>Total data bytes</td>"
+                        "<td><b>%1</b></td></tr>").arg(ti->total_data_bytes);
+        if (ti->username && *ti->username)
+            html += QString("<tr><td style='padding:2px 12px 2px 0;'>Username detected</td>"
+                            "<td><b style='color:%1;'>%2</b></td></tr>")
+                        .arg(alertColor)
+                        .arg(QString::fromUtf8(ti->username).toHtmlEscaped());
+        if (ti->password && *ti->password)
+            html += QString("<tr><td style='padding:2px 12px 2px 0;'>Password detected</td>"
+                            "<td><b style='color:%1;'>%2</b></td></tr>")
+                        .arg(alertColor)
+                        .arg(QString::fromUtf8(ti->password).toHtmlEscaped());
+        html += "</table>";
+
+        /* ── 2. Option Negotiations ──────────────────────────────── */
+        html += QString("<h3 style='color:%1;margin:12px 0 4px 0;'>Option Negotiations</h3>")
+                    .arg(headingColor);
+
+        auto renderOpts = [&](GHashTable *ht, const QString &verb, const QString &color) {
+            if (!ht || g_hash_table_size(ht) == 0) return;
+            GList *keys = g_hash_table_get_keys(ht);
+            for (GList *n = keys; n; n = n->next) {
+                const gchar *opt = (gchar *)n->data;
+                guint cnt = GPOINTER_TO_UINT(g_hash_table_lookup(ht, opt));
+                html += QString("<div style='font-size:12px;padding:1px 0;'>"
+                                "<span style='color:%1;font-weight:bold;font-family:monospace;'>"
+                                "%2</span>&nbsp;%3")
+                            .arg(color, verb, QString::fromUtf8(opt).toHtmlEscaped());
+                if (cnt > 1)
+                    html += QString("&nbsp;<span style='color:#888;font-size:10px;'>&times;%1</span>")
+                                .arg(cnt);
+                html += "</div>";
+            }
+            g_list_free(keys);
+        };
+        if (g_hash_table_size(ti->will_opts) + g_hash_table_size(ti->do_opts) +
+            g_hash_table_size(ti->wont_opts) + g_hash_table_size(ti->dont_opts) == 0) {
+            html += "<i style='color:#888;'>No IAC option negotiations captured.</i>";
+        } else {
+            renderOpts(ti->will_opts, "WILL", okColor);
+            renderOpts(ti->do_opts,   "DO  ", okColor);
+            renderOpts(ti->wont_opts, "WONT", warnColor);
+            renderOpts(ti->dont_opts, "DONT", warnColor);
+        }
+
+        /* ── 3. Capabilities ─────────────────────────────────────── */
+        html += QString("<h3 style='color:%1;margin:12px 0 4px 0;'>Capabilities Detected</h3>")
+                    .arg(headingColor);
+        html += "<table style='border-collapse:collapse;'>";
+        auto capRow = [&](const QString &name, bool on, bool isRisk = false) {
+            QString col = on ? (isRisk ? alertColor : okColor) : (dark ? "#555" : "#aaa");
+            QString val = on ? (isRisk ? "Active (\u26a0 risk)" : "Active") : "Not negotiated";
+            html += QString("<tr><td style='padding:2px 12px 2px 0;'>%1</td>"
+                            "<td style='color:%2;'><b>%3</b></td></tr>")
+                        .arg(name, col, val);
+        };
+        capRow("Echo",               ti->has_echo);
+        capRow("Linemode",           ti->has_linemode);
+        capRow("Window Size (NAWS)", ti->has_naws);
+        capRow("Terminal Type",      ti->has_ttype);
+        capRow("Authentication",     ti->has_auth);
+        capRow("Encryption",         ti->has_encrypt);
+        if (!ti->has_encrypt)
+            html += QString("<tr><td colspan='2' style='font-size:11px;color:%1;padding-top:4px;'>"
+                            "\u26a0 No Telnet encryption option negotiated — "
+                            "all traffic is cleartext</td></tr>")
+                        .arg(alertColor);
+        html += "</table>";
+
+        /* ── 4. Session Data (up to 1 KB, scrollable) ────────────── */
+        html += QString("<h3 style='color:%1;margin:12px 0 4px 0;'>Session Data "
+                        "<span style='font-weight:normal;font-size:11px;color:#888;'>"
+                        "(reassembled, up to 1&thinsp;KB)</span></h3>")
+                    .arg(headingColor);
+        if (ti->data_s2c && ti->data_s2c->len > 0) {
+            QString data = QString::fromUtf8(ti->data_s2c->str, (int)ti->data_s2c->len)
+                               .toHtmlEscaped();
+            data.replace('\n', "<br>");
+            html += QString("<div style='font-family:monospace;font-size:11px;"
+                            "background:%1;color:%2;padding:8px;border-radius:3px;"
+                            "white-space:pre-wrap;word-break:break-all;'>%3</div>")
+                        .arg(dark ? "#1a1a2e" : "#f4f4f8",
+                             dark ? "#d0e0ff" : "#1a1a4a",
+                             data);
+            if (ti->total_data_bytes > 1024)
+                html += QString("<div style='font-size:10px;color:#888;margin-top:2px;'>"
+                                "Showing 1&thinsp;KB of %1 bytes total.</div>")
+                            .arg(ti->total_data_bytes);
+        } else {
+            html += "<p><i style='color:#888;'>No payload data captured "
+                    "(Telnet option traffic only, or data not decoded by Wireshark).</i></p>";
+        }
+
+        addHtmlTextEdit(mainLayout, dlg, dark, html);
+    }
+
+    addCloseButton(mainLayout, dlg, dark);
+    packet_analyzer_free_telnet_info(ti);
+
+    if (m_autoCloseTimer) m_autoCloseTimer->stop();
+    m_contextMenuActive = true;
+    hide();
+    dlg->exec();
+    deleteLater();
+}
+
+/* ─────────────────────────────────────────────────────────────────────────
+ * showNbnsInfoForRow  —  NBNS / NetBIOS Name Service (UDP 137)
+ * ───────────────────────────────────────────────────────────────────────── */
+void ConnectionPopup::showNbnsInfoForRow(int row)
+{
+    if (row < 0 || row >= m_rowData.size() || !m_pair) return;
+    const RowData &rd = m_rowData[row];
+
+    capture_file *cf = (capture_file *)plugin_if_get_capture_file(
+        extract_capture_file, NULL);
+
+    QString src = QString::fromUtf8(m_pair->src_addr);
+    QString dst = QString::fromUtf8(m_pair->dst_addr);
+    bool dark = isDarkTheme();
+
+    if (!cf) {
+        QMessageBox::warning(this, "NBNS Information",
+            "No capture file is currently loaded in Wireshark.");
+        return;
+    }
+
+    bool looksLikeMAC = (src.count(':') == 5 && dst.count(':') == 5);
+
+    nbns_info_t *ni = packet_analyzer_extract_nbns_info(
+        cf, m_pair->src_addr, m_pair->dst_addr, looksLikeMAC ? TRUE : FALSE);
+
+    QString dlgTitle = QString("NBNS \u2014 %1 \u2194 %2  (port %3)")
+                           .arg(src, dst, QString::number(rd.port));
+    QVBoxLayout *mainLayout = nullptr;
+    QDialog *dlg = createInfoDialog(dlgTitle, dark, &mainLayout);
+    dlg->resize(600, 520);
+
+    QString html;
+    auto sec = [&](const QString &t) {
+        html += QString("<h3 style='color:%1;border-bottom:1px solid %2;"
+                        "padding-bottom:3px;margin-top:14px;'>%3</h3>")
+                    .arg(dark ? "#82aaff" : "#1565c0",
+                         dark ? "#444" : "#ccc", t);
+    };
+    auto kv = [&](const QString &k, const QString &v, const QString &col = {}) {
+        html += QString("<tr><td style='color:%1;width:170px;vertical-align:top;"
+                        "padding:1px 8px 1px 0;'>%2</td>"
+                        "<td style='color:%3;vertical-align:top;padding:1px 0;'>"
+                        "%4</td></tr>")
+                    .arg(dark ? "#aaa" : "#555", k,
+                         col.isEmpty() ? (dark ? "#e0e0e0" : "#222") : col, v);
+    };
+
+    /* ── 1. Summary ── */
+    sec("Session Summary");
+    html += "<table style='border-collapse:collapse;width:100%;'>";
+    kv("Packets matched",  ni ? QString::number(ni->matched_packets) : "0");
+    if (ni) {
+        kv("Queries",        QString::number(ni->query_count));
+        kv("Responses",      QString::number(ni->response_count));
+        if (ni->registration_count)
+            kv("Registrations", QString::number(ni->registration_count));
+        if (ni->release_count)
+            kv("Releases",      QString::number(ni->release_count));
+        if (ni->refresh_count)
+            kv("Refreshes",     QString::number(ni->refresh_count));
+        if (ni->wack_count)
+            kv("WACKs",         QString::number(ni->wack_count));
+        if (ni->name_to_addr)
+            kv("Unique names resolved", QString::number(g_hash_table_size(ni->name_to_addr)));
+    }
+    html += "</table>";
+
+    /* ── 2. Name Resolution Table ── */
+    if (ni && ni->entries) {
+        sec("Name Resolution (responses)");
+        html += "<table style='border-collapse:collapse;width:100%;'>";
+        html += QString("<tr><th style='text-align:left;color:%1;padding:2px 8px 4px 0;"
+                        "border-bottom:1px solid %2;'>NetBIOS Name</th>"
+                        "<th style='text-align:left;color:%1;padding:2px 0 4px 0;"
+                        "border-bottom:1px solid %2;'>IP Address</th>"
+                        "<th style='text-align:left;color:%1;padding:2px 0 4px 0;"
+                        "border-bottom:1px solid %2;'>Type</th></tr>")
+                    .arg(dark ? "#aaa" : "#666", dark ? "#444" : "#ccc");
+        for (GList *l = ni->entries; l; l = l->next) {
+            nbns_entry_t *e = (nbns_entry_t *)l->data;
+            html += QString("<tr><td style='font-family:monospace;color:%1;"
+                            "padding:1px 8px 1px 0;'>%2</td>"
+                            "<td style='font-family:monospace;color:%3;"
+                            "padding:1px 8px 1px 0;'>%4</td>"
+                            "<td style='color:%5;padding:1px 0;'>%6</td></tr>")
+                        .arg(dark ? "#c3e88d" : "#1b5e20",
+                             QString(e->name).toHtmlEscaped(),
+                             dark ? "#82aaff" : "#0d47a1",
+                             QString(e->addr).toHtmlEscaped(),
+                             dark ? "#aaa" : "#555",
+                             QString(e->opcode ? e->opcode : "").toHtmlEscaped());
+        }
+        html += "</table>";
+    } else {
+        sec("Name Resolution");
+        html += "<p><i style='color:#888;'>No name-to-address responses captured.</i></p>";
+    }
+
+    /* ── 3. Protocol Note ── */
+    html += QString("<p style='margin-top:16px;font-size:11px;color:%1;'>"
+                    "<b>Note:</b> NBNS (NetBIOS Name Service) runs over UDP port&nbsp;137. "
+                    "It provides name registration and resolution for legacy Windows "
+                    "networking. Modern environments use DNS instead.</p>")
+                .arg(dark ? "#888" : "#666");
+
+    addHtmlTextEdit(mainLayout, dlg, dark, html);
+    addCloseButton(mainLayout, dlg, dark);
+    if (ni) packet_analyzer_free_nbns_info(ni);
+
+    if (m_autoCloseTimer) m_autoCloseTimer->stop();
+    m_contextMenuActive = true;
+    hide();
+    dlg->exec();
+    deleteLater();
+}
+
+/* ─────────────────────────────────────────────────────────────────────────
+ * showNbdgmInfoForRow  —  NetBIOS Datagram Service (UDP 138)
+ * ───────────────────────────────────────────────────────────────────────── */
+void ConnectionPopup::showNbdgmInfoForRow(int row)
+{
+    if (row < 0 || row >= m_rowData.size() || !m_pair) return;
+    const RowData &rd = m_rowData[row];
+
+    capture_file *cf = (capture_file *)plugin_if_get_capture_file(
+        extract_capture_file, NULL);
+
+    QString src = QString::fromUtf8(m_pair->src_addr);
+    QString dst = QString::fromUtf8(m_pair->dst_addr);
+    bool dark = isDarkTheme();
+
+    if (!cf) {
+        QMessageBox::warning(this, "NetBIOS Datagram Information",
+            "No capture file is currently loaded in Wireshark.");
+        return;
+    }
+
+    bool looksLikeMAC = (src.count(':') == 5 && dst.count(':') == 5);
+
+    nbdgm_info_t *di = packet_analyzer_extract_nbdgm_info(
+        cf, m_pair->src_addr, m_pair->dst_addr, looksLikeMAC ? TRUE : FALSE);
+
+    QString dlgTitle = QString("NetBIOS Datagram \u2014 %1 \u2194 %2  (port %3)")
+                           .arg(src, dst, QString::number(rd.port));
+    QVBoxLayout *mainLayout = nullptr;
+    QDialog *dlg = createInfoDialog(dlgTitle, dark, &mainLayout);
+    dlg->resize(580, 480);
+
+    QString html;
+    auto sec = [&](const QString &t) {
+        html += QString("<h3 style='color:%1;border-bottom:1px solid %2;"
+                        "padding-bottom:3px;margin-top:14px;'>%3</h3>")
+                    .arg(dark ? "#82aaff" : "#1565c0",
+                         dark ? "#444" : "#ccc", t);
+    };
+    auto kv = [&](const QString &k, const QString &v) {
+        html += QString("<tr><td style='color:%1;width:170px;vertical-align:top;"
+                        "padding:1px 8px 1px 0;'>%2</td>"
+                        "<td style='color:%3;vertical-align:top;padding:1px 0;'>"
+                        "%4</td></tr>")
+                    .arg(dark ? "#aaa" : "#555", k,
+                         dark ? "#e0e0e0" : "#222", v);
+    };
+
+    /* ── 1. Summary ── */
+    sec("Session Summary");
+    html += "<table style='border-collapse:collapse;width:100%;'>";
+    kv("Packets matched",  di ? QString::number(di->matched_packets) : "0");
+    if (di) {
+        if (di->direct_unique)  kv("Direct Unique datagrams",  QString::number(di->direct_unique));
+        if (di->direct_group)   kv("Direct Group datagrams",   QString::number(di->direct_group));
+        if (di->broadcast)      kv("Broadcast datagrams",      QString::number(di->broadcast));
+        if (di->error_pkts)     kv("Datagram errors",          QString::number(di->error_pkts));
+    }
+    html += "</table>";
+
+    /* ── 2. Datagram Types breakdown ── */
+    if (di && di->dgm_types && g_hash_table_size(di->dgm_types) > 0) {
+        sec("Datagram Types");
+        html += "<table style='border-collapse:collapse;width:100%;'>";
+        GHashTableIter it; gpointer k, v;
+        g_hash_table_iter_init(&it, di->dgm_types);
+        while (g_hash_table_iter_next(&it, &k, &v)) {
+            kv(QString((const char *)k).toHtmlEscaped(),
+               QString::number(GPOINTER_TO_UINT(v)));
+        }
+        html += "</table>";
+    }
+
+    /* ── 3. Source Names ── */
+    if (di && di->src_names && g_hash_table_size(di->src_names) > 0) {
+        sec("Source NetBIOS Names");
+        html += "<table style='border-collapse:collapse;width:100%;'>";
+        GHashTableIter it; gpointer k, v;
+        g_hash_table_iter_init(&it, di->src_names);
+        while (g_hash_table_iter_next(&it, &k, &v)) {
+            html += QString("<tr><td style='font-family:monospace;color:%1;"
+                            "padding:1px 8px 1px 0;'>%2</td>"
+                            "<td style='color:%3;padding:1px 0;'>%4 pkt%5</td></tr>")
+                        .arg(dark ? "#c3e88d" : "#1b5e20",
+                             QString((const char *)k).toHtmlEscaped(),
+                             dark ? "#aaa" : "#555",
+                             QString::number(GPOINTER_TO_UINT(v)),
+                             GPOINTER_TO_UINT(v) == 1 ? "" : "s");
+        }
+        html += "</table>";
+    }
+
+    /* ── 4. Destination Names ── */
+    if (di && di->dst_names && g_hash_table_size(di->dst_names) > 0) {
+        sec("Destination NetBIOS Names");
+        html += "<table style='border-collapse:collapse;width:100%;'>";
+        GHashTableIter it; gpointer k, v;
+        g_hash_table_iter_init(&it, di->dst_names);
+        while (g_hash_table_iter_next(&it, &k, &v)) {
+            html += QString("<tr><td style='font-family:monospace;color:%1;"
+                            "padding:1px 8px 1px 0;'>%2</td>"
+                            "<td style='color:%3;padding:1px 0;'>%4 pkt%5</td></tr>")
+                        .arg(dark ? "#ffcb6b" : "#e65100",
+                             QString((const char *)k).toHtmlEscaped(),
+                             dark ? "#aaa" : "#555",
+                             QString::number(GPOINTER_TO_UINT(v)),
+                             GPOINTER_TO_UINT(v) == 1 ? "" : "s");
+        }
+        html += "</table>";
+    }
+
+    /* ── 5. Protocol Note ── */
+    html += QString("<p style='margin-top:16px;font-size:11px;color:%1;'>"
+                    "<b>Note:</b> NetBIOS Datagram Service runs over UDP port&nbsp;138. "
+                    "It carries Windows browser announcements, domain master browser "
+                    "elections, and SMB browse-list traffic.</p>")
+                .arg(dark ? "#888" : "#666");
+
+    addHtmlTextEdit(mainLayout, dlg, dark, html);
+    addCloseButton(mainLayout, dlg, dark);
+    if (di) packet_analyzer_free_nbdgm_info(di);
+
+    if (m_autoCloseTimer) m_autoCloseTimer->stop();
+    m_contextMenuActive = true;
+    hide();
+    dlg->exec();
+    deleteLater();
+}
+
+/* ─────────────────────────────────────────────────────────────────────────
+ * showNbssInfoForRow  —  NetBIOS Session Service (TCP 139)
+ * ───────────────────────────────────────────────────────────────────────── */
+void ConnectionPopup::showNbssInfoForRow(int row)
+{
+    if (row < 0 || row >= m_rowData.size() || !m_pair) return;
+    const RowData &rd = m_rowData[row];
+
+    capture_file *cf = (capture_file *)plugin_if_get_capture_file(
+        extract_capture_file, NULL);
+
+    QString src = QString::fromUtf8(m_pair->src_addr);
+    QString dst = QString::fromUtf8(m_pair->dst_addr);
+    bool dark = isDarkTheme();
+
+    if (!cf) {
+        QMessageBox::warning(this, "NetBIOS Session Information",
+            "No capture file is currently loaded in Wireshark.");
+        return;
+    }
+
+    bool looksLikeMAC = (src.count(':') == 5 && dst.count(':') == 5);
+
+    nbss_info_t *si = packet_analyzer_extract_nbss_info(
+        cf, m_pair->src_addr, m_pair->dst_addr, looksLikeMAC ? TRUE : FALSE);
+
+    QString dlgTitle = QString("NetBIOS Session \u2014 %1 \u2194 %2  (port %3)")
+                           .arg(src, dst, QString::number(rd.port));
+    QVBoxLayout *mainLayout = nullptr;
+    QDialog *dlg = createInfoDialog(dlgTitle, dark, &mainLayout);
+    dlg->resize(580, 480);
+
+    QString html;
+    auto sec = [&](const QString &t) {
+        html += QString("<h3 style='color:%1;border-bottom:1px solid %2;"
+                        "padding-bottom:3px;margin-top:14px;'>%3</h3>")
+                    .arg(dark ? "#82aaff" : "#1565c0",
+                         dark ? "#444" : "#ccc", t);
+    };
+    auto kv = [&](const QString &k, const QString &v, const QString &col = {}) {
+        html += QString("<tr><td style='color:%1;width:180px;vertical-align:top;"
+                        "padding:1px 8px 1px 0;'>%2</td>"
+                        "<td style='color:%3;vertical-align:top;padding:1px 0;'>"
+                        "%4</td></tr>")
+                    .arg(dark ? "#aaa" : "#555", k,
+                         col.isEmpty() ? (dark ? "#e0e0e0" : "#222") : col, v);
+    };
+
+    /* ── 1. Summary ── */
+    sec("Session Summary");
+    html += "<table style='border-collapse:collapse;width:100%;'>";
+    kv("Packets matched",   si ? QString::number(si->matched_packets) : "0");
+    if (si) {
+        kv("Session requests",  QString::number(si->session_requests));
+        kv("Session confirmed", QString::number(si->session_confirms),
+           si->session_confirms > 0 ? (dark ? "#c3e88d" : "#2e7d32") : QString());
+        kv("Session rejected",  QString::number(si->session_rejects),
+           si->session_rejects > 0  ? (dark ? "#f07178" : "#c62828") : QString());
+        if (si->keepalives)
+            kv("Keepalives",    QString::number(si->keepalives));
+        kv("Session messages",  QString::number(si->session_messages));
+    }
+    html += "</table>";
+
+    /* ── 2. Session Pairs ── */
+    if (si && si->sessions) {
+        sec("Session Setup (Calling \u2192 Called)");
+        html += "<table style='border-collapse:collapse;width:100%;'>";
+        html += QString("<tr><th style='text-align:left;color:%1;padding:2px 8px 4px 0;"
+                        "border-bottom:1px solid %2;'>Calling (client)</th>"
+                        "<th style='text-align:left;color:%1;padding:2px 0 4px 0;"
+                        "border-bottom:1px solid %2;'>Called (server)</th></tr>")
+                    .arg(dark ? "#aaa" : "#666", dark ? "#444" : "#ccc");
+        for (GList *l = si->sessions; l; l = l->next) {
+            nbss_session_t *s = (nbss_session_t *)l->data;
+            html += QString("<tr>"
+                            "<td style='font-family:monospace;color:%1;"
+                            "padding:2px 8px 2px 0;'>%2</td>"
+                            "<td style='font-family:monospace;color:%3;"
+                            "padding:2px 0;'>%4</td></tr>")
+                        .arg(dark ? "#ffcb6b" : "#e65100",
+                             QString(s->calling_name).toHtmlEscaped(),
+                             dark ? "#82aaff" : "#1565c0",
+                             QString(s->called_name).toHtmlEscaped());
+        }
+        html += "</table>";
+    } else {
+        sec("Session Setup");
+        html += "<p><i style='color:#888;'>No NBT session request packets captured "
+                "(only mid-session data, or port&nbsp;139 used for SMB pass-through).</i></p>";
+    }
+
+    /* ── 3. Protocol Note ── */
+    html += QString("<p style='margin-top:16px;font-size:11px;color:%1;'>"
+                    "<b>Note:</b> Port&nbsp;139 TCP is the NetBIOS Session Service (NBT). "
+                    "It wraps SMB traffic for legacy Windows file and printer sharing. "
+                    "Modern SMB uses port&nbsp;445 directly without NBT. "
+                    "Right-click a port&nbsp;445 connection for SMB protocol details.</p>")
+                .arg(dark ? "#888" : "#666");
+
+    addHtmlTextEdit(mainLayout, dlg, dark, html);
+    addCloseButton(mainLayout, dlg, dark);
+    if (si) packet_analyzer_free_nbss_info(si);
+
+    if (m_autoCloseTimer) m_autoCloseTimer->stop();
+    m_contextMenuActive = true;
+    hide();
+    dlg->exec();
+    deleteLater();
+}
+
+/* ── TCP Transport Details dialog ──────────────────────────────────────────
+ * Shows aggregated TCP transport-layer stats for the selected pair/port:
+ * flags observed, window size, MSS, negotiated options, RTT.              */
+void ConnectionPopup::showTcpStatInfoForRow(int row)
+{
+    if (row < 0 || row >= m_rowData.size() || !m_pair) return;
+    const RowData &rd = m_rowData[row];
+
+    capture_file *cf = (capture_file *)plugin_if_get_capture_file(extract_capture_file, NULL);
+    QString src = QString::fromUtf8(m_pair->src_addr);
+    QString dst = QString::fromUtf8(m_pair->dst_addr);
+    bool looksLikeMAC = (src.count(':') == 5 && dst.count(':') == 5);
+
+    tcp_stat_info_t *ti = packet_analyzer_extract_tcp_stat_info(
+        cf, m_pair->src_addr, m_pair->dst_addr, rd.port,
+        looksLikeMAC ? TRUE : FALSE);
+
+    bool dark = isDarkTheme();
+    QString dlgTitle = QString("TCP Transport Details \u2014 %1 \u2194 %2  (port %3)")
+                           .arg(src, dst, QString::number(rd.port));
+    QVBoxLayout *mainLayout = nullptr;
+    QDialog *dlg = createInfoDialog(dlgTitle, dark, &mainLayout);
+    dlg->resize(520, 580);
+
+    auto kv = [&](const QString &k, const QString &v) -> QString {
+        return QString("<tr><td style='padding:3px 8px 3px 0;color:%1;white-space:nowrap;'>%2</td>"
+                       "<td style='padding:3px 0;'>%3</td></tr>")
+            .arg(dark ? "#aaa" : "#555", k.toHtmlEscaped(), v);
+    };
+    auto sec = [&](const QString &title) -> QString {
+        return QString("<tr><td colspan='2' style='padding:10px 0 3px 0;"
+                       "font-weight:bold;font-size:12px;color:%1;"
+                       "border-bottom:1px solid %2;'>%3</td></tr>")
+            .arg(dark ? "#00d9c0" : "#007a6e",
+                 dark ? "#333" : "#ccc",
+                 title.toHtmlEscaped());
+    };
+
+    QString html = QString("<table style='font-size:13px;width:100%;border-collapse:collapse;"
+                           "color:%1;'>")
+                       .arg(dark ? "#e8e8e8" : "#1a1a1a");
+
+    if (!ti || !ti->found) {
+        html += "<tr><td style='color:#888;font-style:italic;padding:8px 0;'>"
+                "No TCP packets found for this pair/port in the current capture.</td></tr>";
+    } else {
+        /* ── 1. Flags observed ── */
+        html += sec("Flags Observed");
+        auto flag = [&](const char *name, bool seen) -> QString {
+            return QString("<span style='margin-right:10px;padding:1px 6px;"
+                           "border-radius:3px;font-size:12px;"
+                           "background:%1;color:%2;'>%3</span>")
+                .arg(seen ? (dark ? "#1a4a2e" : "#d4edda") : (dark ? "#2a2a2a" : "#f5f5f5"),
+                     seen ? (dark ? "#4caf50" : "#155724") : (dark ? "#555" : "#aaa"),
+                     QString(name));
+        };
+        html += "<tr><td colspan='2' style='padding:6px 0;'>";
+        html += flag("SYN", ti->saw_syn);
+        html += flag("ACK", ti->saw_ack);
+        html += flag("FIN", ti->saw_fin);
+        html += flag("RST", ti->saw_rst);
+        html += flag("PSH", ti->saw_psh);
+        html += flag("URG", ti->saw_urg);
+        html += flag("ECE", ti->saw_ece);
+        html += flag("CWR", ti->saw_cwr);
+        html += "</td></tr>";
+
+        /* ── 2. Window & MSS ── */
+        html += sec("Window Size & MSS");
+        if (ti->win_count > 0) {
+            double avg = ti->win_sum / ti->win_count;
+            html += kv("Window min", QString("%1 bytes").arg(ti->win_min));
+            html += kv("Window max", QString("%1 bytes").arg(ti->win_max));
+            html += kv("Window avg", QString("%1 bytes").arg((quint64)avg));
+            html += kv("Samples",    QString::number(ti->win_count));
+        } else {
+            html += kv("Window size", "<i style='color:#888;'>not captured</i>");
+        }
+        html += kv("MSS (advertised)",
+                   ti->mss > 0 ? QString("%1 bytes").arg(ti->mss)
+                                : "<i style='color:#888;'>not seen (no SYN captured)</i>");
+
+        /* ── 3. Negotiated options ── */
+        html += sec("Negotiated TCP Options");
+        auto opt = [&](const char *name, bool seen) {
+            html += kv(name, seen
+                ? QString("<span style='color:%1;font-weight:bold;'>✔ Present</span>")
+                      .arg(dark ? "#4caf50" : "#2e7d32")
+                : QString("<span style='color:%1;'>✘ Not seen</span>")
+                      .arg(dark ? "#666" : "#aaa"));
+        };
+        opt("SACK Permitted",   ti->sack_permitted);
+        opt("Timestamps",       ti->timestamps);
+        if (ti->window_scale >= 0)
+            html += kv("Window Scale",
+                       QString("shift = %1 (×%2)").arg(ti->window_scale).arg(1 << ti->window_scale));
+        else
+            html += kv("Window Scale", "<i style='color:#888;'>not advertised</i>");
+
+        /* ── 4. RTT ── */
+        html += sec("Round-Trip Time (from Wireshark analysis)");
+        if (ti->rtt_count > 0) {
+            double avg_rtt = ti->rtt_sum_ms / ti->rtt_count;
+            html += kv("RTT min",  QString("%1 ms").arg(ti->rtt_min_ms, 0, 'f', 3));
+            html += kv("RTT max",  QString("%1 ms").arg(ti->rtt_max_ms, 0, 'f', 3));
+            html += kv("RTT avg",  QString("%1 ms").arg(avg_rtt, 0, 'f', 3));
+            html += kv("Samples",  QString::number(ti->rtt_count));
+        } else {
+            html += "<tr><td colspan='2' style='color:#888;font-style:italic;padding:4px 0;'>"
+                    "RTT data not available — requires Wireshark analysis fields "
+                    "(tcp.analysis.ack_rtt). Try enabling TCP sequence analysis in "
+                    "Wireshark preferences.</td></tr>";
+        }
+
+        /* ── 5. Health ── */
+        html += sec("Stream Health");
+        html += kv("Total packets matched", QString::number(ti->matched_packets));
+        if (ti->retrans_count > 0)
+            html += kv("Retransmissions",
+                       QString("<span style='color:%1;font-weight:bold;'>%2</span>")
+                           .arg(dark ? "#ff8a65" : "#c62828")
+                           .arg(ti->retrans_count));
+        else
+            html += kv("Retransmissions",
+                       QString("<span style='color:%1;'>0 (none detected)</span>")
+                           .arg(dark ? "#4caf50" : "#2e7d32"));
+        if (ti->ooo_count > 0)
+            html += kv("Out-of-order",
+                       QString("<span style='color:%1;font-weight:bold;'>%2</span>")
+                           .arg(dark ? "#ff8a65" : "#c62828")
+                           .arg(ti->ooo_count));
+        else
+            html += kv("Out-of-order",
+                       QString("<span style='color:%1;'>0 (none detected)</span>")
+                           .arg(dark ? "#4caf50" : "#2e7d32"));
+    }
+
+    html += "</table>";
+
+    if (ti && ti->found) {
+        html += QString("<p style='margin-top:14px;font-size:11px;color:%1;'>"
+                        "<b>Note:</b> Window sizes are raw (unscaled). RTT and retransmission "
+                        "data rely on Wireshark's TCP sequence analysis being enabled. "
+                        "Options are detected from SYN/SYN-ACK frames in the capture.</p>")
+                    .arg(dark ? "#888" : "#666");
+    }
+
+    addHtmlTextEdit(mainLayout, dlg, dark, html);
+    addCloseButton(mainLayout, dlg, dark);
+    if (ti) packet_analyzer_free_tcp_stat_info(ti);
+
+    if (m_autoCloseTimer) m_autoCloseTimer->stop();
+    m_contextMenuActive = true;
+    hide();
+    dlg->exec();
+    deleteLater();
+}
+
+/* ── UDP Transport Details dialog ──────────────────────────────────────────
+ * Shows aggregated UDP payload size stats and direction breakdown.         */
+void ConnectionPopup::showUdpStatInfoForRow(int row)
+{
+    if (row < 0 || row >= m_rowData.size() || !m_pair) return;
+    const RowData &rd = m_rowData[row];
+
+    capture_file *cf = (capture_file *)plugin_if_get_capture_file(extract_capture_file, NULL);
+    QString src = QString::fromUtf8(m_pair->src_addr);
+    QString dst = QString::fromUtf8(m_pair->dst_addr);
+    bool looksLikeMAC = (src.count(':') == 5 && dst.count(':') == 5);
+
+    udp_stat_info_t *ui = packet_analyzer_extract_udp_stat_info(
+        cf, m_pair->src_addr, m_pair->dst_addr, rd.port,
+        looksLikeMAC ? TRUE : FALSE);
+
+    bool dark = isDarkTheme();
+    QString dlgTitle = QString("UDP Transport Details \u2014 %1 \u2194 %2  (port %3)")
+                           .arg(src, dst, QString::number(rd.port));
+    QVBoxLayout *mainLayout = nullptr;
+    QDialog *dlg = createInfoDialog(dlgTitle, dark, &mainLayout);
+    dlg->resize(480, 420);
+
+    auto kv = [&](const QString &k, const QString &v) -> QString {
+        return QString("<tr><td style='padding:3px 8px 3px 0;color:%1;white-space:nowrap;'>%2</td>"
+                       "<td style='padding:3px 0;'>%3</td></tr>")
+            .arg(dark ? "#aaa" : "#555", k.toHtmlEscaped(), v);
+    };
+    auto sec = [&](const QString &title) -> QString {
+        return QString("<tr><td colspan='2' style='padding:10px 0 3px 0;"
+                       "font-weight:bold;font-size:12px;color:%1;"
+                       "border-bottom:1px solid %2;'>%3</td></tr>")
+            .arg(dark ? "#00d9c0" : "#007a6e",
+                 dark ? "#333" : "#ccc",
+                 title.toHtmlEscaped());
+    };
+
+    QString html = QString("<table style='font-size:13px;width:100%;border-collapse:collapse;"
+                           "color:%1;'>")
+                       .arg(dark ? "#e8e8e8" : "#1a1a1a");
+
+    if (!ui || !ui->found) {
+        html += "<tr><td style='color:#888;font-style:italic;padding:8px 0;'>"
+                "No UDP packets found for this pair/port in the current capture.</td></tr>";
+    } else {
+        /* ── 1. Payload size ── */
+        html += sec("Payload Size (bytes per datagram)");
+        if (ui->payload_count > 0) {
+            double avg = ui->payload_sum / ui->payload_count;
+            html += kv("Minimum",  QString("%1 bytes").arg(ui->payload_min));
+            html += kv("Maximum",  QString("%1 bytes").arg(ui->payload_max));
+            html += kv("Average",  QString("%1 bytes").arg((quint64)avg));
+            html += kv("Datagrams", QString::number(ui->payload_count));
+        } else {
+            html += kv("Payload size", "<i style='color:#888;'>no udp.length field found</i>");
+        }
+
+        /* ── 2. Direction ── */
+        html += sec("Traffic Direction");
+        guint32 total = ui->pkts_a_to_b + ui->pkts_b_to_a;
+        if (total > 0) {
+            int pctAB = (int)((ui->pkts_a_to_b * 100) / total);
+            int pctBA = 100 - pctAB;
+            html += kv(QString("%1 → %2").arg(src.toHtmlEscaped(), dst.toHtmlEscaped()),
+                       QString("%1 packets (%2%)")
+                           .arg(ui->pkts_a_to_b).arg(pctAB));
+            html += kv(QString("%1 → %2").arg(dst.toHtmlEscaped(), src.toHtmlEscaped()),
+                       QString("%1 packets (%2%)")
+                           .arg(ui->pkts_b_to_a).arg(pctBA));
+            html += kv("Total packets", QString::number(total));
+
+            /* Simple ASCII asymmetry bar */
+            QString bar = "";
+            int filled = pctAB / 5;
+            bar += QString("<span style='color:%1;'>").arg(dark ? "#00d9c0" : "#007a6e");
+            for (int i = 0; i < filled; i++) bar += "█";
+            bar += "</span>";
+            for (int i = filled; i < 20; i++) bar += "░";
+            bar += QString(" &nbsp;%1% / %2%").arg(pctAB).arg(pctBA);
+            html += QString("<tr><td colspan='2' style='padding:6px 0;font-family:monospace;'>"
+                            "%1</td></tr>").arg(bar);
+        }
+
+        /* ── 3. Characteristics ── */
+        html += sec("Datagram Characteristics");
+        if (ui->payload_count > 0) {
+            guint32 range = ui->payload_max - ui->payload_min;
+            if (range == 0)
+                html += kv("Size consistency",
+                           "<span style='color:" + QString(dark ? "#4caf50" : "#2e7d32") + ";'>"
+                           "Fixed-size datagrams (likely a structured protocol)</span>");
+            else if (range < 64)
+                html += kv("Size consistency", "Low variance — mostly uniform payload sizes");
+            else if (ui->payload_max <= 508)
+                html += kv("Size note", "All datagrams within safe unfragmented UDP size (&le;508 bytes)");
+            else if (ui->payload_max > 1472)
+                html += kv("Size note",
+                           QString("<span style='color:%1;'>Large datagrams detected "
+                                   "(max %2 bytes) — may fragment on standard MTU paths</span>")
+                               .arg(dark ? "#ffb74d" : "#e65100")
+                               .arg(ui->payload_max));
+            else
+                html += kv("Size consistency", "Variable payload sizes");
+        }
+        html += kv("Total matched packets", QString::number(ui->matched_packets));
+    }
+
+    html += "</table>";
+
+    html += QString("<p style='margin-top:14px;font-size:11px;color:%1;'>"
+                    "<b>Note:</b> Payload = UDP length field minus 8-byte header. "
+                    "For application-layer details, right-click a row and select the "
+                    "specific protocol (DNS, SNMP, NBNS, etc.) if applicable.</p>")
+                .arg(dark ? "#888" : "#666");
+
+    addHtmlTextEdit(mainLayout, dlg, dark, html);
+    addCloseButton(mainLayout, dlg, dark);
+    if (ui) packet_analyzer_free_udp_stat_info(ui);
 
     if (m_autoCloseTimer) m_autoCloseTimer->stop();
     m_contextMenuActive = true;
