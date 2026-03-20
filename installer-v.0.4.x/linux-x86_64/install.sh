@@ -4,7 +4,7 @@
 # =============================================================================
 #
 # Supports:
-#   - Installing v.0.3.2 or v.0.4.3 (default: latest)
+#   - Installing v.0.3.2 or v.0.4.6 (default: latest)
 #   - Detecting an already-installed version
 #   - Upgrading, downgrading, and uninstalling
 #   - Auto-detecting Wireshark version (4.0.x, 4.2.x, 4.4.x, 4.6.x)
@@ -34,7 +34,7 @@ printf "${BLUE}╔════════════════════�
 printf "${BLUE}║   PacketCircle Installer for Linux               ║${NC}\n"
 printf "${BLUE}║   x86_64 (64-bit Intel/AMD)                      ║${NC}\n"
 printf "${BLUE}║   Supports Wireshark 4.0.x, 4.2.x, 4.4.x, 4.6.x  ║${NC}\n"
-printf "${BLUE}║   Available: v.0.3.2, v.0.4.4 (latest)           ║${NC}\n"
+printf "${BLUE}║   Available: v.0.3.2, v.0.4.6 (latest)           ║${NC}\n"
 printf "${BLUE}╚══════════════════════════════════════════════════╝${NC}\n"
 printf "\n"
 
@@ -48,7 +48,7 @@ if [ "$ARCH" != "x86_64" ]; then
 fi
 
 # --- Verify binaries exist ---
-# v.0.3.2 has ws42/ws44/ws46 only; v.0.4.4 adds ws40
+# v.0.3.2 has ws42/ws44/ws46 only; v.0.4.6 adds ws40
 for ws in ws42 ws44 ws46; do
     if [ ! -f "$BIN_DIR/v.0.3.2/packetcircle-${ws}.so" ]; then
         printf "${RED}Error: Missing binary: bin/v.0.3.2/packetcircle-%s.so${NC}\n" "$ws"
@@ -56,8 +56,8 @@ for ws in ws42 ws44 ws46; do
     fi
 done
 for ws in ws40 ws42 ws44 ws46; do
-    if [ ! -f "$BIN_DIR/v.0.4.4/packetcircle-${ws}.so" ]; then
-        printf "${RED}Error: Missing binary: bin/v.0.4.4/packetcircle-%s.so${NC}\n" "$ws"
+    if [ ! -f "$BIN_DIR/v.0.4.6/packetcircle-${ws}.so" ]; then
+        printf "${RED}Error: Missing binary: bin/v.0.4.6/packetcircle-%s.so${NC}\n" "$ws"
         exit 1
     fi
 done
@@ -227,30 +227,30 @@ case "$ACTION" in
 esac
 
 # --- Version selection ---
-# v.0.3.2 supports ws42/ws44/ws46; v.0.4.4 adds ws40
+# v.0.3.2 supports ws42/ws44/ws46; v.0.4.6 adds ws40
 printf "\n"
 printf "Select version to install:\n"
 printf "\n"
 if [ "$SELECTED_WS_TAG" = "ws40" ]; then
-    # ws40: only v.0.4.4 available (first release with 4.0 support that is current)
-    printf "  ${GREEN}1${NC}) v.0.4.4 (latest)   — keyword search, display filter delegation\n"
+    # ws40: only v.0.4.6 available (first release with 4.0 support that is current)
+    printf "  ${GREEN}1${NC}) v.0.4.6 (latest)   — protocol info dialogs, ntopng & Malcolm/Arkime integrations, settings menu\n"
     printf "\n"
     printf "Choice [1]: "
     read -r VER_CHOICE
     VER_CHOICE=${VER_CHOICE:-1}
     case "$VER_CHOICE" in
-        1) SELECTED_VERSION="0.4.4" ;;
+        1) SELECTED_VERSION="0.4.6" ;;
         *) printf "Invalid choice. Exiting.\n"; exit 1 ;;
     esac
 else
-    if [ "$INSTALLED_VERSION" = "0.4.4" ]; then
-        printf "  ${GREEN}1${NC}) v.0.4.4 (latest)   — already installed, reinstall\n"
+    if [ "$INSTALLED_VERSION" = "0.4.6" ]; then
+        printf "  ${GREEN}1${NC}) v.0.4.6 (latest)   — already installed, reinstall\n"
         printf "  ${YELLOW}2${NC}) v.0.3.2             — downgrade (legacy)\n"
     elif [ "$INSTALLED_VERSION" = "0.3.2" ]; then
-        printf "  ${GREEN}1${NC}) v.0.4.4 (latest)   — upgrade (recommended)\n"
+        printf "  ${GREEN}1${NC}) v.0.4.6 (latest)   — upgrade (recommended)\n"
         printf "  ${YELLOW}2${NC}) v.0.3.2             — already installed, reinstall\n"
     else
-        printf "  ${GREEN}1${NC}) v.0.4.4 (latest)   — keyword search, display filter delegation\n"
+        printf "  ${GREEN}1${NC}) v.0.4.6 (latest)   — protocol info dialogs, ntopng & Malcolm/Arkime integrations, settings menu\n"
         printf "  ${YELLOW}2${NC}) v.0.3.2             — legacy\n"
     fi
     printf "\n"
@@ -258,7 +258,7 @@ else
     read -r VER_CHOICE
     VER_CHOICE=${VER_CHOICE:-1}
     case "$VER_CHOICE" in
-        1) SELECTED_VERSION="0.4.4" ;;
+        1) SELECTED_VERSION="0.4.6" ;;
         2) SELECTED_VERSION="0.3.2" ;;
         *) printf "Invalid choice. Exiting.\n"; exit 1 ;;
     esac
