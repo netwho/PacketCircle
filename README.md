@@ -4,7 +4,7 @@
   <img src="PacketCircle.png" alt="PacketCircle Logo" width="128">
 </p>
 
-[![Version](https://img.shields.io/badge/version-0.4.4-blue.svg)](CHANGELOG.md)
+[![Version](https://img.shields.io/badge/version-0.4.6-blue.svg)](CHANGELOG.md)
 [![Status](https://img.shields.io/badge/status-public%20beta-orange.svg)](CHANGELOG.md)
 [![License: GPL v2](https://img.shields.io/badge/License-GPL%20v2-blue.svg)](LICENSE)
 [![Wireshark](https://img.shields.io/badge/Wireshark-4.0.x%20%7C%204.2.x%20%7C%204.4.x%20%7C%204.6.x-1679A7.svg)](https://www.wireshark.org/)
@@ -15,7 +15,7 @@
 
 A native Wireshark plugin that visualizes network communication pairs in an interactive circle diagram with protocol color coding, traffic volume indicators, and PDF report export.
 
-> **Beta Status**: This is version 0.4.4, a public beta release. While fully functional, the software is under active development. Please report any issues you encounter.
+> **Beta Status**: This is version 0.4.6, a public beta release. While fully functional, the software is under active development. Please report any issues you encounter.
 
 ## Demo
 
@@ -34,7 +34,7 @@ A native Wireshark plugin that visualizes network communication pairs in an inte
 - **Rich Tooltips** - Hover over nodes to see IP address, packet counts, destination ports, and service names in a detailed popup
 - **Directional Filtering** - Select individual communication pairs to apply precise unidirectional Wireshark display filters
 - **Connection Popup** - Click a line in the circle to see port-level connection details with protocol, service name, and packet counts
-- **Connection Context Menu** - Right-click a connection to apply a filter, follow a TCP stream, or open TCP throughput / round-trip time graphs
+- **Connection Context Menu** - Right-click a connection to apply a filter, follow a TCP stream, open TCP throughput / round-trip time graphs, or open **TCP / UDP Transport Details** dialogs (flags, window size, MSS, negotiated options, RTT, retransmissions; UDP payload size range, direction breakdown)
 - **Protocol Information Dialogs** *(new in v0.4.0)* - Right-click a connection to view deep protocol details extracted from packet dissection:
   - **TLS/SSL** - Certificate details (subject, issuer, validity, SANs), cipher suites, TLS version, ALPN, SNI, JA3/JA4 fingerprints
   - **HTTP** - Request/response headers, methods, status codes, URIs, content types, server info, cookies
@@ -47,8 +47,22 @@ A native Wireshark plugin that visualizes network communication pairs in an inte
   - **DHCP** - Client/server exchanges, lease requests and offers, assigned addresses, DHCP options
   - **VLAN (802.1Q)** *(new in v0.4.3)* - VLAN ID → frame count table, QinQ (double-tagged) detection, DEI/CFI bit count, PCP priority distribution with IEEE 802.1p class names
   - **MACsec (802.1AE)** *(improved in v0.4.3)* - Encryption E-bit, SC-bit, Association Number distribution, Packet Number range, SCI values; TVB raw-byte fallback when the MACsec dissector is not active
+  - **LDAP / LDAPS** *(new in v0.4.6)* - Session summary, bind/authentication details (bind DNs, SASL mechanisms), search operations (base DN, scope, filter), modify/add/delete counts, result codes, control OIDs
+  - **SNMP** *(new in v0.4.6)* - SNMP version (v1/v2c/v3), community strings, PDU type counts (GetRequest, GetNextRequest, GetBulk, SetRequest, Trap, InformRequest), OIDs queried, trap enterprise OID, error status codes
+  - **Syslog** *(new in v0.4.6)* - Transport (UDP/TCP/TLS), severity breakdown (Emergency → Debug), facility breakdown (kern/user/daemon/auth/cron/local0–7), last 20 messages with timestamp and text
+  - **SSH / SFTP / SCP** *(new in v0.4.6)* - Key exchange algorithms, cipher and MAC pairs (client↔server), compression algorithms, channel types (session, direct-tcpip, forwarded-tcpip); handshake metadata only (payloads are encrypted)
+  - **FTP** *(new in v0.4.6)* - Credentials (username/password in cleartext), data transfer mode (PASV/PORT), FEAT capabilities, all FTP commands with counts, filenames from RETR/STOR/NLST, chronological command log
+  - **Telnet** *(new in v0.4.6)* - Option negotiations (WILL/DO/WONT/DONT), capabilities detected (Echo, Linemode, NAWS, Terminal Type), reassembled session payload (up to 1 KB)
+  - **NBNS (NetBIOS Name Service)** *(new in v0.4.6)* - Name registration/release/refresh/WACK counts, name → IP resolution table from all responses
+  - **NetBIOS Datagram Service** *(new in v0.4.6)* - Datagram type breakdown (Direct Unique, Direct Group, Broadcast), source and destination NetBIOS name tables
+  - **NetBIOS Session Service (NBSS)** *(new in v0.4.6)* - Session request/confirm/reject/keepalive counts, calling↔called name pairs from session setup
+  - **TCP Transport Details** *(new in v0.4.6)* - Flags observed (SYN/ACK/FIN/RST/PSH/URG/ECE/CWR), window size (min/max/avg), MSS from SYN options, negotiated TCP options (SACK, timestamps, window scale), RTT (min/max/avg from Wireshark analysis), retransmission and out-of-order counts
+  - **UDP Transport Details** *(new in v0.4.6)* - Payload size per datagram (min/max/avg), traffic direction breakdown (A→B / B→A with percentages), datagram characteristic notes (fixed-size, fragmentation risk)
+- **ntopng Integration** *(new in v0.4.6)* - Send the current capture to a local or remote ntopng instance for deep traffic analysis. Configure ntopng host, credentials, and SSL/TLS settings via the Settings menu
+- **Malcolm / Arkime Integration** *(new in v0.4.6)* - Upload the current PCAP directly to a Malcolm instance. After upload, automatically opens the Arkime sessions view pre-filtered to the uploaded capture using a time range and `tags==PacketCircle` expression
+- **Settings Menu** *(new in v0.4.6)* - Gear icon (⚙) in the toolbar opens a consolidated settings dialog covering: enable/disable ntopng, configure ntopng credentials, enable/disable Malcolm/Arkime, configure local CA certificate for SSL verification, and reset all settings to defaults
 - **Search** - Search by IP address, CIDR range, port (e.g., `TCP 443`, `UDP 53`), protocol category (`TCP`, `UDP`, `ARP`, `ICMP`, `DNS`, `DHCP`, `Infrastructure`, `Unknown`), or application-layer protocol keyword with blinking red highlights; protocol category search updates the legend live *(improved in v0.4.2)*
-- **Application Protocol Keyword Search** *(new in v0.4.4)* - Search directly for application protocols by name. IP-mode keywords: `TLS` / `SSL` / `HTTPS`, `HTTP`, `SMB` / `CIFS`, `Kerberos` / `KRB`, `SMTP` / `email` / `mail`, `IMAP`, `POP3` / `POP`, `SQL` / `MSSQL`, `MySQL`, `PostgreSQL` / `PGSQL`, `VoIP` / `SIP`. MAC-mode keyword: `MACsec` / `802.1AE`. Matching is port-based and supports the full-buffer "Not in Top-N" fallback
+- **Application Protocol Keyword Search** *(new in v0.4.4, expanded in v0.4.6)* - Search directly for application protocols by name. IP-mode keywords: `TLS` / `SSL` / `HTTPS`, `HTTP`, `SMB` / `CIFS`, `Kerberos` / `KRB`, `SMTP` / `email` / `mail`, `IMAP`, `POP3` / `POP`, `SQL` / `MSSQL`, `MySQL`, `PostgreSQL` / `PGSQL`, `VoIP` / `SIP`, `LDAP`, `SNMP`, `Syslog`, `SSH`, `FTP`, `Telnet`, `NBNS`, `NBDGM`, `NBSS`. MAC-mode keyword: `MACsec` / `802.1AE`. Matching is port-based and supports the full-buffer "Not in Top-N" fallback
 - **Wireshark Display Filter Fallback** *(new in v0.4.4)* - When a search term is not recognised or returns no results, PacketCircle offers to apply it as a Wireshark display filter. If confirmed, the filter is applied, PacketCircle re-analyses the filtered packet set and reloads the view. If the filter matches nothing, ":-( no packets found in the buffer" is shown
 - **Select Search Results** - After a search, select only the matching pairs with one click — works with IP, port, and category searches
 - **Protocol Filtering** - Filter the visualization by specific protocols using interactive checkboxes; toggling a category also syncs the pair list checkboxes *(new in v0.4.0)*
@@ -135,7 +149,7 @@ Hover over any node to see a detailed popup with IP address, total packet count,
 
 ### Installation
 
-All installers support **version selection** (v.0.4.4 or v.0.3.2), detect any existing installation, and offer an **uninstall** option. Run the installer, then follow the prompts.
+All installers support **version selection** (v.0.4.6 or v.0.3.2), detect any existing installation, and offer an **uninstall** option. Run the installer, then follow the prompts.
 
 #### macOS (Intel & Apple Silicon) — Wireshark 4.6.x
 ```bash
@@ -187,14 +201,14 @@ The unified Linux installer auto-detects your Wireshark version and installs the
 
 > **Note**: macOS uses **dashes** (`4-6`), Linux uses **dots** (`4.2`, `4.4`, `4.6`), Windows uses **dots** (`4.6`) in the plugin directory name.
 
-The installer directory includes both v.0.4.4 (latest) and v.0.3.2 binaries in versioned subdirectories. Choose the version you want to install:
+The installer directory includes both v.0.4.6 (latest) and v.0.3.2 binaries in versioned subdirectories. Choose the version you want to install:
 
 ```bash
 # macOS (Wireshark 4.6.x) — choose your version:
 mkdir -p ~/.local/lib/wireshark/plugins/4-6/epan/
 
-# Latest (v.0.4.4):
-cp installer/macos-universal/v.0.4.4/packetcircle.so ~/.local/lib/wireshark/plugins/4-6/epan/
+# Latest (v.0.4.6):
+cp installer/macos-universal/v.0.4.6/packetcircle.so ~/.local/lib/wireshark/plugins/4-6/epan/
 
 # Or legacy v.0.3.2:
 cp installer/macos-universal/v.0.3.2/packetcircle.so ~/.local/lib/wireshark/plugins/4-6/epan/
@@ -202,21 +216,21 @@ cp installer/macos-universal/v.0.3.2/packetcircle.so ~/.local/lib/wireshark/plug
 
 ```bash
 # Linux — pick the binary matching your Wireshark version:
-#   v.0.4.4/packetcircle-ws40.so  → Wireshark 4.0.x
-#   v.0.4.4/packetcircle-ws42.so  → Wireshark 4.2.x
-#   v.0.4.4/packetcircle-ws44.so  → Wireshark 4.4.x
-#   v.0.4.4/packetcircle-ws46.so  → Wireshark 4.6.x
-# (replace v.0.4.4 with v.0.3.2 for 4.2/4.4/4.6; v.0.3.2 does not support 4.0.x)
+#   bin/v.0.4.6/packetcircle-ws40.so  → Wireshark 4.0.x
+#   bin/v.0.4.6/packetcircle-ws42.so  → Wireshark 4.2.x
+#   bin/v.0.4.6/packetcircle-ws44.so  → Wireshark 4.4.x
+#   bin/v.0.4.6/packetcircle-ws46.so  → Wireshark 4.6.x
+# (replace v.0.4.6 with v.0.3.2 for 4.2/4.4/4.6; v.0.3.2 does not support 4.0.x)
 
 mkdir -p ~/.local/lib/wireshark/plugins/4.6/epan/
-cp installer/linux-x86_64/bin/v.0.4.4/packetcircle-ws46.so ~/.local/lib/wireshark/plugins/4.6/epan/packetcircle.so
+cp installer/linux-x86_64/bin/v.0.4.6/packetcircle-ws46.so ~/.local/lib/wireshark/plugins/4.6/epan/packetcircle.so
 ```
 
 ```powershell
 # Windows (Wireshark 4.6.x) — run in PowerShell
 
-# Latest (v.0.4.4):
-Copy-Item installer\windows-x86_64\v.0.4.4\packetcircle.dll "$env:APPDATA\Wireshark\plugins\4.6\epan\"
+# Latest (v.0.4.6):
+Copy-Item installer\windows-x86_64\v.0.4.6\packetcircle.dll "$env:APPDATA\Wireshark\plugins\4.6\epan\"
 
 # Or legacy v.0.3.2:
 Copy-Item installer\windows-x86_64\v.0.3.2\packetcircle.dll "$env:APPDATA\Wireshark\plugins\4.6\epan\"
@@ -248,7 +262,7 @@ See [QUICKSTART.md](QUICKSTART.md) for a detailed guide.
 | **PDF** | Export a one-page PDF report |
 | **Protocol checkboxes** | Filter by specific protocols (TCP, UDP, HTTP, DNS, etc.) |
 | **Line Thickness** | Toggle proportional line weight on/off |
-| **Search** | Search by IP, CIDR, port (e.g., `TCP 443`), category (`TCP`, `Infrastructure`), or protocol keyword (`TLS`, `HTTP`, `SMB`, `Kerberos`, `SMTP`, `VoIP`, `MACsec`, …) |
+| **Search** | Search by IP, CIDR, port (e.g., `TCP 443`), category (`TCP`, `Infrastructure`), or protocol keyword (`TLS`, `HTTP`, `SMB`, `Kerberos`, `SMTP`, `LDAP`, `SNMP`, `Syslog`, `SSH`, `FTP`, `Telnet`, `NBNS`, `NBDGM`, `NBSS`, `VoIP`, `MACsec`, …) |
 
 ## PDF Report
 
@@ -361,7 +375,7 @@ This is the most common error and means **your Wireshark version doesn't match t
 - `Library not loaded: @rpath/libwireshark.18.dylib` — you installed the 4.4.x binary but have Wireshark 4.6.x.
 - `Symbol not found: _some_function_name` — similar ABI mismatch between your Wireshark and the plugin.
 
-**Fix:** Use the unified Linux installer (`installer-v.0.4.x/linux-x86_64/`) which auto-detects your version, or build from source (see [Building from Source](#building-from-source)).
+**Fix:** Use the unified Linux installer (`installer/linux-x86_64/`) which auto-detects your version, or build from source (see [Building from Source](#building-from-source)).
 
 ### Plugin Not Appearing in Tools Menu
 
@@ -420,7 +434,7 @@ The `.bat` wrapper launches the PowerShell troubleshooter with a temporary execu
 .\troubleshoot.ps1
 ```
 
-A copy of the troubleshooter is also included in the Windows installer directory (`installer-v.0.4.x/windows-x86_64/troubleshoot.ps1`).
+A copy of the troubleshooter is also included in the Windows installer directory (`installer/windows-x86_64/troubleshoot.ps1`).
 
 This script checks all DLL dependencies, verifies the plugin directory, tests DLL loading, detects internet download blocks, and reports exactly what is wrong. No extra software needed — it runs natively on any Windows 10/11 machine. See [`tools/README.md`](tools/README.md) for details.
 

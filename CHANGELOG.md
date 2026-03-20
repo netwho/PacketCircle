@@ -2,6 +2,41 @@
 
 All notable changes to PacketCircle will be documented in this file.
 
+## [0.4.6] - 2026-03-18
+
+### Added
+- **New protocol information dialogs** — Ten additional right-click protocol info dialogs, each triggered only when the destination port matches. All results are filtered to the selected pair:
+  - **LDAP / LDAPS** (ports 389, 636, 3268, 3269) — session summary, bind DNs, SASL mechanisms, search operations (base DN, scope, filter strings), modify/add/delete counts, result codes, request/response control OIDs
+  - **SNMP** (ports 161, 162) — SNMP version (v1/v2c/v3), community strings, PDU type counts (GetRequest, GetNextRequest, GetBulk, SetRequest, Response, Trap, InformRequest), OIDs queried or reported, trap enterprise OID and generic/specific trap codes, error status codes
+  - **Syslog** (ports 514 UDP/TCP, 601 TCP, 6514 TLS) — matched packet count, transports detected (UDP/TCP/TLS), severity breakdown (Emergency → Debug), facility breakdown (kern/user/mail/daemon/auth/cron/local0–7), last 20 messages with timestamp, severity, facility, and message text
+  - **SSH / SFTP / SCP** (port 22) — key exchange algorithm negotiation (kex algorithms, host key algorithms), cipher and MAC algorithm pairs (client→server and server→client), compression algorithms, channel open/close counts and channel types (session, direct-tcpip, forwarded-tcpip); note: SSH payloads are encrypted, only handshake metadata is visible
+  - **FTP** (ports 21, 20, 990) — auth result and credentials (username/password in cleartext), data transfer mode (PASV/PORT), FEAT server capabilities, all FTP commands with counts sorted by frequency (PASS highlighted in red), files and paths seen in RETR/STOR/NLST/LIST, chronological command log (up to 200 entries)
+  - **Telnet** (ports 23, 992) — matched packet count, option negotiations (WILL/DO in green, WONT/DONT in amber), capabilities detected (Echo, Linemode, NAWS, Terminal Type, Authentication, Encryption), reassembled Telnet payload (up to 1 KB) in a monospace scrollable block
+  - **NBNS — NetBIOS Name Service** (port 137 UDP) — query/response/registration/release/WACK/refresh counts, name→IP resolution table (deduplicated) from all responses
+  - **NetBIOS Datagram Service** (port 138 UDP) — datagram type breakdown (Direct Unique, Direct Group, Broadcast, Error), source NetBIOS names with packet counts, destination NetBIOS names with packet counts
+  - **NetBIOS Session Service (NBSS)** (port 139 TCP) — session request/confirm/reject/retarget/keepalive/message counts, calling↔called name pairs from session request packets
+  - **SMB / DCE-RPC** trigger updated — port 139 TCP is now handled exclusively by the NBSS dialog; SMB info is triggered on ports 445 and 135 only
+  - **TCP Transport Details** (any TCP pair) — transport-layer statistics for the selected pair/port: flags observed (SYN/ACK/FIN/RST/PSH/URG/ECE/CWR as colour-coded pills), window size min/max/avg, MSS from SYN options, negotiated TCP options (SACK Permitted, Timestamps, Window Scale with multiplier), RTT min/max/avg in ms from `tcp.analysis.ack_rtt`, retransmission and out-of-order packet counts. Available on every TCP connection via "TCP Transport Details…" in the right-click menu, alongside any port-specific application-layer dialog
+  - **UDP Transport Details** (any UDP pair) — payload size statistics (min/max/avg bytes per datagram, derived from `udp.length − 8`), traffic direction breakdown (A→B / B→A packet counts with percentages and an ASCII asymmetry bar), datagram characteristic notes (fixed-size detection, fragmentation risk warning for datagrams > 1472 bytes). Available on every UDP connection via "UDP Transport Details…" in the right-click menu
+- **ntopng Integration** — Send the current capture file to a ntopng instance for deep traffic analysis. Configure host URL and credentials via the Settings menu (⚙). The "Send to NTOP" button is shown only when ntopng is enabled in settings
+- **Malcolm / Arkime Integration** — Upload the current PCAP directly to a Malcolm/Arkime instance via multipart POST with `tags=PacketCircle`. After a successful upload, automatically opens the Arkime sessions view pre-filtered with a time range and `expression=tags==PacketCircle`. Post-upload dialog notes that Malcolm processes PCAPs in the background and advises to reload the browser if results are not immediately visible
+- **Settings Menu** (⚙ gear icon) — Consolidated settings dialog next to the help button covering:
+  - Enable/disable ntopng integration (controls "Send to NTOP" button visibility)
+  - "Configure ntopng…" button (host, credentials, SSL settings)
+  - Enable/disable Malcolm / Arkime integration (greyed out — not yet implemented)
+  - "Configure Local CA Certificate…" for custom SSL certificate verification
+  - **Reset All Settings to Defaults** — confirmation dialog, removes the INI preferences file, resets window size and all toggles to factory defaults
+
+### Changed
+- **Protocol info menu** — Context menu options are greyed out with the required port shown in parentheses when not applicable to the selected connection. Port 139 TCP now dispatches to the new NBSS dialog instead of SMB
+- **Settings persistence** — ntopng and Malcolm enabled/disabled state is now saved in the INI preferences file under `[Integrations]`
+
+### Fixed
+- **Malcolm upload tags** — Uploads now include a `tags=PacketCircle` multipart field so uploaded sessions can be isolated in the Arkime session browser using the `tags==PacketCircle` filter expression
+- **Malcolm Arkime URL** — Sessions URL now includes `&expression=tags%3D%3DPacketCircle` for accurate post-upload session filtering
+
+- AI-Assisted: yes (Claude) — all ten new protocol info dialogs, ntopng integration, Malcolm/Arkime integration, settings menu, NBNS/NBDGM/NBSS packet_analyzer extractors, TCP/UDP transport details dialogs, fvalue_t opaque-pointer compat fixes, documentation
+
 ## [0.4.4] - 2026-03-15
 
 ### Added
