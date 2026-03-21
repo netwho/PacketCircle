@@ -304,6 +304,8 @@ else
     printf "  Qt6 runtime     : ${YELLOW}not found${NC}  (PacketCircle requires Qt6)\n"
 fi
 printf "%s\n" "$SEP"
+printf "\n  Press Enter to continue..."
+read -r _
 
 # --- Main menu ---
 printf "\n"
