@@ -1,269 +1,411 @@
 # =============================================================================
-# PacketCircle Installer for Windows (x86_64)  -  v0.3.2
+# PacketCircle Installer for Windows (x86_64)
 # =============================================================================
 #
-# This script installs the PacketCircle Wireshark plugin on Windows.
+# Supports:
+#   - Installing v.0.3.2 or v.0.4.6 (default: latest)
+#   - Detecting an already-installed version
+#   - Upgrading, downgrading, and uninstalling
 #
-# What it does:
-#   1. Detects your Wireshark installation and version
-#   2. Determines the correct plugin API version directory (e.g., 4.6)
-#   3. Creates the epan plugin directory if it doesn't exist
-#   4. Copies the plugin DLL (packetcircle.dll) to the plugin directory
-#   5. Detects Windows 10 and provides targeted compatibility advice
-#
-# Plugin directory locations (in order of preference):
-#   - Personal:  %APPDATA%\Wireshark\plugins\<version>\epan\
-#   - System:    C:\Program Files\Wireshark\plugins\<version>\epan\
-#
-# Requirements:
-#   - Wireshark 4.6.x installed
-#   - Windows 10/11 x86_64
+# Plugin directory:
+#   Personal:  %APPDATA%\Wireshark\plugins\<version>\epan\
+#   System:    C:\Program Files\Wireshark\plugins\<version>\epan\
 #
 # Usage:
 #   Right-click -> "Run with PowerShell"
-#   or from PowerShell: .\install.ps1
-#
-# To uninstall, simply delete the packetcircle.dll file from the plugin directory.
+#   or: .\install.ps1
 # =============================================================================
 
 $ErrorActionPreference = "Stop"
 
-$PluginVersion = "0.3.1"
-$ScriptDir = Split-Path -Parent $MyInvocation.MyCommand.Path
-$PluginFile = Join-Path $ScriptDir "packetcircle.dll"
+$ScriptDir  = Split-Path -Parent $MyInvocation.MyCommand.Path
 $PluginName = "packetcircle.dll"
 
 Write-Host ""
 Write-Host "===========================================================" -ForegroundColor Cyan
-Write-Host "      PacketCircle Installer for Windows  v$PluginVersion   " -ForegroundColor Cyan
+Write-Host "      PacketCircle Installer for Windows                   " -ForegroundColor Cyan
 Write-Host "      x86_64 (64-bit Intel/AMD)                            " -ForegroundColor Cyan
+Write-Host "      Available: v.0.3.2, v.0.4.6 (latest)               " -ForegroundColor Cyan
 Write-Host "===========================================================" -ForegroundColor Cyan
 Write-Host ""
 
-# --- Step 1: Verify the plugin binary exists ---
-if (-not (Test-Path $PluginFile)) {
-    Write-Host "Error: $PluginName not found in $ScriptDir" -ForegroundColor Red
-    Write-Host "Please ensure the plugin DLL is in the same directory as this script."
-    Read-Host "Press Enter to exit"
-    exit 1
+# --- Warn if launched directly (e.g. double-click) instead of from a Command Prompt ---
+$parentProcess = (Get-CimInstance Win32_Process -Filter "ProcessId=$PID" -ErrorAction SilentlyContinue).ParentProcessId
+$parentName    = (Get-Process -Id $parentProcess -ErrorAction SilentlyContinue).ProcessName
+if ($parentName -notmatch '^(cmd|powershell|pwsh|WindowsTerminal)$') {
+    Write-Host "  !! IMPORTANT: Run this installer from a Command Prompt window !!" -ForegroundColor Red
+    Write-Host "     If you double-clicked this file you may miss interactive"      -ForegroundColor Yellow
+    Write-Host "     prompts and the window may close before you can read them."    -ForegroundColor Yellow
+    Write-Host ""
+    Write-Host "     How to run correctly:"                                          -ForegroundColor White
+    Write-Host "       1. Open Command Prompt  (search: cmd)"                       -ForegroundColor White
+    Write-Host "       2. cd /d `"$ScriptDir`""                                     -ForegroundColor White
+    Write-Host "       3. install.bat"                                               -ForegroundColor White
+    Write-Host ""
+    Write-Host "     Continuing anyway in 5 seconds..." -ForegroundColor Yellow
+    Start-Sleep -Seconds 5
+    Write-Host ""
 }
 
-$fileInfo = Get-Item $PluginFile
-Write-Host "[OK] " -ForegroundColor Green -NoNewline
-Write-Host "Found plugin binary: $PluginFile ($([math]::Round($fileInfo.Length / 1KB)) KB)"
 
-# --- Step 2: Find Wireshark and determine version ---
-$WsVersion = $null
+# =============================================================================
+# PREREQUISITES CHECK
+# =============================================================================
+Write-Host "Checking prerequisites..." -ForegroundColor White
+Write-Host ""
+
+# --- OS Detection ---
+$osBuild   = [System.Environment]::OSVersion.Version.Build
+$osName    = if ($osBuild -ge 22000) { "Windows 11" } elseif ($osBuild -ge 10240) { "Windows 10" } else { "Windows (older)" }
+$osArch    = if ([System.Environment]::Is64BitOperatingSystem) { "x86_64 (64-bit)" } else { "x86 (32-bit)" }
+Write-Host "  OS              : " -NoNewline; Write-Host "$osName  build $osBuild  $osArch" -ForegroundColor Cyan
+if (-not [System.Environment]::Is64BitOperatingSystem) {
+    Write-Host "  [WARN] This installer is for 64-bit Windows only." -ForegroundColor Red
+}
+
+# --- VC++ Runtime (checked upfront on all Windows versions) ---
+$vcFound   = $false
+$vcVersion = $null
+foreach ($kp in @(
+    "HKLM:\SOFTWARE\Microsoft\VisualStudio\14.0\VC\Runtimes\X64",
+    "HKLM:\SOFTWARE\WOW6432Node\Microsoft\VisualStudio\14.0\VC\Runtimes\X64"
+)) {
+    if (Test-Path $kp) {
+        try {
+            $vcVersion = (Get-ItemProperty $kp -ErrorAction SilentlyContinue).Version
+            if ($vcVersion) { $vcFound = $true; break }
+        } catch {}
+    }
+}
+if ($vcFound) {
+    Write-Host "  VC++ 2022 x64   : " -NoNewline; Write-Host "[FOUND] $vcVersion" -ForegroundColor Green
+} else {
+    Write-Host "  VC++ 2022 x64   : " -NoNewline; Write-Host "[NOT FOUND] Required for PacketCircle to load" -ForegroundColor Red
+    Write-Host "                    Install from: https://aka.ms/vs/17/release/vc_redist.x64.exe" -ForegroundColor Yellow
+}
+
+# --- Verify plugin binaries in this installer ---
+Write-Host ""
+Write-Host "  Plugin binaries in this installer:"
+$binariesOk = $true
+foreach ($ver in @("v.0.3.2", "v.0.4.6")) {
+    $path = Join-Path $ScriptDir "$ver\$PluginName"
+    if (Test-Path $path) {
+        $sz = [math]::Round((Get-Item $path).Length / 1KB)
+        Write-Host "    $ver\$PluginName : " -NoNewline; Write-Host "[FOUND]  ($sz KB)" -ForegroundColor Green
+    } else {
+        Write-Host "    $ver\$PluginName : " -NoNewline; Write-Host "[MISSING]" -ForegroundColor Red
+        $binariesOk = $false
+    }
+}
+if (-not $binariesOk) {
+    Write-Host ""
+    Write-Host "  Error: One or more plugin binaries are missing from this installer package." -ForegroundColor Red
+    Read-Host "  Press Enter to exit"; exit 1
+}
+
+# --- Detect Wireshark ---
+Write-Host ""
+Write-Host "  Searching for Wireshark:"
+$WsVersion     = $null
 $WiresharkPath = $null
 
-# Check common installation paths
-$searchPaths = @(
+$wsSearchPaths = @(
     "$env:ProgramFiles\Wireshark",
     "${env:ProgramFiles(x86)}\Wireshark",
     "$env:LOCALAPPDATA\Programs\Wireshark"
 )
-
-foreach ($path in $searchPaths) {
-    if (Test-Path "$path\Wireshark.exe") {
+foreach ($path in $wsSearchPaths) {
+    $exe = "$path\Wireshark.exe"
+    if (Test-Path $exe) {
+        Write-Host "    $exe : " -NoNewline; Write-Host "[FOUND]" -ForegroundColor Green
         $WiresharkPath = $path
         break
+    } else {
+        Write-Host "    $exe : " -NoNewline; Write-Host "[not found]" -ForegroundColor DarkGray
     }
 }
 
-# Try to get version from Wireshark.exe
 if ($WiresharkPath) {
     try {
-        $versionInfo = (Get-Item "$WiresharkPath\Wireshark.exe").VersionInfo
-        $WsVersion = "$($versionInfo.FileMajorPart).$($versionInfo.FileMinorPart).$($versionInfo.FileBuildPart)"
-    } catch {}
+        $vi = (Get-Item "$WiresharkPath\Wireshark.exe").VersionInfo
+        $WsVersion = "$($vi.FileMajorPart).$($vi.FileMinorPart).$($vi.FileBuildPart)"
+        Write-Host "    Version from EXE metadata: " -NoNewline; Write-Host $WsVersion -ForegroundColor Cyan
+    } catch {
+        Write-Host "    Could not read EXE version metadata." -ForegroundColor Yellow
+    }
 }
 
-# Fallback: try tshark
 if (-not $WsVersion) {
     $tshark = Get-Command "tshark" -ErrorAction SilentlyContinue
     if ($tshark) {
+        Write-Host "    tshark found on PATH: $($tshark.Source)" -ForegroundColor DarkGray
         try {
-            $output = & tshark --version 2>&1 | Select-Object -First 1
-            if ($output -match '(\d+\.\d+\.\d+)') {
+            $out = & tshark --version 2>&1 | Select-Object -First 1
+            if ($out -match '(\d+\.\d+\.\d+)') {
                 $WsVersion = $Matches[1]
+                Write-Host "    Version from tshark: " -NoNewline; Write-Host $WsVersion -ForegroundColor Cyan
             }
         } catch {}
     }
 }
 
-# Fallback: try tshark from Wireshark directory
 if (-not $WsVersion -and $WiresharkPath) {
-    try {
-        $output = & "$WiresharkPath\tshark.exe" --version 2>&1 | Select-Object -First 1
-        if ($output -match '(\d+\.\d+\.\d+)') {
-            $WsVersion = $Matches[1]
-        }
-    } catch {}
+    $tsharkExe = "$WiresharkPath\tshark.exe"
+    if (Test-Path $tsharkExe) {
+        Write-Host "    Trying $tsharkExe ..." -ForegroundColor DarkGray
+        try {
+            $out = & $tsharkExe --version 2>&1 | Select-Object -First 1
+            if ($out -match '(\d+\.\d+\.\d+)') {
+                $WsVersion = $Matches[1]
+                Write-Host "    Version from tshark.exe: " -NoNewline; Write-Host $WsVersion -ForegroundColor Cyan
+            }
+        } catch {}
+    }
 }
 
 if (-not $WsVersion) {
-    Write-Host "Warning: Could not detect Wireshark version." -ForegroundColor Yellow
-    Write-Host "Please ensure Wireshark is installed."
-    $input = Read-Host "Enter Wireshark major.minor version (e.g., 4.6)"
-    $WsVersion = "$input.0"
+    Write-Host ""
+    Write-Host "  [WARN] Could not detect Wireshark version automatically." -ForegroundColor Yellow
+    $inp = Read-Host "  Enter Wireshark major.minor version (e.g., 4.6)"
+    $WsVersion = "$inp.0"
 }
 
-Write-Host "[OK] " -ForegroundColor Green -NoNewline
-Write-Host "Wireshark version: $WsVersion"
+$WsMajor      = $WsVersion.Split('.')[0]
+$WsMinor      = $WsVersion.Split('.')[1]
+$PluginPathId = "$WsMajor.$WsMinor"   # default; overridden below if we find the real dir
 
-# PacketCircle 0.3.x is built for Wireshark plugin API 4.6.x.
-# Keep install target fixed to 4.6 to avoid 4.7/4.8 path mismatches.
-$PluginPathId = "4.6"
+# --- Determine plugin directory ---
+# Scan known locations to find the exact directory name Wireshark uses for this version.
+# Windows typically uses dots ("4.6") but we also handle dashes ("4-6") for safety.
+Write-Host ""
+Write-Host "  Searching for plugin directory (version folder name):"
+$foundPathId = $null
 
-Write-Host "[OK] " -ForegroundColor Green -NoNewline
-Write-Host "Plugin API version: $PluginPathId"
+$searchBases = @(
+    $(if ($WiresharkPath) { "$WiresharkPath\plugins" } else { $null }),
+    "$env:APPDATA\Wireshark\plugins",
+    "$env:LOCALAPPDATA\Wireshark\plugins"
+) | Where-Object { $_ }
 
-# --- Step 3: Choose installation directory ---
+foreach ($base in $searchBases) {
+    if (Test-Path $base) {
+        $dirs = Get-ChildItem $base -Directory -ErrorAction SilentlyContinue
+        if ($dirs) {
+            foreach ($d in $dirs) {
+                $match = $d.Name -match "^$WsMajor[\.\-]$WsMinor$"
+                $label = if ($match) { "[MATCH]" } else { "       " }
+                $color = if ($match) { "Green"   } else { "DarkGray" }
+                Write-Host "    $base\$($d.Name)  $label" -ForegroundColor $color
+                if ($match -and -not $foundPathId) { $foundPathId = $d.Name }
+            }
+        } else {
+            Write-Host "    $base  (empty)" -ForegroundColor DarkGray
+        }
+    } else {
+        Write-Host "    $base  (does not exist)" -ForegroundColor DarkGray
+    }
+}
+
+if ($foundPathId) {
+    $PluginPathId = $foundPathId
+    Write-Host "    => Using plugin path ID: " -NoNewline; Write-Host $PluginPathId -ForegroundColor Cyan
+} else {
+    Write-Host "    => No existing version directory found; will use default: " -NoNewline
+    Write-Host $PluginPathId -ForegroundColor Yellow
+    Write-Host "       If the plugin does not load, check: Help > About Wireshark > Folders > Personal Plugins" -ForegroundColor Yellow
+}
+
 $PersonalPluginDir = "$env:APPDATA\Wireshark\plugins\$PluginPathId\epan"
-$SystemPluginDir = $null
-if ($WiresharkPath) {
-    $SystemPluginDir = "$WiresharkPath\plugins\$PluginPathId\epan"
+$SystemPluginDir   = if ($WiresharkPath) { "$WiresharkPath\plugins\$PluginPathId\epan" } else { $null }
+
+# --- Detect currently installed version ---
+Write-Host ""
+Write-Host "  Checking for existing PacketCircle installation:"
+$InstalledVersion = $null
+$InstalledPath    = $null
+
+$allCheckDirs = @(
+    $PersonalPluginDir,
+    "$env:LOCALAPPDATA\Wireshark\plugins\$PluginPathId\epan",
+    $SystemPluginDir
+) | Where-Object { $_ }
+
+foreach ($dir in $allCheckDirs) {
+    $candidate = "$dir\$PluginName"
+    if (Test-Path $candidate) {
+        Write-Host "    $candidate : " -NoNewline; Write-Host "[FOUND]" -ForegroundColor Green
+        $InstalledPath = $candidate
+        try {
+            $bytes = [System.IO.File]::ReadAllBytes($InstalledPath)
+            $text  = [System.Text.Encoding]::ASCII.GetString($bytes)
+            if ($text -match 'PacketCircle v\.(\d+\.\d+\.\d+)') {
+                $InstalledVersion = $Matches[1]
+                Write-Host "    Embedded version string: " -NoNewline; Write-Host "v.$InstalledVersion" -ForegroundColor Cyan
+            } else {
+                Write-Host "    (no version string found in binary)" -ForegroundColor Yellow
+            }
+        } catch {
+            Write-Host "    (could not read binary for version check)" -ForegroundColor Yellow
+        }
+        break
+    } else {
+        Write-Host "    $candidate : " -NoNewline; Write-Host "[not found]" -ForegroundColor DarkGray
+    }
+}
+if (-not $InstalledPath) {
+    Write-Host "    No existing installation found." -ForegroundColor DarkGray
+}
+
+# --- Prerequisites summary ---
+Write-Host ""
+Write-Host "-----------------------------------------------------------" -ForegroundColor DarkGray
+Write-Host "  Prerequisites Summary" -ForegroundColor White
+Write-Host "-----------------------------------------------------------" -ForegroundColor DarkGray
+Write-Host "  OS              : $osName  build $osBuild  $osArch"
+Write-Host "  VC++ 2022 x64   : " -NoNewline
+if ($vcFound) { Write-Host "OK ($vcVersion)" -ForegroundColor Green } else { Write-Host "NOT FOUND  (required)" -ForegroundColor Red }
+Write-Host "  Wireshark       : " -NoNewline
+if ($WiresharkPath) { Write-Host "Found at $WiresharkPath" -ForegroundColor Green } else { Write-Host "Not found in standard locations" -ForegroundColor Yellow }
+Write-Host "  Wireshark ver   : " -NoNewline; Write-Host "$WsVersion  (plugin API: $PluginPathId)" -ForegroundColor Cyan
+Write-Host "  Plugin binaries : OK (v.0.3.2, v.0.4.6)"
+Write-Host "  Installed now   : " -NoNewline
+if ($InstalledVersion) { Write-Host "v.$InstalledVersion  at $InstalledPath" -ForegroundColor Cyan } else { Write-Host "None" -ForegroundColor DarkGray }
+Write-Host "-----------------------------------------------------------" -ForegroundColor DarkGray
+
+# --- Main menu ---
+Write-Host ""
+Write-Host "What would you like to do?"
+Write-Host ""
+Write-Host "  i) Install / upgrade / downgrade" -ForegroundColor Green
+Write-Host "  u) Uninstall"                      -ForegroundColor Red
+Write-Host "  q) Quit"                            -ForegroundColor Yellow
+Write-Host ""
+$action = Read-Host "Choice [i]"
+if (-not $action) { $action = "i" }
+
+switch ($action.ToLower()) {
+    "u" {
+        if (-not $InstalledPath) {
+            Write-Host "`nPacketCircle is not currently installed." -ForegroundColor Yellow
+            Read-Host "Press Enter to exit"; exit 0
+        }
+        Write-Host "`nRemove: $InstalledPath" -ForegroundColor Cyan
+        $confirm = Read-Host "Confirm uninstall? [y/N]"
+        if ($confirm -eq "y" -or $confirm -eq "Y") {
+            Remove-Item $InstalledPath -Force
+            Write-Host "`nPacketCircle v.$InstalledVersion uninstalled successfully." -ForegroundColor Green
+        } else {
+            Write-Host "Uninstall cancelled."
+        }
+        Read-Host "Press Enter to exit"; exit 0
+    }
+    "q" { Write-Host "Bye."; Read-Host "Press Enter to exit"; exit 0 }
+    { $_ -eq "i" -or $_ -eq "" } { }
+    default {
+        Write-Host "Invalid choice." -ForegroundColor Red
+        Read-Host "Press Enter to exit"; exit 1
+    }
+}
+
+# --- Version selection (context-aware) ---
+Write-Host ""
+Write-Host "Select version to install:"
+Write-Host ""
+
+if ($InstalledVersion -eq "0.4.6") {
+    Write-Host "  1) v.0.4.6 (latest)   - already installed, reinstall" -ForegroundColor Green
+    Write-Host "  2) v.0.3.2             - downgrade (legacy)"           -ForegroundColor Yellow
+} elseif ($InstalledVersion -eq "0.3.2") {
+    Write-Host "  1) v.0.4.6 (latest)   - upgrade (recommended)"         -ForegroundColor Green
+    Write-Host "  2) v.0.3.2             - already installed, reinstall"  -ForegroundColor Yellow
+} else {
+    Write-Host "  1) v.0.4.6 (latest)   - protocol info dialogs, ntopng & Malcolm/Arkime integrations, settings menu" -ForegroundColor Green
+    Write-Host "  2) v.0.3.2             - TCP stream stats, Select Results, theme-aware UI" -ForegroundColor Yellow
 }
 
 Write-Host ""
-Write-Host "Where would you like to install the plugin?"
+$verChoice = Read-Host "Choice [1]"
+if (-not $verChoice) { $verChoice = "1" }
+
+switch ($verChoice) {
+    "1" { $SelectedVersion = "0.4.6" }
+    "2" { $SelectedVersion = "0.3.2" }
+    default {
+        Write-Host "Invalid choice." -ForegroundColor Red
+        Read-Host "Press Enter to exit"; exit 1
+    }
+}
+
+$PluginFile = Join-Path $ScriptDir "v.$SelectedVersion\$PluginName"
+if (-not (Test-Path $PluginFile)) {
+    Write-Host "Error: Binary not found: $PluginFile" -ForegroundColor Red
+    Read-Host "Press Enter to exit"; exit 1
+}
+
+$fileInfo = Get-Item $PluginFile
+Write-Host ""
+Write-Host "[OK] " -ForegroundColor Green -NoNewline
+Write-Host "Selected: PacketCircle v.$SelectedVersion ($([math]::Round($fileInfo.Length / 1KB)) KB)"
+
+# --- Choose install location ---
+Write-Host ""
+Write-Host "Where would you like to install?"
 Write-Host ""
 Write-Host "  1) Personal directory (recommended)" -ForegroundColor White
-Write-Host "     $PersonalPluginDir" -ForegroundColor Gray
+Write-Host "     $PersonalPluginDir"               -ForegroundColor Gray
 if ($SystemPluginDir) {
     Write-Host ""
     Write-Host "  2) System directory (may require admin)" -ForegroundColor White
-    Write-Host "     $SystemPluginDir" -ForegroundColor Gray
+    Write-Host "     $SystemPluginDir"                    -ForegroundColor Gray
 }
 Write-Host ""
-$choice = Read-Host "Choice [1]"
-if (-not $choice) { $choice = "1" }
+$locChoice = Read-Host "Choice [1]"
+if (-not $locChoice) { $locChoice = "1" }
 
-if ($choice -eq "2" -and $SystemPluginDir) {
-    $InstallDir = $SystemPluginDir
-} else {
-    $InstallDir = $PersonalPluginDir
-}
+$InstallDir = if ($locChoice -eq "2" -and $SystemPluginDir) { $SystemPluginDir } else { $PersonalPluginDir }
 
-# --- Step 4: Create directory and install ---
+# --- Install ---
 Write-Host ""
 Write-Host "Installing to: $InstallDir" -ForegroundColor Cyan
 
 if (-not (Test-Path $InstallDir)) {
     New-Item -ItemType Directory -Force -Path $InstallDir | Out-Null
 }
-
 Copy-Item $PluginFile "$InstallDir\$PluginName" -Force
 
-# --- Step 5: Verify installation ---
+# Unblock if downloaded from internet
+try { Unblock-File "$InstallDir\$PluginName" -ErrorAction SilentlyContinue } catch {}
+
+# --- Verify ---
 if (Test-Path "$InstallDir\$PluginName") {
     Write-Host ""
     Write-Host "===========================================================" -ForegroundColor Green
-    Write-Host "      Installation successful!  (PacketCircle v$PluginVersion)" -ForegroundColor Green
+    Write-Host "      Installation successful!" -ForegroundColor Green
     Write-Host "===========================================================" -ForegroundColor Green
     Write-Host ""
-    Write-Host "  Plugin installed to:"
-    Write-Host "  $InstallDir\$PluginName" -ForegroundColor Cyan
+    Write-Host "  Installed:  PacketCircle v.$SelectedVersion" -ForegroundColor Cyan
+    Write-Host "  Location:   $InstallDir\$PluginName"
     Write-Host ""
     Write-Host "  Next steps:"
     Write-Host "  1. Restart Wireshark (if running)"
-    Write-Host "  2. Open a capture file or start a live capture"
+    Write-Host "  2. Open a capture or start a live capture"
     Write-Host "  3. Look for PacketCircle in the Tools menu"
     Write-Host ""
 
-    # --- Windows 10 compatibility advisory ---
-    $osCaption = (Get-CimInstance Win32_OperatingSystem).Caption
-    $osBuild = [System.Environment]::OSVersion.Version.Build
-    $isWin10 = ($osCaption -like "*Windows 10*") -or ($osBuild -lt 22000)
-
-    if ($isWin10) {
-        Write-Host "===========================================================" -ForegroundColor Yellow
-        Write-Host "  WINDOWS 10 DETECTED - Important Compatibility Notes      " -ForegroundColor Yellow
-        Write-Host "===========================================================" -ForegroundColor Yellow
+    if (-not $vcFound) {
         Write-Host ""
-        Write-Host "  PacketCircle has been tested primarily on Windows 11."
-        Write-Host "  On Windows 10, the plugin may fail to load due to:"
-        Write-Host ""
-        Write-Host "  1. Missing or outdated VC++ Runtime (VCRUNTIME140.dll," -ForegroundColor White
-        Write-Host "     VCRUNTIME140_1.dll, MSVCP140.dll)" -ForegroundColor White
-        Write-Host "     -> Install the latest VC++ 2022 Redistributable (x64):" -ForegroundColor Gray
-        Write-Host "        https://aka.ms/vs/17/release/vc_redist.x64.exe" -ForegroundColor Cyan
-        Write-Host ""
-        Write-Host "  2. Windows SmartScreen / download blocking" -ForegroundColor White
-        Write-Host "     -> Right-click packetcircle.dll -> Properties -> Unblock" -ForegroundColor Gray
-        Write-Host ""
-        Write-Host "  3. DLL search path differences between Win10 and Win11" -ForegroundColor White
-        Write-Host "     -> Ensure Wireshark's install directory is in your PATH," -ForegroundColor Gray
-        Write-Host "        or install the plugin to the system plugins folder." -ForegroundColor Gray
-        Write-Host ""
-        Write-Host "  4. Antivirus software silently blocking unsigned DLLs" -ForegroundColor White
-        Write-Host "     -> Check your antivirus quarantine/exception list." -ForegroundColor Gray
-        Write-Host ""
-
-        # Check VC++ Runtime presence
-        $vcKeyPaths = @(
-            "HKLM:\SOFTWARE\Microsoft\VisualStudio\14.0\VC\Runtimes\X64",
-            "HKLM:\SOFTWARE\WOW6432Node\Microsoft\VisualStudio\14.0\VC\Runtimes\X64"
-        )
-        $vcFound = $false
-        foreach ($kp in $vcKeyPaths) {
-            if (Test-Path $kp) {
-                try {
-                    $vcVer = (Get-ItemProperty $kp -ErrorAction SilentlyContinue).Version
-                    if ($vcVer) {
-                        Write-Host "  [OK] VC++ Runtime detected: $vcVer" -ForegroundColor Green
-                        $vcFound = $true
-                        break
-                    }
-                } catch {}
-            }
-        }
-        if (-not $vcFound) {
-            Write-Host "  [WARN] VC++ 2022 Redistributable (x64) NOT detected!" -ForegroundColor Red
-            Write-Host "         Please install it from:" -ForegroundColor Yellow
-            Write-Host "         https://aka.ms/vs/17/release/vc_redist.x64.exe" -ForegroundColor Cyan
-        }
-
-        # Check for download block (Zone.Identifier)
-        $installedDll = "$InstallDir\$PluginName"
-        $zoneFile = "${installedDll}:Zone.Identifier"
-        try {
-            $zoneContent = Get-Content $zoneFile -ErrorAction SilentlyContinue
-            if ($zoneContent) {
-                Write-Host ""
-                Write-Host "  [WARN] The DLL has an internet download marker." -ForegroundColor Yellow
-                Write-Host "         Unblocking automatically..." -ForegroundColor Gray
-                Unblock-File $installedDll -ErrorAction SilentlyContinue
-                Write-Host "  [OK]   DLL unblocked." -ForegroundColor Green
-            }
-        } catch {}
-
-        Write-Host ""
-        Write-Host "  If the plugin does NOT appear in Wireshark's Tools menu" -ForegroundColor Yellow
-        Write-Host "  after restarting, run the troubleshooting script:" -ForegroundColor Yellow
-        Write-Host ""
-        $troubleshootPath = Join-Path $ScriptDir "troubleshoot.ps1"
-        if (Test-Path $troubleshootPath) {
-            Write-Host "    .\troubleshoot.ps1" -ForegroundColor Cyan
-        } else {
-            Write-Host "    Download troubleshoot.ps1 from the tools/ directory" -ForegroundColor Cyan
-            Write-Host "    in the PacketCircle repository and run it." -ForegroundColor Cyan
-        }
-        Write-Host ""
-        Write-Host "  The troubleshooting script checks all DLL dependencies," -ForegroundColor Gray
-        Write-Host "  verifies the plugin directory, tests DLL loading, detects" -ForegroundColor Gray
-        Write-Host "  download blocks, and reports exactly what may be wrong." -ForegroundColor Gray
-        Write-Host "  No extra software required - it runs natively in PowerShell." -ForegroundColor Gray
+        Write-Host "  [WARN] VC++ 2022 Redistributable (x64) was not detected." -ForegroundColor Red
+        Write-Host "         If PacketCircle fails to load, install it from:"    -ForegroundColor Yellow
+        Write-Host "         https://aka.ms/vs/17/release/vc_redist.x64.exe"     -ForegroundColor Yellow
         Write-Host ""
     }
 
-    Write-Host "  To uninstall:"
-    Write-Host "  Delete: $InstallDir\$PluginName" -ForegroundColor Yellow
+    Write-Host "  To uninstall, run this script again and choose 'u'."
     Write-Host ""
 } else {
     Write-Host "Error: Installation failed." -ForegroundColor Red
-    Read-Host "Press Enter to exit"
-    exit 1
+    Read-Host "Press Enter to exit"; exit 1
 }
 
 Read-Host "Press Enter to exit"
