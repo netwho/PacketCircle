@@ -1,3 +1,0 @@
-_plugin_version
-_plugin_register
-_plugin_reg_handoff
