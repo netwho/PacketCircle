@@ -81,19 +81,19 @@ cp installer/macos-universal/v.0.4.6/packetcircle.so ~/.local/lib/wireshark/plug
 ```bash
 # Wireshark 4.0.x
 mkdir -p ~/.local/lib/wireshark/plugins/4.0/epan/
-cp installer/linux-x86_64/bin/v.0.4.6/packetcircle-ws40.so ~/.local/lib/wireshark/plugins/4.0/epan/packetcircle.so
+cp installer/linux-x86_64/v.0.4.6/packetcircle-ws40.so ~/.local/lib/wireshark/plugins/4.0/epan/packetcircle.so
 
 # Wireshark 4.2.x
 mkdir -p ~/.local/lib/wireshark/plugins/4.2/epan/
-cp installer/linux-x86_64/bin/v.0.4.6/packetcircle-ws42.so ~/.local/lib/wireshark/plugins/4.2/epan/packetcircle.so
+cp installer/linux-x86_64/v.0.4.6/packetcircle-ws42.so ~/.local/lib/wireshark/plugins/4.2/epan/packetcircle.so
 
 # Wireshark 4.4.x (e.g. Debian 13 Trixie)
 mkdir -p ~/.local/lib/wireshark/plugins/4.4/epan/
-cp installer/linux-x86_64/bin/v.0.4.6/packetcircle-ws44.so ~/.local/lib/wireshark/plugins/4.4/epan/packetcircle.so
+cp installer/linux-x86_64/v.0.4.6/packetcircle-ws44.so ~/.local/lib/wireshark/plugins/4.4/epan/packetcircle.so
 
 # Wireshark 4.6.x
 mkdir -p ~/.local/lib/wireshark/plugins/4.6/epan/
-cp installer/linux-x86_64/bin/v.0.4.6/packetcircle-ws46.so ~/.local/lib/wireshark/plugins/4.6/epan/packetcircle.so
+cp installer/linux-x86_64/v.0.4.6/packetcircle-ws46.so ~/.local/lib/wireshark/plugins/4.6/epan/packetcircle.so
 ```
 
 **Windows** (PowerShell):

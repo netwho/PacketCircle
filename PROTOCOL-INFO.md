@@ -50,7 +50,7 @@ Protocol info options are enabled/disabled based on the destination port of the 
 ---
 
 ### SMB / CIFS & DCE/RPC Information
-**Trigger:** Ports 445, 139, 135
+**Trigger:** Ports 445 (SMB direct), 135 (DCE-RPC endpoint mapper)
 **Available in:** IP mode
 
 | Section | Details |
@@ -153,6 +153,169 @@ Protocol info options are enabled/disabled based on the destination port of the 
 | Queried Domains | Domain names queried with per-name counts (top 50 shown) |
 | Resolved Answers | Answer records in format `name TYPE value` (A/AAAA/CNAME/MX/NS/PTR/TXT/SRV/SOA/CAA) |
 | NXDOMAIN Names | Names that received NXDOMAIN responses |
+
+---
+
+### LDAP / LDAPS Information
+**Trigger:** Ports 389, 636 (LDAPS), 3268, 3269 (Global Catalog)
+**Available in:** IP mode
+
+| Section | Details |
+|---|---|
+| Session Summary | Matched packet count, bind requests, bind results |
+| Bind / Authentication | Bind DNs, SASL mechanisms, simple vs. SASL auth |
+| Search Operations | Base DNs, scope (base/one/sub), filter strings, attribute requests |
+| Modify / Add / Delete | Operation counts per type |
+| Result Codes | success, noSuchObject, invalidCredentials, unwillingToPerform, etc. |
+| Controls | Request/response control OIDs (paging, sorting, VLV, etc.) |
+
+---
+
+### SNMP Information
+**Trigger:** Ports 161 (SNMP), 162 (SNMP Trap)
+**Available in:** IP mode
+
+| Section | Details |
+|---|---|
+| Session Summary | Matched packet count, SNMP version (v1 / v2c / v3) |
+| Community Strings | Community names seen (v1/v2c) |
+| PDU Types | GetRequest, GetNextRequest, GetBulk, SetRequest, Response, Trap, InformRequest counts |
+| OIDs | Object identifiers queried or reported |
+| Trap Info | Trap enterprise OID, generic trap type, specific trap code |
+| Errors | Error status codes and error indices |
+
+---
+
+### Syslog Information
+**Trigger:** Ports 514 UDP/TCP (classic Syslog), 601 TCP (RFC 5425), 6514 TLS
+**Available in:** IP mode
+
+| Section | Details |
+|---|---|
+| Session Summary | Matched packet count, transports (UDP / TCP / TLS) |
+| Severity Breakdown | Emergency, Alert, Critical, Error, Warning, Notice, Informational, Debug counts |
+| Facility Breakdown | kern, user, mail, daemon, auth, syslog, lpr, news, uucp, cron, local0–7 |
+| Recent Messages | Last messages captured (up to 20), with timestamp, severity, facility, and message text |
+
+---
+
+### SSH / SFTP / SCP Information
+**Trigger:** Port 22
+**Available in:** IP mode
+
+| Section | Details |
+|---|---|
+| Session Summary | Matched packet count, key exchange count, new keys count |
+| Key Exchange | Algorithm negotiation (kex algorithms, host key algorithms) |
+| Encryption | Cipher and MAC algorithm pairs for client→server and server→client |
+| Compression | Compression algorithms negotiated |
+| Channels | Channel open/close counts, channel type (session, direct-tcpip, forwarded-tcpip) |
+| Protocol Note | SSH payloads are encrypted; only handshake metadata is visible |
+
+---
+
+### FTP Information
+**Trigger:** Ports 21 (control), 20 (active data), 990 (FTPS implicit)
+**Available in:** IP mode
+
+| Section | Details |
+|---|---|
+| Session Summary | Auth result (success/failure), login credentials (username/password in cleartext), data transfer mode (PASV / PORT) |
+| Server Features | FEAT response capabilities |
+| Data Ports Negotiated | PASV and PORT addresses/ports used for data connections |
+| Command Usage | All FTP commands with counts, sorted by frequency (PASS highlighted in red) |
+| Files / Paths | Filenames and paths seen in RETR, STOR, NLST, LIST commands |
+| Command Log | Chronological command log (up to 200 entries) |
+
+> **⚠ Security note:** FTP transmits credentials in cleartext. Username and password are visible if present in the capture.
+
+---
+
+### Telnet Information
+**Trigger:** Ports 23, 992 (Telnet over TLS)
+**Available in:** IP mode
+
+| Section | Details |
+|---|---|
+| Session Summary | Matched packet count, total data bytes, detected credentials |
+| Option Negotiations | WILL / DO (green) and WONT / DONT (amber) option tables |
+| Capabilities Detected | Echo, Linemode, NAWS (window size), Terminal Type, Authentication, Encryption options |
+| Session Data | Reassembled Telnet payload (up to 1 KB), monospace scrollable block |
+
+> **⚠ Security note:** Telnet transmits all data including credentials in plaintext.
+
+---
+
+### NBNS — NetBIOS Name Service
+**Trigger:** Port 137 UDP
+**Available in:** IP mode
+
+| Section | Details |
+|---|---|
+| Session Summary | Matched packet count, query count, response count, registration / release / WACK / refresh counts |
+| Name Resolution | Name → IP mapping table from all responses, with operation type |
+
+> **Note:** NBNS provides name registration and resolution for legacy Windows networking. Modern environments use DNS instead.
+
+---
+
+### NetBIOS Datagram Service
+**Trigger:** Port 138 UDP
+**Available in:** IP mode
+
+| Section | Details |
+|---|---|
+| Session Summary | Matched packet count, Direct Unique / Direct Group / Broadcast / Error datagram counts |
+| Datagram Types | Per-type breakdown (Direct Unique, Direct Group, Broadcast, Query Request, etc.) |
+| Source Names | Source NetBIOS names with packet counts |
+| Destination Names | Destination NetBIOS names with packet counts |
+
+> **Note:** Port 138 carries Windows browser announcements, domain master browser elections, and SMB browse-list traffic.
+
+---
+
+### NetBIOS Session Service (NBSS)
+**Trigger:** Port 139 TCP
+**Available in:** IP mode
+
+| Section | Details |
+|---|---|
+| Session Summary | Matched packet count, session requests, confirmed, rejected, keepalives, session messages |
+| Session Setup | Calling name (client) → Called name (server) pairs from session request packets |
+
+> **Note:** Port 139 TCP is the legacy NetBIOS Session transport for SMB. Modern SMB uses port 445 directly. Right-click a port 445 connection for full SMB protocol details.
+
+---
+
+### TCP Transport Details
+**Trigger:** Any TCP connection (right-click → "TCP Transport Details…")
+**Available in:** IP mode
+*(new in v0.4.6)*
+
+| Section | Details |
+|---|---|
+| TCP Flags | Flags observed across all packets: SYN, ACK, FIN, RST, PSH, URG, ECE, CWR — shown as colour-coded pills |
+| Window Size | Min / max / average TCP window size (bytes) |
+| MSS | Maximum Segment Size from SYN options |
+| Negotiated Options | SACK Permitted, Timestamps, Window Scale (with multiplier value) |
+| RTT | Min / max / average round-trip time in ms, derived from `tcp.analysis.ack_rtt` |
+| Retransmissions | Retransmission packet count |
+| Out-of-Order | Out-of-order packet count |
+
+> Available on every TCP connection alongside any port-specific application-layer dialog (e.g. HTTP Info + TCP Transport Details for port 80).
+
+---
+
+### UDP Transport Details
+**Trigger:** Any UDP connection (right-click → "UDP Transport Details…")
+**Available in:** IP mode
+*(new in v0.4.6)*
+
+| Section | Details |
+|---|---|
+| Payload Size | Min / max / average datagram payload bytes (derived from `udp.length − 8`) |
+| Direction Breakdown | A→B and B→A packet counts with percentages and an ASCII asymmetry bar |
+| Datagram Notes | Fixed-size detection (all datagrams identical size); fragmentation risk warning for datagrams > 1472 bytes |
 
 ---
 

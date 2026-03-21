@@ -216,14 +216,14 @@ cp installer/macos-universal/v.0.3.2/packetcircle.so ~/.local/lib/wireshark/plug
 
 ```bash
 # Linux — pick the binary matching your Wireshark version:
-#   bin/v.0.4.6/packetcircle-ws40.so  → Wireshark 4.0.x
-#   bin/v.0.4.6/packetcircle-ws42.so  → Wireshark 4.2.x
-#   bin/v.0.4.6/packetcircle-ws44.so  → Wireshark 4.4.x
-#   bin/v.0.4.6/packetcircle-ws46.so  → Wireshark 4.6.x
+#   v.0.4.6/packetcircle-ws40.so  → Wireshark 4.0.x
+#   v.0.4.6/packetcircle-ws42.so  → Wireshark 4.2.x
+#   v.0.4.6/packetcircle-ws44.so  → Wireshark 4.4.x
+#   v.0.4.6/packetcircle-ws46.so  → Wireshark 4.6.x
 # (replace v.0.4.6 with v.0.3.2 for 4.2/4.4/4.6; v.0.3.2 does not support 4.0.x)
 
 mkdir -p ~/.local/lib/wireshark/plugins/4.6/epan/
-cp installer/linux-x86_64/bin/v.0.4.6/packetcircle-ws46.so ~/.local/lib/wireshark/plugins/4.6/epan/packetcircle.so
+cp installer/linux-x86_64/v.0.4.6/packetcircle-ws46.so ~/.local/lib/wireshark/plugins/4.6/epan/packetcircle.so
 ```
 
 ```powershell
