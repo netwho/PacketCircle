@@ -97,6 +97,7 @@ CircleWidget::CircleWidget(QWidget *parent)
     , m_blinkState(false)
     , m_pdfMode(false)
     , m_darkTheme(true)
+    , m_wifiMode(false)
 {
     setMinimumSize(300, 300);
     setMouseTracking(true);
@@ -168,6 +169,12 @@ void CircleWidget::setProtocolFilter(QSet<QString> enabled_protocols)
 void CircleWidget::setDarkTheme(bool dark)
 {
     m_darkTheme = dark;
+    update();
+}
+
+void CircleWidget::setWiFiMode(bool wifi)
+{
+    m_wifiMode = wifi;
     update();
 }
 
@@ -349,10 +356,15 @@ void CircleWidget::drawConnection(QPainter &painter, const NodePosition &src,
         thickness = is_emphasized ? 2.0 : 1.0;
     }
 
-    /* Get protocol color — darken for PDF so pastel colors are visible on white */
-    QColor color = getProtocolColor(pair->top_protocol);
-    if (m_pdfMode) {
-        color = color.darker(150);
+    /* Get connection color — RSSI-based for Wi-Fi, protocol-based otherwise */
+    QColor color;
+    if (m_wifiMode && pair->is_wifi) {
+        color = getRssiColor(pair);
+    } else {
+        color = getProtocolColor(pair->top_protocol);
+        if (m_pdfMode) {
+            color = color.darker(150);
+        }
     }
     if (!is_emphasized) {
         color.setAlpha(80);
@@ -546,6 +558,28 @@ QColor CircleWidget::getProtocolColor(const gchar *protocol_name)
     return color;
 }
 
+/* Map average RSSI (dBm) to a color using 4 bins:
+ *   Excellent: >= -55 dBm  →  green
+ *   Good:     -65 .. -56   →  yellow-green
+ *   Fair:     -75 .. -66   →  orange
+ *   Poor:     < -75        →  red
+ * Returns a neutral grey when no RSSI data is available. */
+QColor CircleWidget::getRssiColor(comm_pair_t *pair)
+{
+    if (!pair || !pair->is_wifi || pair->rssi_count == 0)
+        return QColor(160, 160, 160);  /* Neutral grey — no RSSI data */
+
+    int avg = (int)(pair->rssi_sum / (gint32)pair->rssi_count);
+
+    if (avg >= -55)
+        return m_pdfMode ? QColor(0, 160, 0) : QColor(0, 200, 0);     /* Excellent — green */
+    if (avg >= -65)
+        return m_pdfMode ? QColor(120, 180, 0) : QColor(160, 220, 0);  /* Good — yellow-green */
+    if (avg >= -75)
+        return m_pdfMode ? QColor(200, 140, 0) : QColor(255, 165, 0);  /* Fair — orange */
+    return m_pdfMode ? QColor(180, 0, 0) : QColor(220, 30, 30);        /* Poor — red */
+}
+
 guint64 CircleWidget::getPairVolume(comm_pair_t *pair)
 {
     if (!pair)
@@ -639,8 +673,10 @@ void CircleWidget::paintEvent(QPaintEvent *event)
             /* Draw connection */
             drawConnection(painter, *src_node, *dst_node, pair, max_volume, is_emphasized);
             
-            /* Get protocol color for this connection */
-            QColor connection_color = getProtocolColor(pair->top_protocol);
+            /* Get color for this connection — RSSI for Wi-Fi, protocol otherwise */
+            QColor connection_color = (m_wifiMode && pair->is_wifi)
+                ? getRssiColor(pair)
+                : getProtocolColor(pair->top_protocol);
             
             /* Draw source node outer hexagon if not already drawn */
             if (!drawn_nodes.contains(src_node->label)) {
@@ -873,6 +909,36 @@ QString CircleWidget::buildTooltipText(NodePosition *node) const
      .arg(QString::number(static_cast<qulonglong>(stats.bytes_sent)))
      .arg(QString::number(static_cast<qulonglong>(stats.packets_received)))
      .arg(QString::number(static_cast<qulonglong>(stats.packets_sent)));
+
+    /* Add Wi-Fi info if applicable */
+    if (m_wifiMode) {
+        /* Gather Wi-Fi-specific data from connected pairs */
+        for (GList *iter = m_pairs; iter; iter = iter->next) {
+            comm_pair_t *pair = (comm_pair_t *)iter->data;
+            if (!pair || !pair->is_wifi) continue;
+            if (node->label != QString::fromUtf8(pair->src_addr) &&
+                node->label != QString::fromUtf8(pair->dst_addr))
+                continue;
+            if (pair->wifi_ssid) {
+                tooltip += QString("\nSSID: %1").arg(QString::fromUtf8(pair->wifi_ssid));
+            }
+            if (pair->wifi_bssid) {
+                tooltip += QString("\nBSSID: %1").arg(QString::fromUtf8(pair->wifi_bssid));
+            }
+            if (pair->wifi_channel > 0) {
+                tooltip += QString("\nChannel: %1").arg(pair->wifi_channel);
+            }
+            if (pair->rssi_count > 0) {
+                int avg = (int)(pair->rssi_sum / (gint32)pair->rssi_count);
+                tooltip += QString("\nRSSI: avg %1 dBm (min %2, max %3)")
+                    .arg(avg).arg(pair->rssi_min).arg(pair->rssi_max);
+            }
+            if (pair->retry_count > 0) {
+                tooltip += QString("\nRetries: %1").arg(pair->retry_count);
+            }
+            break;  /* Show first matching pair's Wi-Fi info */
+        }
+    }
 
     /* Add destination port / service information */
     if (!stats.dst_ports.isEmpty()) {

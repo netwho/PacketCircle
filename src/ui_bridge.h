@@ -35,6 +35,13 @@ void circle_vis_reload_data(void);
 void circle_vis_update_analysis(analysis_result_t *result);
 void circle_vis_close_window(void);
 
+/* Allow C code to pump the Qt event loop periodically during long work */
+void circle_vis_pump_events(void);
+
+/* Returns a g_malloc'd copy of the current capture file path, or NULL.
+ * Caller must g_free() the returned string. */
+const char *circle_vis_get_capture_filename(void);
+
 #ifdef __cplusplus
 }
 #endif

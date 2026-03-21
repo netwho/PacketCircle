@@ -51,6 +51,7 @@ public:
     void setProtocolFilter(QSet<QString> enabled_protocols);
     void setHighlightedLabels(const QSet<QString> &labels);
     void setDarkTheme(bool dark);
+    void setWiFiMode(bool wifi);
     QPixmap renderForPDF(int width, int height);
 
 signals:
@@ -95,6 +96,7 @@ private:
                        comm_pair_t *pair, guint64 max_volume, bool is_emphasized);
     void drawNode(QPainter &painter, NodePosition *node, QColor node_color, bool drawInnerOnly = false);
     QColor getProtocolColor(const gchar *protocol_name);
+    QColor getRssiColor(comm_pair_t *pair);
     guint64 getPairVolume(comm_pair_t *pair);
     struct NodePosition* findNodeAt(const QPointF &point);
     comm_pair_t* findLineAt(const QPointF &point);
@@ -123,6 +125,7 @@ private:
     bool m_blinkState;
     bool m_pdfMode;
     bool m_darkTheme;
+    bool m_wifiMode;
     QString m_last_hovered_label;
 };
 

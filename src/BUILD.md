@@ -205,3 +205,7 @@ chmod 644 ~/.local/lib/wireshark/plugins/4-6/epan/packetcircle.so
 Restart Wireshark to load the plugin.
 
 > **Tip**: Check your plugin version directory by looking under Help -> About Wireshark -> Folders -> Personal Plugins.
+
+---
+
+*AI-Assisted: yes (Claude) — build system documentation, cross-platform compatibility, Qt version matching guidance*

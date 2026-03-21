@@ -39,12 +39,35 @@ extern "C" {
 /* Forward declaration for plugin_if callback */
 void* extract_capture_file(capture_file *cf, void *user_data);
 
+/* Event pump callable from C to keep UI responsive during long tasks */
+void circle_vis_pump_events(void)
+{
+    QCoreApplication::processEvents(QEventLoop::AllEvents, 25);
+}
+
 #ifdef __cplusplus
 } /* extern "C" */
 #endif
 
 /* Global main window instance */
 static MainWindow *g_main_window = NULL;
+
+/* Ensure a Qt6 QApplication exists.
+ * Wireshark 4.0.x / 4.2.x may use Qt5; in that case Qt6's
+ * QApplication::instance() returns nullptr.  We create our own Qt6
+ * QApplication so the plugin's widgets can run alongside Wireshark's Qt5 UI.
+ */
+static void ensure_qapplication(void)
+{
+    if (!QApplication::instance()) {
+        static char  app_name[] = "packetcircle";
+        static char *argv_buf[] = { app_name, nullptr };
+        static int   argc_buf   = 1;
+        static QApplication *s_app = new QApplication(argc_buf, argv_buf);
+        (void)s_app;
+        qDebug() << "circle_vis: created Qt6 QApplication (Wireshark is using Qt5)";
+    }
+}
 
 #ifdef __cplusplus
 extern "C" {
@@ -53,12 +76,8 @@ extern "C" {
 void circle_vis_open_window(capture_file *cf)
 {
     qDebug() << "circle_vis_open_window: called with cf=" << (void*)cf;
-    
-    /* Ensure Qt application exists */
-    if (!QApplication::instance()) {
-        qDebug() << "circle_vis_open_window: No QApplication instance!";
-        return;
-    }
+
+    ensure_qapplication();
 
     /* Create or show main window */
     if (!g_main_window) {
@@ -82,12 +101,18 @@ void circle_vis_open_window(capture_file *cf)
         qDebug() << "circle_vis_open_window: cf provided, state=" << cf->state << "count=" << cf->count;
     }
 
+    /* Show the window immediately so the user sees UI feedback */
+    g_main_window->show();
+    g_main_window->raise();
+    g_main_window->activateWindow();
+    circle_vis_pump_events();
+
     /* Analyze current capture if available */
     /* packet_analyzer_analyze will check if cf is valid */
     if (cf) {
         qDebug() << "circle_vis_open_window: Calling packet_analyzer_analyze";
-        /* Use IP by default (FALSE) - MainWindow will handle MAC/IP toggle */
-        analysis_result_t *result = packet_analyzer_analyze(cf, FALSE); /* Start with IP */
+        /* Analyse with the mode restored from preferences (MAC or IP) */
+        analysis_result_t *result = packet_analyzer_analyze(cf, g_main_window->getUseMAC());
         if (result) {
             /* Log what we're passing to UI */
             guint pairs_count = result->pairs ? g_list_length(result->pairs) : 0;
@@ -102,10 +127,6 @@ void circle_vis_open_window(capture_file *cf)
         qDebug() << "circle_vis_open_window: No capture file available";
         ws_log(WS_LOG_DOMAIN, LOG_LEVEL_WARNING, "No capture file available");
     }
-
-    g_main_window->show();
-    g_main_window->raise();
-    g_main_window->activateWindow();
 }
 
 /* Helper function for plugin_if_get_capture_file callback */
@@ -118,12 +139,8 @@ extern "C" void* extract_capture_file(capture_file *cf, void *user_data)
 void circle_vis_reload_data(void)
 {
     qDebug() << "circle_vis_reload_data: called";
-    
-    /* Ensure Qt application exists */
-    if (!QApplication::instance()) {
-        qDebug() << "circle_vis_reload_data: No QApplication instance!";
-        return;
-    }
+
+    ensure_qapplication();
 
     /* Ensure main window exists */
     if (!g_main_window) {
@@ -173,6 +190,14 @@ void circle_vis_close_window(void)
         delete g_main_window;
         g_main_window = NULL;
     }
+}
+
+const char *circle_vis_get_capture_filename(void)
+{
+    capture_file *cf = (capture_file *)plugin_if_get_capture_file(extract_capture_file, NULL);
+    if (cf && cf->filename)
+        return g_strdup(cf->filename);
+    return NULL;
 }
 
 #ifdef __cplusplus
