@@ -273,11 +273,12 @@ else
 fi
 
 # --- Prerequisites summary ---
-printf "\n-----------------------------------------------------------\n"
+SEP="-----------------------------------------------------------"
+printf "\n%s\n" "$SEP"
 printf "  Prerequisites Summary\n"
-printf "-----------------------------------------------------------\n"
+printf "%s\n" "$SEP"
 printf "  Wireshark       : %s.%s  (plugin API dir: %s)\n" "$WS_MAJOR" "$WS_MINOR" "$PLUGIN_PATH_ID"
-printf "  Binary tag      : %s  — %s\n" "$SELECTED_WS_TAG" "$SELECTED_WS_LABEL"
+printf "  Binary tag      : %s  (%s)\n" "$SELECTED_WS_TAG" "$SELECTED_WS_LABEL"
 printf "  v.0.4.6 binaries: "
 if [ "$V046_OK" = "1" ]; then printf "${GREEN}all present${NC}\n"; else printf "${YELLOW}not yet built for Linux${NC}\n"; fi
 printf "  v.0.3.2 binaries: "
@@ -289,7 +290,6 @@ if [ -n "$INSTALLED_VERSION" ]; then
 else
     printf "${GRAY}none${NC}\n"
 fi
-printf "-----------------------------------------------------------\n"
 
 # --- Qt6 runtime check ---
 QT6_OK=0
@@ -303,7 +303,7 @@ if [ "$QT6_OK" = "1" ]; then
 else
     printf "  Qt6 runtime     : ${YELLOW}not found${NC}  (PacketCircle requires Qt6)\n"
 fi
-printf "-----------------------------------------------------------\n"
+printf "%s\n" "$SEP"
 
 # --- Main menu ---
 printf "\n"
