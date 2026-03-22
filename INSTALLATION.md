@@ -4,6 +4,29 @@ Everything you need to install, update, or remove PacketCircle on any supported 
 
 ---
 
+## Getting the Files
+
+### No git? Download the zip (recommended for most users)
+
+**[⬇ Download installer.zip](https://github.com/netwho/PacketCircle/raw/main/installer.zip)**
+
+1. Click the link above and save `installer.zip`
+2. Unzip it — you get an `installer/` folder containing all platforms and both plugin versions
+3. Jump to the section for your platform below and run the installer from there
+
+> The zip includes everything: installer scripts, all platform binaries, and troubleshooting tools. No account, no git, no command-line tools needed to download it.
+
+### git users
+
+```bash
+git clone https://github.com/netwho/PacketCircle.git
+cd PacketCircle
+```
+
+The `installer/` directory is included in the repository at the root level.
+
+---
+
 ## Prerequisites
 
 | Platform | Wireshark | Additional |

@@ -6,15 +6,19 @@ Get up and running in under 5 minutes.
 
 ---
 
-## Step 1 — Install
+## Step 1 — Get the installer & install
 
-Run the installer for your platform and follow the prompts. Always choose **v.0.4.6** (latest) unless you have a specific reason for v.0.3.2.
+**No git?** **[⬇ Download installer.zip](https://github.com/netwho/PacketCircle/raw/main/installer.zip)** — unzip it and you have the `installer/` folder ready to go. No account needed.
 
-| Platform | Command |
+**git users:** `git clone https://github.com/netwho/PacketCircle.git`
+
+Then run the installer for your platform and follow the prompts. Always choose **v.0.4.6** (latest) unless you have a specific reason for v.0.3.2.
+
+| Platform | From the `installer/` folder |
 |---|---|
-| **macOS** | `cd installer/macos-universal && ./install.sh` |
-| **Linux** | `cd installer/linux-x86_64 && ./install.sh` |
-| **Windows** | `cd installer\windows-x86_64 && install.bat` |
+| **macOS** | `cd macos-universal && chmod +x install.sh && ./install.sh` |
+| **Linux** | `cd linux-x86_64 && chmod +x install.sh && ./install.sh` |
+| **Windows** | `cd windows-x86_64` → double-click `install.bat` |
 
 Restart Wireshark after installing.
 

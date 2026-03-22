@@ -76,24 +76,33 @@
 
 ---
 
-## Quick Install
+## Download & Install
+
+### Option A — Download the installer package (no git required)
+
+**[⬇ Download installer.zip](https://github.com/netwho/PacketCircle/raw/main/installer.zip)**
+
+1. Download `installer.zip` and unzip it — you get an `installer/` folder with all platforms and both versions ready to go
+2. Open a terminal (macOS/Linux) or Command Prompt (Windows) and run the installer for your platform:
+
+| Platform | Steps |
+|---|---|
+| **macOS** | `cd installer/macos-universal` → `chmod +x install.sh` → `./install.sh` |
+| **Linux** | `cd installer/linux-x86_64` → `chmod +x install.sh` → `./install.sh` |
+| **Windows** | `cd installer\windows-x86_64` → double-click `install.bat` |
+
+### Option B — Clone the repository (git users)
+
+```bash
+git clone https://github.com/netwho/PacketCircle.git
+cd PacketCircle
+```
+
+Then run the installer for your platform from the `installer/` directory (same commands as above).
+
+---
 
 > All installers detect your Wireshark version, show any existing installation, and offer uninstall. Just run and follow the prompts.
-
-**macOS** (Intel & Apple Silicon — Wireshark 4.6.x):
-```bash
-cd installer/macos-universal && chmod +x install.sh && ./install.sh
-```
-
-**Linux** (x86_64 — Wireshark 4.0 / 4.2 / 4.4 / 4.6, auto-detected):
-```bash
-cd installer/linux-x86_64 && chmod +x install.sh && ./install.sh
-```
-
-**Windows** (x86_64 — Wireshark 4.6.x):
-```cmd
-cd installer\windows-x86_64 && install.bat
-```
 
 → **Full installation guide, manual install, and uninstall:** [INSTALLATION.md](INSTALLATION.md)
 
