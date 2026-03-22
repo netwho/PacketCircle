@@ -1,5 +1,6 @@
 # CMakeLists.txt for PacketCircle plugin (Wireshark 4.6.x compatible)
 # This plugin creates a custom window showing communication pairs in a circle visualization
+# github.com/netwho/PackCircle
 
 include(WiresharkPlugin)
 
