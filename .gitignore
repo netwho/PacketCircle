@@ -1,0 +1,33 @@
+# Build artifacts
+build/
+build-*/
+*.o
+*.so
+*.dylib
+*.a
+
+# CMake
+CMakeCache.txt
+CMakeFiles/
+cmake_install.cmake
+Makefile
+
+# Qt
+*_autogen/
+moc_*
+qrc_*
+ui_*.h
+
+# IDE
+.vscode/
+.idea/
+*.xcodeproj/
+*.xcworkspace/
+.DS_Store
+Thumbs.db
+
+# OS
+.DS_Store
+._*
+.Spotlight-V100
+.Trashes
