@@ -84,6 +84,13 @@ include_directories(
 set(CMAKE_CXX_STANDARD 17)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
 
+# MSVC: treat source and execution character set as UTF-8.
+# Without this MSVC reads .c/.cpp as the system codepage (Windows-1252 on most
+# Windows systems), mangling all multi-byte UTF-8 string literals.
+if(MSVC)
+    add_compile_options(/utf-8)
+endif()
+
 # Disable Qt version tagging so the plugin can load with any Qt 6.x runtime
 # (Wireshark.app bundles its own Qt which may differ from the build-time Qt)
 add_definitions(-DQT_NO_VERSION_TAGGING)

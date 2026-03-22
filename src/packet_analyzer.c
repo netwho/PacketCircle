@@ -8815,36 +8815,33 @@ static void walk_tcp_stat_tree(proto_tree *node, gpointer data)
     field_info *fi = PNODE_FINFO(node);
     if (fi && fi->hfinfo && fi->hfinfo->abbrev) {
         const gchar *abbrev = fi->hfinfo->abbrev;
-        gchar lbl[512]; lbl[0] = '\0';
-        fill_label_compat(fi, lbl);
         guint32 uv = 0; gdouble dv = 0.0;
 
         /* ── Flags ── */
         if (g_strcmp0(abbrev, "tcp.flags") == 0) {
-            if (sscanf(lbl, "0x%x", &uv) == 1 || sscanf(lbl, "%u", &uv) == 1) {
-                if (uv & 0x002) { info->saw_syn = TRUE; ctx->this_pkt_is_syn = TRUE; }
-                if (uv & 0x010) info->saw_ack = TRUE;
-                if (uv & 0x001) info->saw_fin = TRUE;
-                if (uv & 0x004) info->saw_rst = TRUE;
-                if (uv & 0x008) info->saw_psh = TRUE;
-                if (uv & 0x020) info->saw_urg = TRUE;
-                if (uv & 0x040) info->saw_ece = TRUE;
-                if (uv & 0x080) info->saw_cwr = TRUE;
-            }
+            uv = fvalue_get_uinteger(PC_FI_VALUE(fi));
+            if (uv & 0x002) { info->saw_syn = TRUE; ctx->this_pkt_is_syn = TRUE; }
+            if (uv & 0x010) info->saw_ack = TRUE;
+            if (uv & 0x001) info->saw_fin = TRUE;
+            if (uv & 0x004) info->saw_rst = TRUE;
+            if (uv & 0x008) info->saw_psh = TRUE;
+            if (uv & 0x020) info->saw_urg = TRUE;
+            if (uv & 0x040) info->saw_ece = TRUE;
+            if (uv & 0x080) info->saw_cwr = TRUE;
         }
         /* ── MSS (from SYN option) ── */
         else if (g_strcmp0(abbrev, "tcp.options.mss.val") == 0) {
-            if (sscanf(lbl, "%u", &uv) == 1 && uv > 0 && info->mss == 0)
+            uv = fvalue_get_uinteger(PC_FI_VALUE(fi));
+            if (uv > 0 && info->mss == 0)
                 info->mss = uv;
         }
         /* ── Window size ── */
         else if (g_strcmp0(abbrev, "tcp.window_size_value") == 0) {
-            if (sscanf(lbl, "%u", &uv) == 1) {
-                if (info->win_count == 0 || uv < info->win_min) info->win_min = uv;
-                if (uv > info->win_max)                         info->win_max = uv;
-                info->win_sum += uv;
-                info->win_count++;
-            }
+            uv = fvalue_get_uinteger(PC_FI_VALUE(fi));
+            if (info->win_count == 0 || uv < info->win_min) info->win_min = uv;
+            if (uv > info->win_max)                         info->win_max = uv;
+            info->win_sum += uv;
+            info->win_count++;
         }
         /* ── Options negotiated ── */
         else if (g_strcmp0(abbrev, "tcp.options.sack_perm") == 0) {
@@ -8856,17 +8853,22 @@ static void walk_tcp_stat_tree(proto_tree *node, gpointer data)
             info->timestamps = TRUE;
         }
         else if (g_strcmp0(abbrev, "tcp.options.wscale.shift") == 0) {
-            if (sscanf(lbl, "%u", &uv) == 1 && info->window_scale < 0)
+            uv = fvalue_get_uinteger(PC_FI_VALUE(fi));
+            if (info->window_scale < 0)
                 info->window_scale = (gint)uv;
         }
-        /* ── RTT (Wireshark analysis field, seconds) ── */
+        /* ── RTT (Wireshark analysis field, FT_RELATIVE_TIME → nstime_t) ── */
         else if (g_strcmp0(abbrev, "tcp.analysis.ack_rtt") == 0) {
-            if (sscanf(lbl, "%lf", &dv) == 1 && dv > 0.0) {
-                gdouble ms = dv * 1000.0;
-                if (info->rtt_count == 0 || ms < info->rtt_min_ms) info->rtt_min_ms = ms;
-                if (ms > info->rtt_max_ms)                          info->rtt_max_ms = ms;
-                info->rtt_sum_ms += ms;
-                info->rtt_count++;
+            const nstime_t *t = fvalue_get_time(PC_FI_VALUE(fi));
+            if (t) {
+                dv = (gdouble)t->secs + (gdouble)t->nsecs / 1e9;
+                if (dv > 0.0) {
+                    gdouble ms = dv * 1000.0;
+                    if (info->rtt_count == 0 || ms < info->rtt_min_ms) info->rtt_min_ms = ms;
+                    if (ms > info->rtt_max_ms)                          info->rtt_max_ms = ms;
+                    info->rtt_sum_ms += ms;
+                    info->rtt_count++;
+                }
             }
         }
         /* ── Retransmissions / OOO (Wireshark analysis) ── */

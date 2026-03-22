@@ -1298,7 +1298,7 @@ void MainWindow::updateViews()
 
     /* Update pair list */
     m_pairListWidget->clear();
-    m_linkedPairs.clear();  /* No longer populated — single row per group */
+    m_linkedPairs.clear();  /* No longer populated &mdash; single row per group */
     
     /* Build a map to group bidirectional pairs together */
     QMap<QString, QList<comm_pair_t*>> pair_groups;  /* Key: sorted address pair, Value: list of pairs */
@@ -1367,7 +1367,7 @@ void MainWindow::updateViews()
          *   Qt::UserRole+2 — direction state: 0=→ forward, 1=↔ both, 2=← reverse */
         comm_pair_t *primary   = pairs[0];
         comm_pair_t *secondary = (pairs.size() >= 2) ? pairs[1] : nullptr;
-        int dir = secondary ? 1 : 0;  /* default: ↔ for bidirectional, → for unidirectional */
+        int dir = secondary ? 1 : 0;  /* default: &#x2194; for bidirectional, &rarr; for unidirectional */
 
         /* Display text is always based on primary pair's addresses */
         QString src_addr = primary->resolved_src ? QString::fromUtf8(primary->resolved_src)
@@ -1946,7 +1946,7 @@ bool MainWindow::eventFilter(QObject *obj, QEvent *event)
                     (comm_pair_t*)item->data(Qt::UserRole + 1).value<void*>();
                 if (secondary) {
                     int dir = item->data(Qt::UserRole + 2).toInt();
-                    dir = (dir + 1) % 3;   /* 0→ → 1↔ → 2← → 0→ → … */
+                    dir = (dir + 1) % 3;   /* 0&rarr; &rarr; 1&#x2194; &rarr; 2&larr; &rarr; 0&rarr; &rarr; &hellip; */
                     item->setData(Qt::UserRole + 2, dir);
                     /* Refresh the text of this single item */
                     refreshPairListText();
@@ -2064,33 +2064,33 @@ helpDialog->setWindowTitle("Help - PacketCircle v.0.4.6"); /* WH: version bump *
 
         "<h3>Toolbar Controls:</h3>"
         "<p style='margin-left: 0; padding-left: 0; font-weight: normal;'>"
-        "• <b>Top 10/25/50</b>: Limit display to top N communication pairs<br/>"
-        "• <b>Weight</b>: Enable/disable line weight variation based on traffic volume<br/>"
-        "• <b>Packets/Bytes</b>: Sort pairs by packet count or byte count<br/>"
-        "• <b>Circle/Table</b>: Switch between circular visualization and table view<br/>"
-        "• <b>MAC/IP</b>: Display MAC address pairs or IP address pairs<br/>"
-        "• <b>?</b> (top right): Open this help window"
+        "&bull; <b>Top 10/25/50</b>: Limit display to top N communication pairs<br/>"
+        "&bull; <b>Weight</b>: Enable/disable line weight variation based on traffic volume<br/>"
+        "&bull; <b>Packets/Bytes</b>: Sort pairs by packet count or byte count<br/>"
+        "&bull; <b>Circle/Table</b>: Switch between circular visualization and table view<br/>"
+        "&bull; <b>MAC/IP</b>: Display MAC address pairs or IP address pairs<br/>"
+        "&bull; <b>?</b> (top right): Open this help window"
         "</p>"
 
         "<h3>Action Buttons:</h3>"
         "<p style='margin-left: 0; padding-left: 0; font-weight: normal;'>"
-        "• <b>Select All / Select None</b>: Show or hide all communication pairs<br/>"
-        "• <b>Select Results</b>: Select only the communication pairs matching the current search (enabled after a search produces results)<br/>"
-        "• <b>Filter</b>: Apply selected pairs as a Wireshark display filter (directional — filters by exact source→destination)<br/>"
-        "• <b>Clear</b>: Select all pairs, clear the Wireshark display filter, and show all packets<br/>"
-        "• <b>Reload</b>: Re-analyze current capture file (respects active Wireshark display filter)<br/>"
-        "• <b>PDF</b>: Export a one-page PDF report containing the circle visualization and IP pair table"
+        "&bull; <b>Select All / Select None</b>: Show or hide all communication pairs<br/>"
+        "&bull; <b>Select Results</b>: Select only the communication pairs matching the current search (enabled after a search produces results)<br/>"
+        "&bull; <b>Filter</b>: Apply selected pairs as a Wireshark display filter (directional &mdash; filters by exact source&rarr;destination)<br/>"
+        "&bull; <b>Clear</b>: Select all pairs, clear the Wireshark display filter, and show all packets<br/>"
+        "&bull; <b>Reload</b>: Re-analyze current capture file (respects active Wireshark display filter)<br/>"
+        "&bull; <b>PDF</b>: Export a one-page PDF report containing the circle visualization and IP pair table"
         "</p>"
 
         "<h3>Search & Highlighting:</h3>"
         "<p style='font-weight: normal;'>The search bar supports several query types. "
         "Press <b>Enter</b> to search; matching nodes flash red in the circle and the pair list blinks in sync.</p>"
         "<p style='margin-left: 0; padding-left: 0; font-weight: normal;'>"
-        "• <b>IP address</b> (partial): e.g. <code>192.168</code> or <code>10.0.0.1</code><br/>"
-        "• <b>CIDR range</b>: e.g. <code>10.0.0.0/8</code> or <code>172.16.0.0/12</code><br/>"
-        "• <b>MAC address</b> (partial, in MAC mode): e.g. <code>aa:bb</code> or <code>00:1a:2b</code><br/>"
-        "• <b>TCP port</b>: e.g. <code>TCP 443</code> or <code>tcp 23</code> — highlights all pairs that use the specified TCP port<br/>"
-        "• <b>UDP port</b>: e.g. <code>UDP 53</code> or <code>udp 5060</code> — highlights all pairs that use the specified UDP port"
+        "&bull; <b>IP address</b> (partial): e.g. <code>192.168</code> or <code>10.0.0.1</code><br/>"
+        "&bull; <b>CIDR range</b>: e.g. <code>10.0.0.0/8</code> or <code>172.16.0.0/12</code><br/>"
+        "&bull; <b>MAC address</b> (partial, in MAC mode): e.g. <code>aa:bb</code> or <code>00:1a:2b</code><br/>"
+        "&bull; <b>TCP port</b>: e.g. <code>TCP 443</code> or <code>tcp 23</code> &mdash; highlights all pairs that use the specified TCP port<br/>"
+        "&bull; <b>UDP port</b>: e.g. <code>UDP 53</code> or <code>udp 5060</code> &mdash; highlights all pairs that use the specified UDP port"
         "</p>"
         "<p style='font-weight: normal;'>Port search works by inspecting the per-pair connection table (same data shown when clicking a line). "
         "It checks both directions of a communication pair. Clear the search box to remove all highlights.</p>"
@@ -2101,41 +2101,41 @@ helpDialog->setWindowTitle("Help - PacketCircle v.0.4.6"); /* WH: version bump *
         "and connection colors reflect signal strength (RSSI) instead of protocol.</p>"
         "<p style='font-weight: normal;'>The <b>RSSI legend</b> at the bottom shows four signal quality bins:</p>"
         "<p style='margin-left: 0; padding-left: 0; font-weight: normal;'>"
-        "• <b>Excellent</b>: &ge; &minus;55 dBm (green)<br/>"
-        "• <b>Good</b>: &minus;65 to &minus;56 dBm (yellow-green)<br/>"
-        "• <b>Fair</b>: &minus;75 to &minus;66 dBm (orange)<br/>"
-        "• <b>Poor</b>: &lt; &minus;75 dBm (red)"
+        "&bull; <b>Excellent</b>: &ge; &minus;55 dBm (green)<br/>"
+        "&bull; <b>Good</b>: &minus;65 to &minus;56 dBm (yellow-green)<br/>"
+        "&bull; <b>Fair</b>: &minus;75 to &minus;66 dBm (orange)<br/>"
+        "&bull; <b>Poor</b>: &lt; &minus;75 dBm (red)"
         "</p>"
         "<p style='font-weight: normal;'>Node tooltips show Wi-Fi details: SSID, BSSID, channel, average/min/max RSSI, and retry count.</p>"
         "<h3>Wi-Fi Search Keywords:</h3>"
         "<p style='font-weight: normal;'>In Wi-Fi mode the search bar accepts additional query types:</p>"
         "<p style='margin-left: 0; padding-left: 0; font-weight: normal;'>"
-        "• <b>SSID</b> (partial): e.g. <code>MyNetwork</code> — highlights all station↔AP pairs associated with a matching SSID<br/>"
-        "• <b>BSSID / MAC</b> (partial): e.g. <code>aa:bb:cc</code> — matches the raw MAC, the BSSID field, or the SSID<br/>"
-        "• <b>ap</b>: highlights all access-point (BSSID) nodes in the circle<br/>"
-        "• <b>excellent</b> / <b>good</b> / <b>fair</b> / <b>poor</b>: highlights pairs whose average RSSI falls in the corresponding bin"
+        "&bull; <b>SSID</b> (partial): e.g. <code>MyNetwork</code> &mdash; highlights all station&#x2194;AP pairs associated with a matching SSID<br/>"
+        "&bull; <b>BSSID / MAC</b> (partial): e.g. <code>aa:bb:cc</code> &mdash; matches the raw MAC, the BSSID field, or the SSID<br/>"
+        "&bull; <b>ap</b>: highlights all access-point (BSSID) nodes in the circle<br/>"
+        "&bull; <b>excellent</b> / <b>good</b> / <b>fair</b> / <b>poor</b>: highlights pairs whose average RSSI falls in the corresponding bin"
         "</p>"
 
         "<h3>Connection Details (Line Click):</h3>"
         "<p style='font-weight: normal;'>Click any communication line in the circle to open a "
         "<b>Connection Details</b> popup showing the port/socket breakdown for that pair. "
-        "Data is aggregated from both directions (A→B and B→A).</p>"
+        "Data is aggregated from both directions (A&rarr;B and B&rarr;A).</p>"
         "<p style='margin-left: 0; padding-left: 0; font-weight: normal;'>"
-        "• <b>Protocol</b>: Transport protocol for each port (TCP, UDP, or TCP+UDP), detected per-port<br/>"
-        "• <b>Port</b>: Destination port number<br/>"
-        "• <b>Service</b>: Well-known service name (HTTP, HTTPS, SSH, Telnet, DNS, SMB, etc.)<br/>"
-        "• <b>Packets</b>: Number of packets observed on that port<br/>"
-        "• <b>% of Total</b>: Share of total traffic for the pair"
+        "&bull; <b>Protocol</b>: Transport protocol for each port (TCP, UDP, or TCP+UDP), detected per-port<br/>"
+        "&bull; <b>Port</b>: Destination port number<br/>"
+        "&bull; <b>Service</b>: Well-known service name (HTTP, HTTPS, SSH, Telnet, DNS, SMB, etc.)<br/>"
+        "&bull; <b>Packets</b>: Number of packets observed on that port<br/>"
+        "&bull; <b>% of Total</b>: Share of total traffic for the pair"
         "</p>"
         "<p style='font-weight: normal;'><b>Right-click</b> a row in the popup to access:</p>"
         "<p style='margin-left: 0; padding-left: 0; font-weight: normal;'>"
-        "• <b>Apply Filter in Wireshark</b>: Sets a bidirectional display filter matching both addresses "
+        "&bull; <b>Apply Filter in Wireshark</b>: Sets a bidirectional display filter matching both addresses "
         "and the selected port. Uses <code>ip.addr</code> / <code>eth.addr</code> for addresses "
         "and <code>tcp.port</code> or <code>udp.port</code> for the port.<br/>"
-        "• <b>Follow TCP Stream</b>: Opens Wireshark's TCP stream reassembly dialog for that connection (TCP only).<br/>"
-        "• <b>TCP Throughput Graph</b>: Opens Wireshark's TCP throughput time-series graph for the selected stream (TCP only).<br/>"
-        "• <b>TCP Round-Trip Time Graph</b>: Opens Wireshark's TCP RTT graph for the selected stream (TCP only).<br/>"
-        "• <b>Protocol Info</b> (port-dependent): Opens a detailed protocol information dialog — see below."
+        "&bull; <b>Follow TCP Stream</b>: Opens Wireshark's TCP stream reassembly dialog for that connection (TCP only).<br/>"
+        "&bull; <b>TCP Throughput Graph</b>: Opens Wireshark's TCP throughput time-series graph for the selected stream (TCP only).<br/>"
+        "&bull; <b>TCP Round-Trip Time Graph</b>: Opens Wireshark's TCP RTT graph for the selected stream (TCP only).<br/>"
+        "&bull; <b>Protocol Info</b> (port-dependent): Opens a detailed protocol information dialog &mdash; see below."
         "</p>"
         "<p style='font-weight: normal;'>The popup auto-closes when the mouse leaves it. "
         "It remains open while a right-click context menu is active.</p>"
@@ -2145,29 +2145,29 @@ helpDialog->setWindowTitle("Help - PacketCircle v.0.4.6"); /* WH: version bump *
         "port-specific protocol information options appear based on the destination port. "
         "Each dialog extracts and displays deep protocol details from the captured packets.</p>"
         "<p style='margin-left: 0; padding-left: 0; font-weight: normal;'>"
-        "• <b>TLS/SSL Info</b> (ports 443, 465, 993, 995, 8443): Certificate details (subject, issuer, validity, SANs), "
+        "&bull; <b>TLS/SSL Info</b> (ports 443, 465, 993, 995, 8443): Certificate details (subject, issuer, validity, SANs), "
         "negotiated cipher suites, TLS version, ALPN, SNI, and JA3/JA4 fingerprints.<br/>"
-        "• <b>HTTP Info</b> (ports 80, 8080, 8000, 8888): Request/response headers, methods, status codes, URIs, "
+        "&bull; <b>HTTP Info</b> (ports 80, 8080, 8000, 8888): Request/response headers, methods, status codes, URIs, "
         "content types, server info, cookies, and user agents.<br/>"
-        "• <b>SMB/CIFS &amp; DCE/RPC Info</b> (ports 445, 139): Share names, file operations, tree operations, "
+        "&bull; <b>SMB/CIFS &amp; DCE/RPC Info</b> (ports 445, 139): Share names, file operations, tree operations, "
         "named pipe access, DCE/RPC interface UUIDs, and operation names.<br/>"
-        "• <b>Kerberos Info</b> (port 88): Ticket details (TGT/TGS), client and server principals, realms, "
+        "&bull; <b>Kerberos Info</b> (port 88): Ticket details (TGT/TGS), client and server principals, realms, "
         "encryption types, pre-authentication data, and service principal names.<br/>"
-        "• <b>Email Info</b> (ports 25, 110, 143, 587, 993, 995): SMTP senders/recipients/subjects, "
+        "&bull; <b>Email Info</b> (ports 25, 110, 143, 587, 993, 995): SMTP senders/recipients/subjects, "
         "IMAP mailbox operations, POP3 commands, server responses, and authentication methods.<br/>"
-        "• <b>SQL Database Info</b> (ports 1433, 3306, 5432): Queries, database/schema names, authentication details, "
+        "&bull; <b>SQL Database Info</b> (ports 1433, 3306, 5432): Queries, database/schema names, authentication details, "
         "server version, application name, command/response statistics, and error messages. "
         "Supports MSSQL/TDS, MySQL/MariaDB, and PostgreSQL.<br/>"
-        "• <b>VoIP/SIP Info</b> (ports 5060, 5061): SIP Call-IDs, method and status code counts, "
+        "&bull; <b>VoIP/SIP Info</b> (ports 5060, 5061): SIP Call-IDs, method and status code counts, "
         "From/To addresses, user agents, RTP payload types and SSRCs, setup methods, and H.223 mux entries."
         "</p>"
 
         "<h3>Filtering:</h3>"
         "<p style='font-weight: normal;'>The <b>Filter</b> button applies a Wireshark display filter for the currently checked pairs. "
         "The direction arrow on each pair controls what gets filtered:<br/>"
-        "• <b>⇒</b> (forward) — filters only A → B packets<br/>"
-        "• <b>⇔</b> (both) — filters both A → B and B → A packets<br/>"
-        "• <b>⇐</b> (reverse) — filters only B → A packets<br/>"
+        "&bull; <b>&#x21d2;</b> (forward) &mdash; filters only A &rarr; B packets<br/>"
+        "&bull; <b>&#x21d4;</b> (both) &mdash; filters both A &rarr; B and B &rarr; A packets<br/>"
+        "&bull; <b>&#x21d0;</b> (reverse) &mdash; filters only B &rarr; A packets<br/>"
         "IPv6 addresses automatically use <code>ipv6.src</code> / <code>ipv6.dst</code> filter fields.</p>"
         "<p style='font-weight: normal;'>The <b>Clear</b> button resets everything: selects all pairs "
         "and sends an empty display filter to Wireshark so all packets are visible again.</p>"
@@ -2177,32 +2177,32 @@ helpDialog->setWindowTitle("Help - PacketCircle v.0.4.6"); /* WH: version bump *
         "<h3>Protocol Legend (standard mode):</h3>"
         "<p style='font-weight: normal;'>In standard (non-Wi-Fi) mode, the protocol legend at the bottom shows protocol categories with checkboxes:</p>"
         "<p style='margin-left: 0; padding-left: 0; font-weight: normal;'>"
-        "• <b>ARP</b>: Address Resolution Protocol (ARP, RARP)<br/>"
-        "• <b>ICMP</b>: Internet Control Message Protocol (ICMP, ICMPv6)<br/>"
-        "• <b>TCP</b>: Transmission Control Protocol<br/>"
-        "• <b>UDP</b>: User Datagram Protocol<br/>"
-        "• <b>Infra</b>: Routing and infrastructure protocols (OSPF, BGP, RIP, EIGRP, ISIS, IGMP, PIM, VRRP, HSRP, SCTP, DCCP, STP/RSTP/MSTP/PVST, LLDP, LACP, CDP, VTP, MPLS)<br/>"
-        "• <b>Unknown</b>: Unidentified or generic protocols (IP, IPv4, IPv6, Ethernet)"
+        "&bull; <b>ARP</b>: Address Resolution Protocol (ARP, RARP)<br/>"
+        "&bull; <b>ICMP</b>: Internet Control Message Protocol (ICMP, ICMPv6)<br/>"
+        "&bull; <b>TCP</b>: Transmission Control Protocol<br/>"
+        "&bull; <b>UDP</b>: User Datagram Protocol<br/>"
+        "&bull; <b>Infra</b>: Routing and infrastructure protocols (OSPF, BGP, RIP, EIGRP, ISIS, IGMP, PIM, VRRP, HSRP, SCTP, DCCP, STP/RSTP/MSTP/PVST, LLDP, LACP, CDP, VTP, MPLS)<br/>"
+        "&bull; <b>Unknown</b>: Unidentified or generic protocols (IP, IPv4, IPv6, Ethernet)"
         "</p>"
         "<p style='font-weight: normal;'>Uncheck a protocol category to hide its connections in the circle view. "
         "Protocols not found in the current capture show a dash (N/A). "
         "Mixed TCP+UDP pairs display as alternating dotted lines.</p>"
 
         "<h3>Node Pair List:</h3>"
-        "<p style='font-weight: normal;'>Each row shows one connection. Bidirectional pairs (A⇔B) are merged into a "
+        "<p style='font-weight: normal;'>Each row shows one connection. Bidirectional pairs (A&#x21d4;B) are merged into a "
         "single row. The <b>checkbox</b> controls visibility of the connection line in the circle. "
-        "The <b>direction arrow</b> (⇒ / ⇔ / ⇐) controls the filter direction — click anywhere on the row "
+        "The <b>direction arrow</b> (&#x21d2; / &#x21d4; / &#x21d0;) controls the filter direction &mdash; click anywhere on the row "
         "<i>outside</i> the checkbox to cycle through the three states. "
         "Addresses are automatically truncated with \"...\" to fit the available panel width "
-        "— drag the splitter to resize. MAC addresses and vendor names always show in full until space runs out, "
+        "&mdash; drag the splitter to resize. MAC addresses and vendor names always show in full until space runs out, "
         "just like hostnames.</p>"
 
         "<h3>Node Tooltips:</h3>"
         "<p style='font-weight: normal;'>Hover over a node in the circle to see detailed information:</p>"
         "<p style='margin-left: 0; padding-left: 0; font-weight: normal;'>"
-        "• MAC and IP address<br/>"
-        "• Bytes and packets sent/received<br/>"
-        "• Services (target ports): A list of destination ports targeted on this node, "
+        "&bull; MAC and IP address<br/>"
+        "&bull; Bytes and packets sent/received<br/>"
+        "&bull; Services (target ports): A list of destination ports targeted on this node, "
         "sorted by packet count. Well-known ports are resolved to service names "
         "(e.g. HTTP/80, HTTPS/443, SMB/445, SSH/22, DNS/53, RDP/3389, etc.)."
         "</p>"
@@ -2210,23 +2210,23 @@ helpDialog->setWindowTitle("Help - PacketCircle v.0.4.6"); /* WH: version bump *
         "<h3>PDF Export:</h3>"
         "<p style='font-weight: normal;'>Click the <b>PDF</b> button to generate a one-page A4 landscape report containing:</p>"
         "<p style='margin-left: 0; padding-left: 0; font-weight: normal;'>"
-        "• Header with the PacketCircle logo and report title<br/>"
-        "• An introduction describing the analysis parameters<br/>"
-        "• The circle visualization (rendered with a white background and darkened colors for print)<br/>"
-        "• A table of all IP pairs with source, destination, packet count, and byte count"
+        "&bull; Header with the PacketCircle logo and report title<br/>"
+        "&bull; An introduction describing the analysis parameters<br/>"
+        "&bull; The circle visualization (rendered with a white background and darkened colors for print)<br/>"
+        "&bull; A table of all IP pairs with source, destination, packet count, and byte count"
         "</p>"
 
         "<h3>Preferences:</h3>"
         "<p style='font-weight: normal;'>PacketCircle automatically saves your preferences to "
         "<code>~/.PacketCircle/settings.ini</code>. The following settings are remembered between sessions:</p>"
         "<p style='margin-left: 0; padding-left: 0; font-weight: normal;'>"
-        "• Window position and size<br/>"
-        "• Splitter position (circle vs. pair list width)<br/>"
-        "• Top N selection (10/25/50)<br/>"
-        "• Packets vs. Bytes mode<br/>"
-        "• MAC vs. IP mode<br/>"
-        "• Circle vs. Table view<br/>"
-        "• Line weight checkbox state"
+        "&bull; Window position and size<br/>"
+        "&bull; Splitter position (circle vs. pair list width)<br/>"
+        "&bull; Top N selection (10/25/50)<br/>"
+        "&bull; Packets vs. Bytes mode<br/>"
+        "&bull; MAC vs. IP mode<br/>"
+        "&bull; Circle vs. Table view<br/>"
+        "&bull; Line weight checkbox state"
         "</p>"
     );
     
@@ -3159,7 +3159,7 @@ static bool pcap_read_timestamps(const QString &path,
         quint32 ts_sec  = rd32(r);      /* seconds since epoch */
         quint32 incl_len = rd32(r + 8); /* captured length     */
 
-        if (incl_len > 65536) break;    /* sanity — corrupt data */
+        if (incl_len > 65536) break;    /* sanity &mdash; corrupt data */
 
         if (!found) { first = ts_sec; found = true; }
         last = ts_sec;
@@ -3666,7 +3666,7 @@ QString MainWindow::truncateIPv6Address(const QString &address)
         if (grp.isEmpty()) continue;  /* :: compression produces empty groups */
         for (const QChar &c : grp) {
             if (!c.isDigit() && (c.toLower() < 'a' || c.toLower() > 'f')) {
-                return address;  /* Not a real IPv6 address — return as-is */
+                return address;  /* Not a real IPv6 address &mdash; return as-is */
             }
         }
     }
@@ -3846,7 +3846,7 @@ void MainWindow::showSearchHelp()
 
     if (m_wifiMode) {
         /* ---- Wi-Fi mode ---- */
-        html += QString("<h3 style='color:%1; margin:4px 0;'>Search Options — Wi-Fi Mode</h3>").arg(head);
+        html += QString("<h3 style='color:%1; margin:4px 0;'>Search Options &mdash; Wi-Fi Mode</h3>").arg(head);
         html += "<table cellpadding='0' cellspacing='0'>";
         html += krow("excellent",         "RSSI &ge; &minus;55 dBm");
         html += krow("good",              "RSSI &minus;65 to &minus;56 dBm");
@@ -3859,15 +3859,15 @@ void MainWindow::showSearchHelp()
 
     } else if (!m_useMAC) {
         /* ---- IP mode ---- */
-        html += QString("<h3 style='color:%1; margin:4px 0;'>Search Options — IP Mode</h3>").arg(head);
+        html += QString("<h3 style='color:%1; margin:4px 0;'>Search Options &mdash; IP Mode</h3>").arg(head);
 
         html += QString("<p style='color:%1; margin:6px 0 2px 0;'><b>Protocol categories</b>"
                         " (press Enter):</p>").arg(head);
         html += "<table cellpadding='0' cellspacing='0'>";
         html += krow("ARP",                  "ARP / RARP broadcasts");
         html += krow("ICMP",                 "ICMP / ICMPv6 echo, errors");
-        html += krow("DNS",                  "DNS (port 53) — shows DNS info popup");
-        html += krow("DHCP",                 "DHCP / BOOTP (ports 67 / 68) — shows DHCP info popup");
+        html += krow("DNS",                  "DNS (port 53) &mdash; shows DNS info popup");
+        html += krow("DHCP",                 "DHCP / BOOTP (ports 67 / 68) &mdash; shows DHCP info popup");
         html += krow("TCP",                  "All TCP sessions");
         html += krow("UDP",                  "All UDP flows");
         html += krow("IGMP",                 "Multicast group management (v1 / v2 / v3)");
@@ -3909,7 +3909,7 @@ void MainWindow::showSearchHelp()
 
     } else {
         /* ---- MAC mode ---- */
-        html += QString("<h3 style='color:%1; margin:4px 0;'>Search Options — MAC Mode</h3>").arg(head);
+        html += QString("<h3 style='color:%1; margin:4px 0;'>Search Options &mdash; MAC Mode</h3>").arg(head);
 
         html += QString("<p style='color:%1; margin:6px 0 2px 0;'><b>Protocol keywords</b>"
                         " (press Enter):</p>").arg(head);
@@ -3921,11 +3921,11 @@ void MainWindow::showSearchHelp()
         html += krow("LACP",                "Link Aggregation Control Protocol (0x8809)");
         html += krow("CDP",                 "Cisco Discovery Protocol");
         html += krow("VTP",                 "VLAN Trunking Protocol");
-        html += krow("Infrastructure",      "All bridge/switching + routing protocols (STP, LLDP, LACP, CDP, VTP, MPLS, OSPF, BGP …)");
+        html += krow("Infrastructure",      "All bridge/switching + routing protocols (STP, LLDP, LACP, CDP, VTP, MPLS, OSPF, BGP &hellip;)");
         html += krow("LLC  /  802.2",       "IEEE 802.2 LLC-encapsulated frames");
-        html += krow("EAPOL  /  802.1X",    "Port-based authentication — shows EAP info popup");
-        html += krow("VLAN  /  802.1Q",     "IEEE 802.1Q tagged frames — shows VLAN info popup");
-        html += krow("MACsec  /  802.1AE",  "MACsec encrypted frames (0x88E5) — shows MACsec info popup");
+        html += krow("EAPOL  /  802.1X",    "Port-based authentication &mdash; shows EAP info popup");
+        html += krow("VLAN  /  802.1Q",     "IEEE 802.1Q tagged frames &mdash; shows VLAN info popup");
+        html += krow("MACsec  /  802.1AE",  "MACsec encrypted frames (0x88E5) &mdash; shows MACsec info popup");
         html += krow("MPLS",                "MPLS labeled frames");
         html += krow("802.3  /  Ethernet",  "All Ethernet pairs");
         html += "</table>";
@@ -4263,7 +4263,7 @@ void MainWindow::applySearchFilter(const QString &query)
                 if (ok && portVal > 0 && portVal <= 65535) {
                     is_port_search = true;
                     port_search_num = (guint16)portVal;
-                    port_search_tcp = true;   /* port N — match both TCP and UDP */
+                    port_search_tcp = true;   /* port N &mdash; match both TCP and UDP */
                     port_search_udp = true;
                 }
             }
@@ -4375,7 +4375,7 @@ void MainWindow::applySearchFilter(const QString &query)
      * Only active in IP mode (non-MAC, non-Wi-Fi).                              */
     bool is_proto_info_search = false;
     QList<guint16> proto_info_ports;
-    bool proto_info_tcp_only = false;  /* true → require TCP; false → accept TCP or UDP */
+    bool proto_info_tcp_only = false;  /* true &rarr; require TCP; false &rarr; accept TCP or UDP */
 
     if (!is_port_search && !is_signal_search && !is_ap_search
             && !is_category_search && !m_useMAC && !m_wifiMode) {
@@ -4754,7 +4754,7 @@ void MainWindow::applySearchFilter(const QString &query)
                 if (count > 25) {
                     /* Too many to display — tell user to refine */
                     QMessageBox::warning(this,
-                        QString("Not in Top-%1 — Too Many Results").arg(m_topN),
+                        QString("Not in Top-%1 &mdash; Too Many Results").arg(m_topN),
                         QString("<b>%1</b> was not found in the current "
                                 "<b>Top-%2</b> view.<br><br>"
                                 "Found <b>%3 pairs</b> in the full capture buffer, "
@@ -4774,10 +4774,10 @@ void MainWindow::applySearchFilter(const QString &query)
                                 "However, <b>%3 matching pair%4</b> %5 found "
                                 "in the full capture buffer.<br><br>"
                                 "If you continue:<br>"
-                                "• The Top-%2 buttons will be deselected<br>"
-                                "• The %3 matching pair%4 will be shown "
+                                "&bull; The Top-%2 buttons will be deselected<br>"
+                                "&bull; The %3 matching pair%4 will be shown "
                                 "in the pair list and circle view<br>"
-                                "• This custom view stays active until you "
+                                "&bull; This custom view stays active until you "
                                 "clear the search field or pick a Top-N button")
                             .arg(trimmed.toHtmlEscaped())
                             .arg(m_topN)
@@ -5996,7 +5996,7 @@ void ConnectionPopup::populateWifiInfo()
 
 void ConnectionPopup::showWifiContextMenu(const QPoint &pos)
 {
-    QMenu menu;  /* NOT parented to 'this' — must stay stack-safe when
+    QMenu menu;  /* NOT parented to 'this' &mdash; must stay stack-safe when
                    plugin_if_apply_filter re-enters the event loop and
                    triggers our deferred destruction.                    */
     if (isDarkTheme()) {
@@ -6568,7 +6568,7 @@ void ConnectionPopup::onMacTableContextMenu(const QPoint &pos)
 
 void ConnectionPopup::showL2ContextMenu(const QPoint &pos)
 {
-    QMenu menu;  /* NOT parented to 'this' — must stay stack-safe when
+    QMenu menu;  /* NOT parented to 'this' &mdash; must stay stack-safe when
                    plugin_if_apply_filter re-enters the event loop and
                    triggers our deferred destruction.                    */
     if (isDarkTheme()) {
@@ -6666,7 +6666,7 @@ void ConnectionPopup::showContextMenu(const QPoint &pos)
 
     m_table->selectRow(row);
 
-    QMenu menu;  /* NOT parented to 'this' — must stay stack-safe when
+    QMenu menu;  /* NOT parented to 'this' &mdash; must stay stack-safe when
                    plugin_if_apply_filter re-enters the event loop and
                    triggers our deferred destruction.                    */
     if (isDarkTheme()) {
@@ -6877,7 +6877,7 @@ void ConnectionPopup::showProtocolInfoBrowserForRow(int row)
     };
 
     /* Build the dialog */
-    QDialog browser(nullptr);   /* not parented — same safety pattern as QMenu */
+    QDialog browser(nullptr);   /* not parented &mdash; same safety pattern as QMenu */
     browser.setWindowTitle("Supported Protocols");
     browser.resize(420, 480);
 
@@ -7809,7 +7809,7 @@ static QString dcerpcServiceName(const QString &uuid)
         if (lower == QString::fromLatin1(known[i].uuid))
             return QString::fromLatin1(known[i].name);
     }
-    return uuid;   /* unknown — show raw UUID */
+    return uuid;   /* unknown &mdash; show raw UUID */
 }
 
 void ConnectionPopup::showSmbInfoForRow(int row)
@@ -7930,7 +7930,7 @@ void ConnectionPopup::showSmbInfoForRow(int row)
             }
         } else {
             html += QString("<tr><td style='color:%1;'>Status:</td>"
-                            "<td><b>TCP only</b> — no SMB/DCE-RPC negotiation detected</td></tr>")
+                            "<td><b>TCP only</b> &mdash; no SMB/DCE-RPC negotiation detected</td></tr>")
                         .arg(dimColor);
         }
         if (smb->dialect) {
@@ -8345,7 +8345,7 @@ void ConnectionPopup::showKerberosInfoForRow(int row)
             }
             if (hasWeak) {
                 html += QString("<div style='margin-top:4px; color:%1; font-size:11px;'>"
-                                "&#9888; Weak encryption detected — consider enforcing AES-only policy"
+                                "&#9888; Weak encryption detected &mdash; consider enforcing AES-only policy"
                                 "</div>")
                             .arg(warnColor);
             }
@@ -10200,7 +10200,7 @@ void ConnectionPopup::showMacsecInfoDialog()
         } else {
             /* SecTAG fields not decoded — MACsec dissector may be disabled */
             html += QString("<tr><td colspan='2' style='color:%1; font-size:10px;'>"
-                            "&#9432; SecTAG fields not decoded — enable the MACsec "
+                            "&#9432; SecTAG fields not decoded &mdash; enable the MACsec "
                             "dissector in Wireshark preferences if fields are missing."
                             "</td></tr>")
                         .arg(warnColor);
@@ -10221,7 +10221,7 @@ void ConnectionPopup::showMacsecInfoDialog()
         /* TCI flags decoded from the raw byte (if captured) */
         if (mi->tci_flags != 0) {
             QStringList flags;
-            if (mi->tci_flags & 0x80) flags << "V (Version bit — should be 0)";
+            if (mi->tci_flags & 0x80) flags << "V (Version bit &mdash; should be 0)";
             if (mi->tci_flags & 0x40) flags << "ES (End Station)";
             if (mi->tci_flags & 0x20) flags << "SC (SCI present)";
             if (mi->tci_flags & 0x10) flags << "SCB (Single Copy Broadcast)";
@@ -10539,7 +10539,7 @@ void ConnectionPopup::showArpInfoDialog()
         } else {
             if (ai->ip_conflict_warnings) {
                 html += QString("<div style='color:%1; font-weight:bold; margin-top:4px;'>"
-                                "&#9888; Possible ARP Cache Poisoning — IP conflicts:</div>")
+                                "&#9888; Possible ARP Cache Poisoning &mdash; IP conflicts:</div>")
                             .arg(alertColor);
                 for (GList *l = ai->ip_conflict_warnings; l; l = l->next) {
                     const gchar *w = (const gchar *)l->data;
@@ -10771,7 +10771,7 @@ void ConnectionPopup::showDnsInfoForRow(int row)
 
     QString src = QString::fromUtf8(m_pair->src_addr);
     QString dst = QString::fromUtf8(m_pair->dst_addr);
-    QString dlgTitle = QString("DNS Information  —  %1 ↔ %2  (port %3)")
+    QString dlgTitle = QString("DNS Information  &mdash;  %1 &#x2194; %2  (port %3)")
                            .arg(src).arg(dst).arg(rd.port);
 
     if (!cf) {
@@ -11057,7 +11057,7 @@ void ConnectionPopup::showLdapInfoForRow(int row)
     if (!li || !li->found) {
         QString note;
         if (li && li->is_tls)
-            note = " (traffic may be TLS-encrypted — no plaintext LDAP fields visible)";
+            note = " (traffic may be TLS-encrypted &mdash; no plaintext LDAP fields visible)";
         addSorryPlaceholder(mainLayout, dlg, dark,
                             QString("LDAP") + note,
                             li ? li->matched_packets : 0);
@@ -12088,7 +12088,7 @@ void ConnectionPopup::showFtpInfoForRow(int row)
         if (fi->passive_mode && fi->active_mode) dataMode = "Active + Passive";
         else if (fi->passive_mode) dataMode = "Passive (PASV/EPSV)";
         else if (fi->active_mode)  dataMode = "Active (PORT/EPRT)";
-        else                        dataMode = "—";
+        else                        dataMode = "&mdash;";
         html += QString("<tr><td style='padding:2px 12px 2px 0;'>Data mode</td>"
                         "<td><b>%1</b></td></tr>").arg(dataMode);
 
@@ -12177,7 +12177,7 @@ void ConnectionPopup::showFtpInfoForRow(int row)
                 html += "<li>" + QString::fromUtf8((gchar *)n->data).toHtmlEscaped() + "</li>";
             guint total = g_list_length(fi->filenames);
             if (total > 40)
-                html += QString("<li><i>… and %1 more</i></li>").arg(total - 40);
+                html += QString("<li><i>&hellip; and %1 more</i></li>").arg(total - 40);
             html += "</ul>";
         }
 
@@ -12333,7 +12333,7 @@ void ConnectionPopup::showTelnetInfoForRow(int row)
         capRow("Encryption",         ti->has_encrypt);
         if (!ti->has_encrypt)
             html += QString("<tr><td colspan='2' style='font-size:11px;color:%1;padding-top:4px;'>"
-                            "\u26a0 No Telnet encryption option negotiated — "
+                            "&#x26a0; No Telnet encryption option negotiated &mdash; "
                             "all traffic is cleartext</td></tr>")
                         .arg(alertColor);
         html += "</table>";
@@ -12780,24 +12780,33 @@ void ConnectionPopup::showTcpStatInfoForRow(int row)
     } else {
         /* ── 1. Flags observed ── */
         html += sec("Flags Observed");
-        auto flag = [&](const char *name, bool seen) -> QString {
-            return QString("<span style='margin-right:10px;padding:1px 6px;"
-                           "border-radius:3px;font-size:12px;"
-                           "background:%1;color:%2;'>%3</span>")
-                .arg(seen ? (dark ? "#1a4a2e" : "#d4edda") : (dark ? "#2a2a2a" : "#f5f5f5"),
-                     seen ? (dark ? "#4caf50" : "#155724") : (dark ? "#555" : "#aaa"),
-                     QString(name));
+        /* One row per flag: monospace abbrev | description | seen/not-seen */
+        auto flag = [&](const char *abbrev, const char *desc, bool seen) -> QString {
+            return QString(
+                "<tr>"
+                "<td style='padding:2px 8px 2px 0;white-space:nowrap;'>"
+                "<b style='font-family:monospace;color:%1;'>%2</b>"
+                "<span style='color:%3;font-size:11px;'>&nbsp;&nbsp;%4</span>"
+                "</td>"
+                "<td style='padding:2px 0;'>"
+                "<span style='color:%5;font-weight:%6;'>%7</span>"
+                "</td></tr>")
+                .arg(dark ? "#e8e8e8" : "#1a1a1a")
+                .arg(abbrev)
+                .arg(dark ? "#777" : "#888")
+                .arg(desc)
+                .arg(seen ? (dark ? "#4caf50" : "#2e7d32") : (dark ? "#555" : "#bbb"))
+                .arg(seen ? "bold" : "normal")
+                .arg(seen ? "&#x2714;  Observed" : "&mdash;  Not seen");
         };
-        html += "<tr><td colspan='2' style='padding:6px 0;'>";
-        html += flag("SYN", ti->saw_syn);
-        html += flag("ACK", ti->saw_ack);
-        html += flag("FIN", ti->saw_fin);
-        html += flag("RST", ti->saw_rst);
-        html += flag("PSH", ti->saw_psh);
-        html += flag("URG", ti->saw_urg);
-        html += flag("ECE", ti->saw_ece);
-        html += flag("CWR", ti->saw_cwr);
-        html += "</td></tr>";
+        html += flag("SYN", "Synchronize &mdash; connection initiation",    ti->saw_syn);
+        html += flag("ACK", "Acknowledge &mdash; receipt confirmed",         ti->saw_ack);
+        html += flag("FIN", "Finish &mdash; graceful connection close",      ti->saw_fin);
+        html += flag("RST", "Reset &mdash; connection aborted",              ti->saw_rst);
+        html += flag("PSH", "Push &mdash; deliver buffered data immediately",ti->saw_psh);
+        html += flag("URG", "Urgent &mdash; out-of-band data present",       ti->saw_urg);
+        html += flag("ECE", "ECN-Echo &mdash; congestion notification",      ti->saw_ece);
+        html += flag("CWR", "Congestion Window Reduced",                     ti->saw_cwr);
 
         /* ── 2. Window & MSS ── */
         html += sec("Window Size & MSS");
@@ -12818,16 +12827,16 @@ void ConnectionPopup::showTcpStatInfoForRow(int row)
         html += sec("Negotiated TCP Options");
         auto opt = [&](const char *name, bool seen) {
             html += kv(name, seen
-                ? QString("<span style='color:%1;font-weight:bold;'>✔ Present</span>")
+                ? QString("<span style='color:%1;font-weight:bold;'>&#x2714; Present</span>")
                       .arg(dark ? "#4caf50" : "#2e7d32")
-                : QString("<span style='color:%1;'>✘ Not seen</span>")
+                : QString("<span style='color:%1;'>&#x2718; Not seen</span>")
                       .arg(dark ? "#666" : "#aaa"));
         };
         opt("SACK Permitted",   ti->sack_permitted);
         opt("Timestamps",       ti->timestamps);
         if (ti->window_scale >= 0)
             html += kv("Window Scale",
-                       QString("shift = %1 (×%2)").arg(ti->window_scale).arg(1 << ti->window_scale));
+                       QString("shift = %1 (&times;%2)").arg(ti->window_scale).arg(1 << ti->window_scale));
         else
             html += kv("Window Scale", "<i style='color:#888;'>not advertised</i>");
 
@@ -12841,9 +12850,9 @@ void ConnectionPopup::showTcpStatInfoForRow(int row)
             html += kv("Samples",  QString::number(ti->rtt_count));
         } else {
             html += "<tr><td colspan='2' style='color:#888;font-style:italic;padding:4px 0;'>"
-                    "RTT data not available — requires Wireshark analysis fields "
-                    "(tcp.analysis.ack_rtt). Try enabling TCP sequence analysis in "
-                    "Wireshark preferences.</td></tr>";
+                    "RTT data not available &mdash; normal if the capture started mid-session, "
+                    "is one-directional, or contains only handshake/control packets "
+                    "(no data segments and their ACKs in the same capture).</td></tr>";
         }
 
         /* ── 5. Health ── */
@@ -12873,8 +12882,8 @@ void ConnectionPopup::showTcpStatInfoForRow(int row)
 
     if (ti && ti->found) {
         html += QString("<p style='margin-top:14px;font-size:11px;color:%1;'>"
-                        "<b>Note:</b> Window sizes are raw (unscaled). RTT and retransmission "
-                        "data rely on Wireshark's TCP sequence analysis being enabled. "
+                        "<b>Note:</b> Window sizes are raw (unscaled). RTT requires both the "
+                        "data segment and its ACK to be present in the capture. "
                         "Options are detected from SYN/SYN-ACK frames in the capture.</p>")
                     .arg(dark ? "#888" : "#666");
     }
@@ -12953,10 +12962,10 @@ void ConnectionPopup::showUdpStatInfoForRow(int row)
         if (total > 0) {
             int pctAB = (int)((ui->pkts_a_to_b * 100) / total);
             int pctBA = 100 - pctAB;
-            html += kv(QString("%1 → %2").arg(src.toHtmlEscaped(), dst.toHtmlEscaped()),
+            html += kv(QString("%1 &rarr; %2").arg(src.toHtmlEscaped(), dst.toHtmlEscaped()),
                        QString("%1 packets (%2%)")
                            .arg(ui->pkts_a_to_b).arg(pctAB));
-            html += kv(QString("%1 → %2").arg(dst.toHtmlEscaped(), src.toHtmlEscaped()),
+            html += kv(QString("%1 &rarr; %2").arg(dst.toHtmlEscaped(), src.toHtmlEscaped()),
                        QString("%1 packets (%2%)")
                            .arg(ui->pkts_b_to_a).arg(pctBA));
             html += kv("Total packets", QString::number(total));
@@ -12965,9 +12974,9 @@ void ConnectionPopup::showUdpStatInfoForRow(int row)
             QString bar = "";
             int filled = pctAB / 5;
             bar += QString("<span style='color:%1;'>").arg(dark ? "#00d9c0" : "#007a6e");
-            for (int i = 0; i < filled; i++) bar += "█";
+            for (int i = 0; i < filled; i++) bar += "&#x2588;";
             bar += "</span>";
-            for (int i = filled; i < 20; i++) bar += "░";
+            for (int i = filled; i < 20; i++) bar += "&#x2591;";
             bar += QString(" &nbsp;%1% / %2%").arg(pctAB).arg(pctBA);
             html += QString("<tr><td colspan='2' style='padding:6px 0;font-family:monospace;'>"
                             "%1</td></tr>").arg(bar);
@@ -12982,13 +12991,13 @@ void ConnectionPopup::showUdpStatInfoForRow(int row)
                            "<span style='color:" + QString(dark ? "#4caf50" : "#2e7d32") + ";'>"
                            "Fixed-size datagrams (likely a structured protocol)</span>");
             else if (range < 64)
-                html += kv("Size consistency", "Low variance — mostly uniform payload sizes");
+                html += kv("Size consistency", "Low variance &mdash; mostly uniform payload sizes");
             else if (ui->payload_max <= 508)
                 html += kv("Size note", "All datagrams within safe unfragmented UDP size (&le;508 bytes)");
             else if (ui->payload_max > 1472)
                 html += kv("Size note",
                            QString("<span style='color:%1;'>Large datagrams detected "
-                                   "(max %2 bytes) — may fragment on standard MTU paths</span>")
+                                   "(max %2 bytes) &mdash; may fragment on standard MTU paths</span>")
                                .arg(dark ? "#ffb74d" : "#e65100")
                                .arg(ui->payload_max));
             else
