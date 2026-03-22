@@ -137,4 +137,4 @@ GNU General Public License v2 — see [LICENSE](LICENSE).
 
 ---
 
-**Built for the network analysis community** — [github.com/netwho/PacketCircle](https://github.com/netwho/PacketCircle)
+**Built with ❤️ for the network analysis community** — [github.com/netwho/PacketCircle](https://github.com/netwho/PacketCircle)
