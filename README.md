@@ -131,7 +131,9 @@ GNU General Public License v2 — see [LICENSE](LICENSE).
 
 ## Acknowledgments
 
-Wireshark development team · Network analysis community · AI-Assisted: yes (Claude)
+- **Wireshark development team** — for the outstanding dissector framework and plugin API that makes deep protocol inspection possible
+- **Wireshark community** — for testing, feedback, and bug reports that shaped every release
+- **AI-Assisted** — yes (Claude by Anthropic) — used for build system automation, installer scripting, cross-platform compatibility, protocol info dialogs, and documentation
 
 ---
 
