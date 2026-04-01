@@ -2,6 +2,21 @@
 
 All notable changes to PacketCircle will be documented in this file.
 
+## [0.4.7] - 2026-04-01
+
+### Added
+- **Table view: left-click opens Connection Details** — Clicking any row in the Table view now opens the same Connection Details popup that appears when clicking a circle arc in the Circle view. Previously the table was display-only; it is now fully interactive.
+- **Table view: right-click context menu** — Right-clicking any table row shows a grouped context menu with two sections:
+  - *Wireshark* — Apply Filter in Wireshark, Follow TCP Stream, TCP Throughput Graph, TCP Round-Trip Time Graph (TCP-only items are greyed out for UDP pairs)
+  - *PacketCircle* — Protocol Information dialog for the top destination port (same 18 protocols as the circle-view popup), TCP / UDP Transport Details, Connection Details
+- **Malcolm/Arkime: precise capture time window** — The Arkime sessions URL generated after a successful Malcolm upload now includes the actual first/last packet timestamps from the capture file (`startTime` / `stopTime` parameters with a 60-second buffer on each side). Previously the URL used no time filter. Requires at least one packet in the capture file.
+- **`circle_vis_get_capture_time_range()`** — New C bridge function in `ui_bridge.cpp` that reads the first and last `frame_data.abs_ts` values directly from Wireshark's frame sequence, returning Unix epoch seconds.
+
+### Changed
+- **Connection Details popup context menu: grouped sections** — The right-click menu inside the Connection Details popup now uses `QMenu::addSection()` to separate *Wireshark* actions (filter, follow stream, throughput/RTT graphs) from *PacketCircle* actions (protocol info, transport details, supported protocols). Redundant separators removed.
+
+- AI-Assisted: yes (Claude) — table view interactivity, right-click context menu, Malcolm time-range fix, bridge API, documentation
+
 ## [0.4.6] - 2026-03-18
 
 ### Added

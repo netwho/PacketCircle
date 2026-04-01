@@ -71,8 +71,11 @@
 #include <QJsonDocument>
 #include <QJsonObject>
 #include <QDesktopServices>
+#include <QDir>
 #include <QFormLayout>
 #include <QDialogButtonBox>
+#include <QProcess>
+#include <QTemporaryFile>
 #include <epan/plugin_if.h>
 #include <cfile.h>
 
@@ -434,7 +437,7 @@ void MainWindow::setupUI()
     resize(1280, 780);
     
     /* Set window title and flags */
-setWindowTitle("PacketCircle v.0.4.6"); /* WH: version bump */
+setWindowTitle("PacketCircle v.0.4.7"); /* WH: version bump */
     
     /* Create pair list blink timer for synchronized search highlighting */
     m_pairListBlinkTimer = new QTimer(this);
@@ -902,6 +905,11 @@ void MainWindow::createTableView()
     m_tableWidget->setSelectionBehavior(QAbstractItemView::SelectRows);
     m_tableWidget->setEditTriggers(QAbstractItemView::NoEditTriggers);
     m_tableWidget->horizontalHeader()->setStretchLastSection(true);
+    m_tableWidget->setContextMenuPolicy(Qt::CustomContextMenu);
+    connect(m_tableWidget, &QTableWidget::cellClicked,
+            this, &MainWindow::onTableCellClicked);
+    connect(m_tableWidget, &QTableWidget::customContextMenuRequested,
+            this, &MainWindow::onTableContextMenu);
     
     /* Set column widths */
     m_tableWidget->setColumnWidth(0, 30);   /* Checkbox - narrow */
@@ -1163,7 +1171,9 @@ void MainWindow::updateViews()
             /* ---- Wi-Fi table row ---- */
             QString station = pair->resolved_src ? QString::fromUtf8(pair->resolved_src) : QString::fromUtf8(pair->src_addr);
             QString bssid   = pair->wifi_bssid   ? QString::fromUtf8(pair->wifi_bssid)   : QString::fromUtf8(pair->dst_addr);
-            m_tableWidget->setItem(row, 1, new QTableWidgetItem(station));
+            QTableWidgetItem *stItem = new QTableWidgetItem(station);
+            stItem->setData(Qt::UserRole, QVariant::fromValue<void*>(pair));
+            m_tableWidget->setItem(row, 1, stItem);
             m_tableWidget->setItem(row, 2, new QTableWidgetItem(bssid));
 
             /* SSID */
@@ -1219,7 +1229,9 @@ void MainWindow::updateViews()
             /* ---- Standard table row ---- */
             QString displaySrc = pair->resolved_src ? QString::fromUtf8(pair->resolved_src) : QString::fromUtf8(pair->src_addr);
             QString displayDst = pair->resolved_dst ? QString::fromUtf8(pair->resolved_dst) : QString::fromUtf8(pair->dst_addr);
-            m_tableWidget->setItem(row, 1, new QTableWidgetItem(displaySrc));
+            QTableWidgetItem *srcItem = new QTableWidgetItem(displaySrc);
+            srcItem->setData(Qt::UserRole, QVariant::fromValue<void*>(pair));
+            m_tableWidget->setItem(row, 1, srcItem);
             m_tableWidget->setItem(row, 2, new QTableWidgetItem(displayDst));
 
             QTableWidgetItem *pktItem = new QTableWidgetItem(QString::number(pair->packet_count));
@@ -1921,6 +1933,291 @@ void MainWindow::onLineClicked(comm_pair_t *pair, const QPoint &globalPos)
     m_connectionPopup->show();
 }
 
+/* ─── Table view: left-click opens ConnectionPopup ─────────────────────────
+ * Mirrors the circle view arc-click behaviour: left-clicking a row in the
+ * table view opens the same sessions/port breakdown popup.                  */
+void MainWindow::onTableCellClicked(int row, int /*col*/)
+{
+    if (m_wifiMode) return;   /* Wi-Fi mode rows don't have ConnectionPopups */
+
+    QTableWidgetItem *item = m_tableWidget->item(row, 1);
+    if (!item) return;
+    comm_pair_t *pair = static_cast<comm_pair_t*>(item->data(Qt::UserRole).value<void*>());
+    if (!pair || !pair->src_addr || !pair->dst_addr) return;
+
+    /* Position popup near the centre of the clicked row */
+    QRect rowRect = m_tableWidget->visualRect(m_tableWidget->model()->index(row, 1));
+    QPoint globalPos = m_tableWidget->viewport()->mapToGlobal(rowRect.center());
+    onLineClicked(pair, globalPos);
+}
+
+/* ─── Table view: right-click context menu ─────────────────────────────────
+ * Shows the same grouped context menu as the ConnectionPopup right-click,
+ * but accessible directly from the table row without opening the popup first.
+ *
+ * Menu layout:
+ *   ── Wireshark ──────────────────────
+ *   Apply Filter in Wireshark
+ *   Follow TCP Stream        (TCP only)
+ *   TCP Throughput Graph     (TCP only)
+ *   TCP Round-Trip Time Graph(TCP only)
+ *   ── PacketCircle ───────────────────
+ *   [Protocol] Protocol Information    (top-port match, optional)
+ *   TCP / UDP Transport Details…       (optional)
+ *   Connection Details…
+ * ─────────────────────────────────────────────────────────────────────────*/
+void MainWindow::onTableContextMenu(const QPoint &pos)
+{
+    if (m_wifiMode) return;
+
+    int row = m_tableWidget->rowAt(pos.y());
+    if (row < 0) return;
+
+    QTableWidgetItem *item = m_tableWidget->item(row, 1);
+    if (!item) return;
+    comm_pair_t *pair = static_cast<comm_pair_t*>(item->data(Qt::UserRole).value<void*>());
+    if (!pair || !pair->src_addr || !pair->dst_addr) return;
+
+    m_tableWidget->selectRow(row);
+
+    /* ── Determine top destination port ── */
+    quint16 topPort  = 0;
+    bool topIsTcp    = false;
+    bool topIsUdp    = false;
+    if (pair->dst_ports) {
+        guint64 topCount = 0;
+        GHashTableIter pit;
+        gpointer pk, pv;
+        g_hash_table_iter_init(&pit, pair->dst_ports);
+        while (g_hash_table_iter_next(&pit, &pk, &pv)) {
+            quint16 p    = (quint16)GPOINTER_TO_UINT(pk);
+            port_stats_t *ps = (port_stats_t *)pv;
+            if (ps && ps->count > topCount) {
+                topCount = ps->count;
+                topPort  = p;
+                topIsTcp = ps->is_tcp;
+                topIsUdp = ps->is_udp;
+            }
+        }
+    }
+
+    /* ── Build Wireshark filter strings ── */
+    QString src = QString::fromUtf8(pair->src_addr);
+    QString dst = QString::fromUtf8(pair->dst_addr);
+    bool looksLikeMAC = (src.count(':') == 5 && dst.count(':') == 5);
+    QString addrClause = looksLikeMAC
+        ? QString("eth.addr == %1 && eth.addr == %2").arg(src).arg(dst)
+        : QString("ip.addr == %1 && ip.addr == %2").arg(src).arg(dst);
+
+    QString portClause;
+    if (topPort > 0) {
+        if (topIsTcp && topIsUdp)
+            portClause = QString("(tcp.port == %1 || udp.port == %1)").arg(topPort);
+        else if (topIsTcp)
+            portClause = QString("tcp.port == %1").arg(topPort);
+        else if (topIsUdp)
+            portClause = QString("udp.port == %1").arg(topPort);
+    }
+    QString fullFilter = portClause.isEmpty()
+        ? QString("(%1)").arg(addrClause)
+        : QString("(%1 && %2)").arg(addrClause).arg(portClause);
+
+    /* ── Build menu ── */
+    QMenu menu;
+    if (m_darkTheme) {
+        menu.setStyleSheet(
+            "QMenu {"
+            "  background: #2b2b2b;"
+            "  color: #e0e0e0;"
+            "  border: 1px solid #555;"
+            "  padding: 4px;"
+            "}"
+            "QMenu::item { padding: 6px 20px; }"
+            "QMenu::item:selected { background: #0078d4; color: white; }"
+            "QMenu::item:disabled { color: #666; }"
+        );
+    }
+
+    /* ── Wireshark section ── */
+    menu.addSection("Wireshark");
+    QAction *filterAction     = menu.addAction("Apply Filter in Wireshark");
+    QAction *followAction     = menu.addAction("Follow TCP Stream");
+    QAction *throughputAction = menu.addAction("TCP Throughput Graph");
+    QAction *rttAction        = menu.addAction("TCP Round-Trip Time Graph");
+
+    bool hasTcp = pair->has_tcp;
+    bool hasUdp = pair->has_udp;
+    if (!hasTcp) {
+        followAction->setEnabled(false);
+        followAction->setText("Follow TCP Stream (TCP only)");
+        throughputAction->setEnabled(false);
+        throughputAction->setText("TCP Throughput Graph (TCP only)");
+        rttAction->setEnabled(false);
+        rttAction->setText("TCP Round-Trip Time Graph (TCP only)");
+    }
+
+    /* ── PacketCircle section ── */
+    menu.addSection("PacketCircle");
+
+    /* Match top port to a known protocol */
+    struct ProtoMatch { int id; QString label; };
+    ProtoMatch pm = {0, {}};
+    if (topPort > 0) {
+        quint16 p  = topPort;
+        bool tcp   = topIsTcp;
+        bool udp   = topIsUdp;
+        if (tcp && p == 22)                                                 pm = { 13, "SSH / SFTP / SCP" };
+        else if ((tcp||udp) && p == 443)                                    pm = {  1, "TLS / HTTPS" };
+        else if (tcp && p == 80)                                            pm = {  2, "HTTP" };
+        else if (tcp && (p == 445 || p == 135))                             pm = {  3, "SMB / DCE-RPC" };
+        else if ((tcp||udp) && p == 88)                                     pm = {  4, "Kerberos" };
+        else if (tcp && (p == 25 || p == 465 || p == 587))                 pm = {  5, "SMTP / Email" };
+        else if (tcp && (p == 143 || p == 993))                             pm = {  5, "IMAP / Email" };
+        else if (tcp && (p == 110 || p == 995))                             pm = {  5, "POP3 / Email" };
+        else if (tcp && (p == 1433 || p == 3306 || p == 5432))             pm = {  6, "SQL Database" };
+        else if ((tcp||udp) && (p == 5060 || p == 5061))                   pm = {  7, "VoIP / SIP" };
+        else if (udp && (p == 67 || p == 68))                              pm = {  8, "DHCP" };
+        else if ((udp||tcp) && p == 53)                                     pm = {  9, "DNS" };
+        else if (tcp && (p == 389 || p == 636 || p == 3268 || p == 3269)) pm = { 10, "LDAP" };
+        else if ((udp||tcp) && (p == 161 || p == 162))                     pm = { 11, "SNMP" };
+        else if ((udp||tcp) && (p == 514 || p == 601 || p == 6514))       pm = { 12, "Syslog" };
+        else if (tcp && (p == 21 || p == 20 || p == 990))                  pm = { 14, "FTP" };
+        else if (tcp && (p == 23 || p == 992))                              pm = { 15, "Telnet" };
+        else if (udp && p == 137)                                           pm = { 16, "NBNS" };
+        else if (udp && p == 138)                                           pm = { 17, "NetBIOS Datagram" };
+        else if (tcp && p == 139)                                           pm = { 18, "NetBIOS Session (NBSS)" };
+    }
+
+    QAction *protoAction    = nullptr;
+    QAction *tcpStatAction  = nullptr;
+    QAction *udpStatAction  = nullptr;
+
+    if (pm.id > 0)
+        protoAction = menu.addAction(pm.label + " Protocol Information");
+
+    if (hasTcp)
+        tcpStatAction = menu.addAction("TCP Transport Details\u2026");
+    else if (hasUdp)
+        udpStatAction = menu.addAction("UDP Transport Details\u2026");
+
+    menu.addSeparator();
+    QAction *detailsAction = menu.addAction("Connection Details\u2026");
+
+    /* ── Execute menu ── */
+    QAction *selected = menu.exec(m_tableWidget->viewport()->mapToGlobal(pos));
+    if (!selected) return;
+
+    /* Helper: find the reverse pair (reused by several branches) */
+    auto findReverse = [&]() -> comm_pair_t* {
+        if (!m_circle_pairs) return nullptr;
+        for (GList *it = m_circle_pairs; it; it = it->next) {
+            comm_pair_t *p = (comm_pair_t *)it->data;
+            if (!p || !p->src_addr || !p->dst_addr || p == pair) continue;
+            if (g_strcmp0(p->src_addr, pair->dst_addr) == 0 &&
+                g_strcmp0(p->dst_addr, pair->src_addr) == 0)
+                return p;
+        }
+        return nullptr;
+    };
+
+    if (selected == filterAction) {
+        /* Apply address-only filter */
+        QString addrFilter = QString("(%1)").arg(addrClause);
+        QByteArray fb = addrFilter.toUtf8();
+        plugin_if_apply_filter(fb.constData(), true);
+
+    } else if (selected == followAction && hasTcp) {
+        /* Apply filter then trigger Follow TCP Stream in Wireshark menu */
+        QByteArray fb = fullFilter.toUtf8();
+        plugin_if_apply_filter(fb.constData(), true);
+        QTimer::singleShot(400, qApp, []() {
+            for (QWidget *w : QApplication::topLevelWidgets()) {
+                QMainWindow *mw = qobject_cast<QMainWindow*>(w);
+                if (!mw || !mw->menuBar()) continue;
+                for (QAction *topAct : mw->menuBar()->actions()) {
+                    QMenu *topMenu = topAct->menu();
+                    if (!topMenu) continue;
+                    for (QAction *midAct : topMenu->actions()) {
+                        QMenu *sub = midAct->menu();
+                        if (!sub || !sub->title().contains("Follow", Qt::CaseInsensitive)) continue;
+                        for (QAction *fa : sub->actions()) {
+                            if (fa->text().contains("TCP Stream", Qt::CaseInsensitive) && fa->isEnabled()) {
+                                fa->trigger(); return;
+                            }
+                        }
+                    }
+                }
+            }
+        });
+
+    } else if (selected == throughputAction && hasTcp) {
+        /* Apply filter then open TCP Throughput Graph */
+        QByteArray fb = fullFilter.toUtf8();
+        plugin_if_apply_filter(fb.constData(), true);
+        QTimer::singleShot(400, qApp, []() {
+            for (QWidget *w : QApplication::topLevelWidgets()) {
+                QMainWindow *mw = qobject_cast<QMainWindow*>(w);
+                if (!mw || !mw->menuBar()) continue;
+                for (QAction *topAct : mw->menuBar()->actions()) {
+                    QMenu *topMenu = topAct->menu();
+                    if (!topMenu) continue;
+                    for (QAction *midAct : topMenu->actions()) {
+                        QMenu *sub = midAct->menu();
+                        if (!sub || !sub->title().contains("TCP Stream Graph", Qt::CaseInsensitive)) continue;
+                        for (QAction *ga : sub->actions()) {
+                            if (ga->text().contains("Throughput", Qt::CaseInsensitive) && ga->isEnabled()) {
+                                ga->trigger(); return;
+                            }
+                        }
+                    }
+                }
+            }
+        });
+
+    } else if (selected == rttAction && hasTcp) {
+        /* Apply filter then open TCP Round-Trip Time Graph */
+        QByteArray fb = fullFilter.toUtf8();
+        plugin_if_apply_filter(fb.constData(), true);
+        QTimer::singleShot(400, qApp, []() {
+            for (QWidget *w : QApplication::topLevelWidgets()) {
+                QMainWindow *mw = qobject_cast<QMainWindow*>(w);
+                if (!mw || !mw->menuBar()) continue;
+                for (QAction *topAct : mw->menuBar()->actions()) {
+                    QMenu *topMenu = topAct->menu();
+                    if (!topMenu) continue;
+                    for (QAction *midAct : topMenu->actions()) {
+                        QMenu *sub = midAct->menu();
+                        if (!sub || !sub->title().contains("TCP Stream Graph", Qt::CaseInsensitive)) continue;
+                        for (QAction *ga : sub->actions()) {
+                            if (ga->text().contains("Round Trip", Qt::CaseInsensitive) && ga->isEnabled()) {
+                                ga->trigger(); return;
+                            }
+                        }
+                    }
+                }
+            }
+        });
+
+    } else if (pm.id > 0 && selected == protoAction) {
+        /* Create a temporary (hidden) ConnectionPopup as a data container,
+         * then call its protocol-info method directly.  The popup is never
+         * shown — hide() is a no-op and deleteLater() cleans it up after
+         * the dialog returns.                                               */
+        ConnectionPopup *tmp = new ConnectionPopup(pair, findReverse(), m_useMAC, this);
+        tmp->triggerInfoForPort(topPort, pm.id);
+
+    } else if (selected == tcpStatAction || selected == udpStatAction) {
+        ConnectionPopup *tmp = new ConnectionPopup(pair, findReverse(), m_useMAC, this);
+        tmp->triggerTransportDetails(selected == tcpStatAction);
+
+    } else if (selected == detailsAction) {
+        /* Same as a left-click: open the full ConnectionPopup */
+        QRect rowRect = m_tableWidget->visualRect(m_tableWidget->model()->index(row, 1));
+        QPoint globalPos = m_tableWidget->viewport()->mapToGlobal(rowRect.center());
+        onLineClicked(pair, globalPos);
+    }
+}
+
 /* ─── Arrow-toggle event filter ───────────────────────────────────────────
  * Clicking the non-checkbox area of a bidirectional pair row cycles the
  * direction arrow:  ⇒ (forward only)  →  ⇔ (both)  →  ⇐ (reverse only)  →  …
@@ -2038,7 +2335,7 @@ void MainWindow::onHelpClicked()
 {
     /* Use custom QDialog instead of QMessageBox for full size control */
     QDialog *helpDialog = new QDialog(this);
-helpDialog->setWindowTitle("Help - PacketCircle v.0.4.6"); /* WH: version bump */
+helpDialog->setWindowTitle("Help - PacketCircle v.0.4.7"); /* WH: version bump */
     helpDialog->setMinimumSize(600, 400);
     helpDialog->resize(900, 650);
     /* Make dialog resizable */
@@ -2467,7 +2764,7 @@ void MainWindow::onSavePDFClicked()
     QFontMetrics ffm(footerFont, &writer);
     int footerTextH = ffm.height();
     painter.drawText(0, pageH - footerTextH - mm(1), pageW, footerTextH, Qt::AlignCenter,
-QString("Generated by PacketCircle v.0.4.6 — %1") /* WH: version bump */
+QString("Generated by PacketCircle v.0.4.7 — %1") /* WH: version bump */
                          .arg(QDateTime::currentDateTime().toString("yyyy-MM-dd HH:mm:ss")));
 
     painter.end();
@@ -3108,10 +3405,115 @@ void MainWindow::uploadToNtopng(const QString &filePath, const QString &host, in
  * Malcolm / Arkime Integration
  * ══════════════════════════════════════════════════════════════════════════ */
 
-/* Read the first and last packet timestamps from a plain PCAP file.
+/* Read first/last packet timestamps from a pcapng file.
+ * Handles Section Header Blocks (SHB), Interface Description Blocks (IDB),
+ * and Enhanced Packet Blocks (EPB, type 0x00000006).
+ * Respects the if_tsresol option in IDBs; default resolution is microseconds. */
+static bool pcapng_read_timestamps(QFile &f, bool swapped,
+                                   quint32 *startTime, quint32 *stopTime)
+{
+    auto rd16 = [&](const uchar *p) -> quint16 {
+        if (swapped)
+            return ((quint16)p[0] << 8) | (quint16)p[1];
+        return (quint16)p[0] | ((quint16)p[1] << 8);
+    };
+    auto rd32 = [&](const uchar *p) -> quint32 {
+        if (swapped)
+            return ((quint32)p[0]<<24)|((quint32)p[1]<<16)|((quint32)p[2]<<8)|(quint32)p[3];
+        return (quint32)p[0]|((quint32)p[1]<<8)|((quint32)p[2]<<16)|((quint32)p[3]<<24);
+    };
+
+    /* Default timestamp resolution: microseconds (10^-6) */
+    quint64 ts_divisor = 1000000ULL;
+
+    quint32 first = 0, last = 0;
+    bool found = false;
+
+    while (!f.atEnd()) {
+        /* Every block starts with: block_type(4) + block_total_length(4) */
+        QByteArray blk_hdr = f.read(8);
+        if (blk_hdr.size() < 8) break;
+
+        const uchar *bh    = (const uchar *)blk_hdr.constData();
+        quint32 block_type = rd32(bh);
+        quint32 block_len  = rd32(bh + 4);
+
+        /* Minimum valid block = type(4)+len(4)+trailing_len(4) = 12 bytes */
+        if (block_len < 12 || block_len > 256*1024*1024) break;
+
+        quint32 body_len = block_len - 12; /* excludes type+len+trailing_len */
+
+        if (block_type == 0x0a0d0d0a) {
+            /* Section Header Block — skip body + trailing length */
+            if (!f.seek(f.pos() + body_len + 4)) break;
+
+        } else if (block_type == 0x00000001) {
+            /* Interface Description Block — scan options for if_tsresol (opt 9) */
+            QByteArray body = f.read(body_len);
+            if ((quint32)body.size() < body_len) break;
+            /* Fixed IDB header: LinkType(2) + Reserved(2) + SnapLen(4) = 8 bytes */
+            if (body_len > 8) {
+                const uchar *opt = (const uchar *)body.constData() + 8;
+                int remaining    = (int)body_len - 8;
+                while (remaining >= 4) {
+                    quint16 opt_code = rd16(opt);
+                    quint16 opt_len  = rd16(opt + 2);
+                    if (opt_code == 0) break; /* opt_endofopt */
+                    quint32 padded = (opt_len + 3) & ~3u;
+                    if (remaining < (int)(4 + padded)) break;
+                    if (opt_code == 9 && opt_len == 1) {
+                        /* if_tsresol: bit7=0 → power of 10, bit7=1 → power of 2 */
+                        uchar resol = opt[4];
+                        if (resol & 0x80) {
+                            ts_divisor = (quint64)1 << (resol & 0x7F);
+                        } else {
+                            ts_divisor = 1;
+                            int exp = resol & 0x7F;
+                            for (int i = 0; i < exp; i++) ts_divisor *= 10;
+                        }
+                        if (ts_divisor == 0) ts_divisor = 1; /* guard */
+                    }
+                    opt       += 4 + padded;
+                    remaining -= (int)(4 + padded);
+                }
+            }
+            if (!f.seek(f.pos() + 4)) break; /* trailing block_total_length */
+
+        } else if (block_type == 0x00000006) {
+            /* Enhanced Packet Block:
+             * Interface ID(4) + Timestamp High(4) + Timestamp Low(4) +
+             * Captured Len(4) + Original Len(4) + packet data + options */
+            if (body_len < 20) { f.seek(f.pos() + body_len + 4); continue; }
+            QByteArray epb = f.read(20);
+            if (epb.size() < 20) break;
+            const uchar *b = (const uchar *)epb.constData();
+            quint32 ts_hi  = rd32(b + 4);
+            quint32 ts_lo  = rd32(b + 8);
+            quint64 ts64   = ((quint64)ts_hi << 32) | ts_lo;
+            quint32 ts_sec = (quint32)(ts64 / ts_divisor);
+
+            if (!found) { first = ts_sec; found = true; }
+            last = ts_sec;
+
+            /* skip remaining body bytes + trailing block_total_length */
+            if (!f.seek(f.pos() + (body_len - 20) + 4)) break;
+
+        } else {
+            /* All other block types — skip body + trailing length */
+            if (!f.seek(f.pos() + body_len + 4)) break;
+        }
+    }
+
+    if (!found) return false;
+    *startTime = first;
+    *stopTime  = last;
+    return true;
+}
+
+/* Read the first and last packet timestamps from a PCAP or pcapng file.
  * Returns true if at least one packet was found; sets *startTime and
- * *stopTime to Unix epoch seconds.  Works with both little-endian and
- * big-endian PCAP files.  pcapng (magic 0x0a0d0d0a) is not supported. */
+ * *stopTime to Unix epoch seconds.  Supports little-endian and big-endian
+ * classic PCAP as well as pcapng (magic 0x0a0d0d0a). */
 static bool pcap_read_timestamps(const QString &path,
                                  quint32 *startTime, quint32 *stopTime)
 {
@@ -3132,8 +3534,17 @@ static bool pcap_read_timestamps(const QString &path,
         swapped = false; /* little-endian PCAP (native on x86/arm) */
     } else if (magic == 0xd4c3b2a1 || magic == 0x4d3cb2a1) {
         swapped = true;  /* big-endian PCAP */
+    } else if (magic == 0x0a0d0d0a) {
+        /* pcapng — byte-order magic is at offset 8 within the SHB */
+        quint32 bom = (quint32)h[8] | ((quint32)h[9]<<8) |
+                      ((quint32)h[10]<<16) | ((quint32)h[11]<<24);
+        bool ng_swapped = (bom != 0x1a2b3c4d);
+        f.seek(0);
+        bool ok = pcapng_read_timestamps(f, ng_swapped, startTime, stopTime);
+        f.close();
+        return ok;
     } else {
-        f.close(); return false; /* unknown / pcapng */
+        f.close(); return false; /* unknown format */
     }
 
     auto le32 = [&](const uchar *p) -> quint32 {
@@ -3328,19 +3739,145 @@ void MainWindow::onSendToMalcolmClicked()
         if (host.isEmpty()) return;
     }
 
-    /* 5. Extract first/last packet timestamps for Arkime filter */
+    /* 5. Extract first/last packet timestamps for Arkime filter.
+     * Prefer the bridge function which reads from Wireshark's already-parsed
+     * frame_data (guaranteed correct for all formats).  Fall back to the
+     * file-based reader if the bridge is unavailable (e.g. cf already closed). */
     quint32 startTime = 0, stopTime = 0;
-    bool hasTimestamps = pcap_read_timestamps(capturePath, &startTime, &stopTime);
+    bool hasTimestamps = (bool)circle_vis_get_capture_time_range(&startTime, &stopTime);
+    if (!hasTimestamps)
+        hasTimestamps = pcap_read_timestamps(capturePath, &startTime, &stopTime);
     if (!hasTimestamps) {
         qDebug() << "[MALCOLM] Could not extract PCAP timestamps from" << capturePath;
         /* Continue without timestamps — Arkime will open without a time filter */
     }
 
-    /* 6. Disable button and start upload */
+    /* 6. File-size check — Malcolm's PHP stack has strict upload limits.
+     * The typical defaults are upload_max_filesize = 2 MB and
+     * post_max_size = 8 MB.  Warn the user and suggest reducing the capture
+     * before uploading rather than letting them wait only to receive a
+     * silent HTTP 500 from the server. */
+    {
+        const qint64 WARN_BYTES = 8LL * 1024 * 1024;   /* 8 MB — PHP post_max_size */
+        qint64 fileBytes = fi.size();
+        double fileMb    = fileBytes / (1024.0 * 1024.0);
+
+        if (fileBytes > WARN_BYTES) {
+            int answer = QMessageBox::warning(this, "Send to Malcolm — Large File",
+                QString(
+                    "The capture file is <b>%1 MB</b>, which typically exceeds "
+                    "Malcolm's PHP upload limit (8 MB by default).\n\n"
+                    "The upload will likely fail.  To reduce the file size:\n\n"
+                    "  1. Apply a Wireshark <b>display filter</b> to the packets you care about\n"
+                    "     (e.g.  ip.addr == 192.168.1.0/24  or  tcp.port == 443)\n\n"
+                    "  2. Go to  <b>File → Export Specified Packets</b>\n"
+                    "     • Choose \"Displayed\" to export only the filtered packets\n"
+                    "     • Save as a new .pcapng file\n\n"
+                    "  3. Re-open that smaller file in Wireshark and click Send to Malcolm again.\n\n"
+                    "Upload anyway?")
+                    .arg(fileMb, 0, 'f', 1),
+                QMessageBox::Yes | QMessageBox::No,
+                QMessageBox::No);
+
+            if (answer != QMessageBox::Yes)
+                return;
+        }
+    }
+
+    /* 7. Disable button and start upload */
     m_sendToMalcolmBtn->setEnabled(false);
     m_sendToMalcolmBtn->setText("Uploading...");
     uploadToMalcolm(capturePath, host, port, useHttps, username, password,
                     ignoreSsl, startTime, stopTime);
+}
+
+/* ── pcapng → pcap conversion helpers ───────────────────────────────────────
+ * Arkime's capture-offline uses libpcap which rejects pcapng files that
+ * contain multiple Interface Description Blocks (IDB) with different
+ * snapshot lengths — common in files produced by mergecap or by capturing
+ * on multiple interfaces simultaneously.  If editcap is available we convert
+ * to classic libpcap (pcap) format, which capture-offline handles reliably.
+ * ─────────────────────────────────────────────────────────────────────────── */
+
+static bool isPcapng(const QString &path)
+{
+    QFile f(path);
+    if (!f.open(QIODevice::ReadOnly)) return false;
+    QByteArray magic = f.read(4);
+    f.close();
+    /* pcapng Section Header Block magic: 0x0a0d0d0a */
+    return magic.size() == 4
+        && (unsigned char)magic[0] == 0x0a && (unsigned char)magic[1] == 0x0d
+        && (unsigned char)magic[2] == 0x0d && (unsigned char)magic[3] == 0x0a;
+}
+
+static QString findEditcap()
+{
+    QStringList candidates;
+#ifdef Q_OS_MAC
+    candidates << "/Applications/Wireshark.app/Contents/MacOS/editcap";
+#endif
+#ifdef Q_OS_WIN
+    candidates << "C:/Program Files/Wireshark/editcap.exe"
+               << "C:/Program Files (x86)/Wireshark/editcap.exe";
+#endif
+    candidates << "editcap";   /* PATH fallback — works on Linux and WS-in-PATH */
+
+    for (const QString &c : candidates) {
+        QFileInfo fi(c);
+        if (fi.isAbsolute()) {
+            if (fi.exists() && fi.isExecutable()) return c;
+        } else {
+            QProcess which;
+#ifdef Q_OS_WIN
+            which.start("where", {c});
+#else
+            which.start("which", {c});
+#endif
+            which.waitForFinished(2000);
+            if (which.exitCode() == 0)
+                return c;
+        }
+    }
+    return QString();
+}
+
+/* Convert pcapng to classic pcap in memory.  Returns converted bytes on
+ * success, or an empty QByteArray if conversion is not needed or failed. */
+static QByteArray pcapngToPcap(const QString &srcPath)
+{
+    if (!isPcapng(srcPath)) return QByteArray();
+
+    QString editcap = findEditcap();
+    if (editcap.isEmpty()) {
+        qDebug() << "[MALCOLM] pcapng detected but editcap not found — uploading as-is";
+        return QByteArray();
+    }
+
+    /* Write converted output to a temp file, then read it back */
+    QTemporaryFile tmp(QDir::tempPath() + "/PacketCircle_upload_XXXXXX.pcap");
+    tmp.setAutoRemove(false);   /* we delete manually after reading */
+    if (!tmp.open()) return QByteArray();
+    QString tmpPath = tmp.fileName();
+    tmp.close();                /* editcap opens the file itself */
+
+    QProcess proc;
+    proc.start(editcap, {"-F", "pcap", srcPath, tmpPath});
+    bool ok = proc.waitForFinished(30000) && proc.exitCode() == 0;
+
+    QByteArray data;
+    if (ok) {
+        QFile f(tmpPath);
+        if (f.open(QIODevice::ReadOnly)) {
+            data = f.readAll();
+            f.close();
+        }
+    } else {
+        qDebug() << "[MALCOLM] editcap conversion failed (exit" << proc.exitCode() << "):"
+                 << proc.readAllStandardError().trimmed();
+    }
+    QFile::remove(tmpPath);
+    return data;
 }
 
 void MainWindow::uploadToMalcolm(const QString &filePath,
@@ -3350,78 +3887,66 @@ void MainWindow::uploadToMalcolm(const QString &filePath,
                                   bool ignoreSslErrors,
                                   quint32 startTime, quint32 stopTime)
 {
-    QString scheme  = useHttps ? "https" : "http";
-    QString baseUrl = QString("%1://%2:%3").arg(scheme, host).arg(port);
+    /*
+     * Malcolm / Arkime uses the FilePond server-side PHP library for PCAP
+     * uploads.  FilePond is a TWO-STEP protocol:
+     *
+     *   Step 1 — POST binary file to /upload/server/php/index.php
+     *            Malcolm stores the file in a temp directory and returns a
+     *            plain-text SERVER TOKEN (the temp filename / file-id).
+     *
+     *   Step 2 — POST token string (NOT the binary) + metadata to
+     *            /upload/server/php/submit.php
+     *            Malcolm moves the file into its PCAP processing queue,
+     *            applies the tags, and Zeek/Suricata begin analysis.
+     *
+     * The previous implementation sent the binary file directly to submit.php.
+     * submit.php expected a short text token, not raw binary, so it silently
+     * discarded the payload — meaning the file was never actually queued for
+     * processing and no sessions appeared in Arkime.
+     */
 
-    /* Embed credentials in the URL — Qt QNAM reads user:pass@host and injects
-     * the Authorization header on every request including after redirects.
-     * This is the most reliable Basic Auth approach in Qt. */
-    QUrl uploadUrl;
-    uploadUrl.setScheme(scheme);
-    uploadUrl.setHost(host);
-    uploadUrl.setPort(port);
-    uploadUrl.setPath("/upload/server/php/submit.php");
-    uploadUrl.setUserName(username);
-    uploadUrl.setPassword(password);
-
-    /* baseUrl without credentials, used for error messages and Arkime URL */
+    QString scheme       = useHttps ? "https" : "http";
     QString baseUrlClean = QString("%1://%2:%3").arg(scheme, host).arg(port);
-
-    /* Read the capture file into memory */
-    QFile file(filePath);
-    if (!file.open(QIODevice::ReadOnly)) {
-        QMessageBox::warning(this, "Send to Malcolm",
-            QString("Cannot read capture file:\n%1").arg(filePath));
-        m_sendToMalcolmBtn->setEnabled(true);
-        m_sendToMalcolmBtn->setText("Send to Malcolm");
-        return;
-    }
-    QByteArray fileData = file.readAll();
-    file.close();
-
-    /* Build filename with datetime stamp */
-    QString safeFilename = QStringLiteral("PacketCircle-") +
-                           QDateTime::currentDateTime().toString("yyyyMMdd-HHmmss") +
-                           QStringLiteral(".pcap");
-
-    /* Build multipart body manually (avoid chunked transfer encoding) */
-    QByteArray boundary = "----MalcolmBoundary" +
-                          QByteArray::number(QDateTime::currentMSecsSinceEpoch());
-    QByteArray body;
-    /* tags field — labels all sessions from this upload in Arkime */
-    body += "--" + boundary + "\r\n";
-    body += "Content-Disposition: form-data; name=\"tags\"\r\n\r\nPacketCircle\r\n";
-    /* filepond file field */
-    body += "--" + boundary + "\r\n";
-    body += "Content-Disposition: form-data; name=\"filepond\"; filename=\""
-            + safeFilename.toUtf8() + "\"\r\n";
-    body += "Content-Type: application/vnd.tcpdump.pcap\r\n";
-    body += "\r\n";
-    body += fileData;
-    body += "\r\n--" + boundary + "--\r\n";
-
-    /* Build request — credentials are in the URL so QNAM handles auth natively.
-     * Also set a pre-emptive Authorization header to avoid the round-trip. */
-    QNetworkRequest request(uploadUrl);
     QByteArray credentials = (username + ":" + password).toUtf8().toBase64();
-    request.setRawHeader("Authorization", "Basic " + credentials);
-    request.setHeader(QNetworkRequest::ContentTypeHeader,
-        "multipart/form-data; boundary=" + boundary);
-    request.setHeader(QNetworkRequest::ContentLengthHeader, body.size());
-    request.setAttribute(QNetworkRequest::RedirectPolicyAttribute,
-                         QNetworkRequest::SameOriginRedirectPolicy);
 
-    /* SSL configuration */
+    /* Common SSL config shared across both requests */
     QSslConfiguration sslConf = QSslConfiguration::defaultConfiguration();
     sslConf.setProtocol(QSsl::TlsV1_2OrLater);
     if (ignoreSslErrors)
         sslConf.setPeerVerifyMode(QSslSocket::VerifyNone);
-    request.setSslConfiguration(sslConf);
+
+    /* Read the capture file — converting pcapng → classic pcap when possible.
+     * Arkime's capture-offline rejects pcapng files with multiple IDB blocks
+     * that have different snapshot lengths (e.g. mergecap output).  editcap
+     * -F pcap produces a single-interface libpcap file that always works. */
+    QByteArray fileData = pcapngToPcap(filePath);
+    if (fileData.isEmpty()) {
+        /* Not pcapng, or editcap unavailable — read file as-is */
+        QFile file(filePath);
+        if (!file.open(QIODevice::ReadOnly)) {
+            QMessageBox::warning(this, "Send to Malcolm",
+                QString("Cannot read capture file:\n%1").arg(filePath));
+            m_sendToMalcolmBtn->setEnabled(true);
+            m_sendToMalcolmBtn->setText("Send to Malcolm");
+            return;
+        }
+        fileData = file.readAll();
+        file.close();
+    } else {
+        qDebug() << "[MALCOLM] pcapng → pcap conversion: uploading" << fileData.size()
+                 << "bytes (converted from pcapng)";
+    }
+
+    /* Timestamped filename so each upload is unique in Malcolm */
+    QString safeFilename = QStringLiteral("PacketCircle-") +
+                           QDateTime::currentDateTime().toString("yyyyMMdd-HHmmss") +
+                           QStringLiteral(".pcap");
 
     if (!m_networkManager)
         m_networkManager = new QNetworkAccessManager(this);
 
-    /* Also wire authenticationRequired so Qt's challenge path works too */
+    /* Wire authenticationRequired for NTLM/Digest challenge path */
     auto authConn = std::make_shared<QMetaObject::Connection>();
     *authConn = connect(m_networkManager, &QNetworkAccessManager::authenticationRequired,
         this, [username, password, authConn](QNetworkReply*, QAuthenticator *auth) {
@@ -3430,85 +3955,209 @@ void MainWindow::uploadToMalcolm(const QString &filePath,
             QObject::disconnect(*authConn);
         });
 
-    qDebug() << "[MALCOLM] POST" << baseUrlClean + "/upload/server/php/submit.php"
-             << "| file:" << filePath
-             << "| user:" << username
-             << "| passEmpty:" << password.isEmpty()
+    /* ── Step 1: POST the PCAP binary to /upload/server/php/index.php ──────
+     * FilePond stores the file in a server-side temp directory and returns a
+     * plain-text token we must send in Step 2.
+     * -------------------------------------------------------------------- */
+    QUrl step1Url;
+    step1Url.setScheme(scheme);
+    step1Url.setHost(host);
+    step1Url.setPort(port);
+    step1Url.setPath("/upload/server/php/");
+
+    QByteArray boundary1 = "----MalcolmUploadBoundary" +
+                           QByteArray::number(QDateTime::currentMSecsSinceEpoch());
+    QByteArray step1Body;
+    step1Body += "--" + boundary1 + "\r\n";
+    step1Body += "Content-Disposition: form-data; name=\"filepond\"; filename=\""
+                 + safeFilename.toUtf8() + "\"\r\n";
+    step1Body += "Content-Type: application/vnd.tcpdump.pcap\r\n\r\n";
+    step1Body += fileData;
+    step1Body += "\r\n--" + boundary1 + "--\r\n";
+
+    QNetworkRequest req1(step1Url);
+    req1.setRawHeader("Authorization", "Basic " + credentials);
+    req1.setHeader(QNetworkRequest::ContentTypeHeader,
+                   "multipart/form-data; boundary=" + boundary1);
+    req1.setHeader(QNetworkRequest::ContentLengthHeader, step1Body.size());
+    req1.setAttribute(QNetworkRequest::RedirectPolicyAttribute,
+                      QNetworkRequest::SameOriginRedirectPolicy);
+    req1.setSslConfiguration(sslConf);
+
+    qDebug() << "[MALCOLM] Step 1: POST" << fileData.size() << "bytes to"
+             << baseUrlClean + "/upload/server/php/"
+             << "| file:" << filePath << "| user:" << username
              << "| ignoreSsl:" << ignoreSslErrors
              << "| startTime:" << startTime << "stopTime:" << stopTime;
 
-    QNetworkReply *reply = m_networkManager->post(request, body);
+    QNetworkReply *reply1 = m_networkManager->post(req1, step1Body);
 
     if (ignoreSslErrors)
-        reply->ignoreSslErrors();
+        reply1->ignoreSslErrors();
 
-    connect(reply, &QNetworkReply::sslErrors, reply,
+    connect(reply1, &QNetworkReply::sslErrors, reply1,
         [ignoreSslErrors](const QList<QSslError> &errors) {
-            qDebug() << "[MALCOLM] SSL errors"
+            qDebug() << "[MALCOLM] Step 1 SSL errors"
                      << (ignoreSslErrors ? "(ignored):" : "(NOT ignored):");
             for (const QSslError &e : errors)
                 qDebug() << "  " << e.errorString();
         });
 
-    connect(reply, &QNetworkReply::finished, this,
-        [this, reply, baseUrlClean, startTime, stopTime]() {
-        reply->deleteLater();
-        m_sendToMalcolmBtn->setEnabled(true);
-        m_sendToMalcolmBtn->setText("Send to Malcolm");
+    connect(reply1, &QNetworkReply::finished, this,
+        [this, reply1, scheme, host, port, baseUrlClean,
+         username, password, credentials, sslConf, ignoreSslErrors,
+         startTime, stopTime]() {
 
-        int httpStatus = reply->attribute(
-            QNetworkRequest::HttpStatusCodeAttribute).toInt();
-        QByteArray responseData = reply->readAll();
+        reply1->deleteLater();
 
-        qDebug() << "[MALCOLM] HTTP status:" << httpStatus;
-        qDebug() << "[MALCOLM] Network error:" << reply->error()
-                 << reply->errorString();
-        qDebug() << "[MALCOLM] Response body:" << responseData.left(500);
+        int status1        = reply1->attribute(QNetworkRequest::HttpStatusCodeAttribute).toInt();
+        QByteArray tokenRaw = reply1->readAll();
+        QString fileToken   = QString::fromUtf8(tokenRaw).trimmed();
 
-        if (reply->error() != QNetworkReply::NoError) {
+        qDebug() << "[MALCOLM] Step 1 HTTP status:" << status1;
+        qDebug() << "[MALCOLM] Step 1 token:" << fileToken.left(200);
+
+        if (reply1->error() != QNetworkReply::NoError || status1 < 200 || status1 >= 300) {
+            m_sendToMalcolmBtn->setEnabled(true);
+            m_sendToMalcolmBtn->setText("Send to Malcolm");
+            QString hint = (status1 == 500 || status1 == 413)
+                ? "\n\nHTTP 500/413 is usually caused by the capture file exceeding "
+                  "Malcolm's PHP upload limit (upload_max_filesize or post_max_size).\n"
+                  "Try reducing the file size:\n"
+                  "  • Apply a display filter, then File \u2192 Export Specified Packets\n"
+                  "  • Save as a smaller .pcapng and re-upload that file."
+                : "\n\nCheck host, port, and credentials in Settings \u2699.";
             QMessageBox::warning(this, "Send to Malcolm",
-                QString("Upload failed (HTTP %1):\n%2\n\nURL: %3\n\n"
-                        "Check host, port, and credentials in Settings \u2699.")
-                    .arg(httpStatus)
-                    .arg(reply->errorString())
-                    .arg(baseUrlClean + "/upload/server/php/submit.php"));
+                QString("File upload failed (HTTP %1):\n%2\n\n"
+                        "URL: %3/upload/server/php/%4")
+                    .arg(status1)
+                    .arg(reply1->errorString())
+                    .arg(baseUrlClean)
+                    .arg(hint));
             return;
         }
 
-        /* Success — open Arkime sessions view with time filter + PacketCircle tag */
-        QString arkimeUrl;
-        /* expression=tags==PacketCircle filters to sessions from this upload.
-         * Malcolm auto-tags based on filename components and the explicit tags
-         * field we posted, so "PacketCircle" will always be present. */
-        QString expr = QUrl::toPercentEncoding("tags==PacketCircle");
-        if (startTime > 0 && stopTime > 0) {
-            /* Add a 30-second buffer on each side to account for clock drift */
-            quint32 t0 = (startTime > 30) ? startTime - 30 : 0;
-            quint32 t1 = stopTime + 30;
-            arkimeUrl = QString("%1/arkime/sessions?startTime=%2&stopTime=%3&expression=%4")
-                            .arg(baseUrlClean).arg(t0).arg(t1).arg(expr);
-        } else {
-            arkimeUrl = QString("%1/arkime/sessions?expression=%2")
-                            .arg(baseUrlClean, expr);
+        if (fileToken.isEmpty()) {
+            m_sendToMalcolmBtn->setEnabled(true);
+            m_sendToMalcolmBtn->setText("Send to Malcolm");
+            QMessageBox::warning(this, "Send to Malcolm",
+                "Malcolm accepted the file but returned an empty token.\n\n"
+                "This usually means the file exceeded PHP's post_max_size limit (8 MB default).\n"
+                "Try reducing the file size:\n"
+                "  • Apply a display filter, then File \u2192 Export Specified Packets\n"
+                "  • Save as a smaller .pcapng and re-upload that file.");
+            return;
         }
 
-        qDebug() << "[MALCOLM] Upload succeeded. Opening Arkime:" << arkimeUrl;
+        /* ── Step 2: POST token + tags to /upload/server/php/submit.php ────
+         * The filepond field now carries the SERVER TOKEN (a short string),
+         * not the binary file.  This tells Malcolm's backend to move the
+         * already-stored temp file into the PCAP processing queue and apply
+         * the supplied tags so Arkime labels every session "PacketCircle".
+         * ---------------------------------------------------------------- */
+        QUrl step2Url;
+        step2Url.setScheme(scheme);
+        step2Url.setHost(host);
+        step2Url.setPort(port);
+        step2Url.setPath("/upload/server/php/submit.php");
 
-        QMessageBox::information(this, "Send to Malcolm",
-            QString("Upload complete!\n\n"
-                    "Opening Arkime sessions view%1.\n\n"
-                    "\u23f3  Malcolm processes uploaded PCAPs in the background \u2014 "
-                    "it may take a moment before sessions appear.\n"
-                    "If Arkime shows no results, wait a few seconds and reload the browser page.")
-                .arg(startTime > 0
-                     ? QString(" filtered to the capture time window (%1 \u2013 %2)")
-                           .arg(QDateTime::fromSecsSinceEpoch(startTime)
-                                    .toString("yyyy-MM-dd HH:mm:ss"))
-                           .arg(QDateTime::fromSecsSinceEpoch(stopTime)
-                                    .toString("HH:mm:ss"))
-                     : QString()));
+        QByteArray boundary2 = "----MalcolmSubmitBoundary" +
+                               QByteArray::number(QDateTime::currentMSecsSinceEpoch());
+        QByteArray step2Body;
+        /* tags metadata field — Arkime labels every session from this upload */
+        step2Body += "--" + boundary2 + "\r\n";
+        step2Body += "Content-Disposition: form-data; name=\"tags\"\r\n\r\nPacketCircle\r\n";
+        /* filepond[] token field — array notation required by FilePond PHP library.
+         * route_form_post() checks for filepond[] (TRANSFER_IDS) specifically;
+         * without the [] it finds no recognised payload type and falls through,
+         * returning the upload HTML page instead of processing the transfer. */
+        step2Body += "--" + boundary2 + "\r\n";
+        step2Body += "Content-Disposition: form-data; name=\"filepond[]\"\r\n\r\n";
+        step2Body += fileToken.toUtf8() + "\r\n";
+        step2Body += "--" + boundary2 + "--\r\n";
 
-        QDesktopServices::openUrl(QUrl(arkimeUrl));
+        QNetworkRequest req2(step2Url);
+        req2.setRawHeader("Authorization", "Basic " + credentials);
+        req2.setHeader(QNetworkRequest::ContentTypeHeader,
+                       "multipart/form-data; boundary=" + boundary2);
+        req2.setHeader(QNetworkRequest::ContentLengthHeader, step2Body.size());
+        req2.setAttribute(QNetworkRequest::RedirectPolicyAttribute,
+                          QNetworkRequest::SameOriginRedirectPolicy);
+        req2.setSslConfiguration(sslConf);
+
+        qDebug() << "[MALCOLM] Step 2: POST token+tags to"
+                 << baseUrlClean + "/upload/server/php/submit.php"
+                 << "| token:" << fileToken;
+
+        QNetworkReply *reply2 = m_networkManager->post(req2, step2Body);
+
+        if (ignoreSslErrors)
+            reply2->ignoreSslErrors();
+
+        connect(reply2, &QNetworkReply::sslErrors, reply2,
+            [ignoreSslErrors](const QList<QSslError> &errors) {
+                qDebug() << "[MALCOLM] Step 2 SSL errors"
+                         << (ignoreSslErrors ? "(ignored):" : "(NOT ignored):");
+                for (const QSslError &e : errors)
+                    qDebug() << "  " << e.errorString();
+            });
+
+        connect(reply2, &QNetworkReply::finished, this,
+            [this, reply2, baseUrlClean, startTime, stopTime]() {
+
+            reply2->deleteLater();
+            m_sendToMalcolmBtn->setEnabled(true);
+            m_sendToMalcolmBtn->setText("Send to Malcolm");
+
+            int status2           = reply2->attribute(QNetworkRequest::HttpStatusCodeAttribute).toInt();
+            QByteArray response2  = reply2->readAll();
+
+            qDebug() << "[MALCOLM] Step 2 HTTP status:" << status2;
+            qDebug() << "[MALCOLM] Step 2 response:" << response2.left(500);
+
+            if (reply2->error() != QNetworkReply::NoError) {
+                QMessageBox::warning(this, "Send to Malcolm",
+                    QString("Malcolm submission failed (HTTP %1):\n%2\n\n"
+                            "URL: %3/upload/server/php/submit.php\n\n"
+                            "Check host, port, and credentials in Settings \u2699.")
+                        .arg(status2)
+                        .arg(reply2->errorString())
+                        .arg(baseUrlClean));
+                return;
+            }
+
+            /* Build Arkime sessions URL with PacketCircle tag filter + time window */
+            QString expr = QUrl::toPercentEncoding("tags==PacketCircle");
+            QString arkimeUrl;
+            if (startTime > 0 && stopTime > 0) {
+                /* Add a 60-second buffer each side for processing lag */
+                quint32 t0 = (startTime > 60) ? startTime - 60 : 0;
+                quint32 t1 = stopTime + 60;
+                arkimeUrl = QString("%1/arkime/sessions?startTime=%2&stopTime=%3&expression=%4")
+                                .arg(baseUrlClean).arg(t0).arg(t1).arg(expr);
+            } else {
+                arkimeUrl = QString("%1/arkime/sessions?expression=%2")
+                                .arg(baseUrlClean, expr);
+            }
+
+            qDebug() << "[MALCOLM] Both steps complete. Opening Arkime:" << arkimeUrl;
+
+            QMessageBox::information(this, "Send to Malcolm",
+                QString("Upload complete!\n\n"
+                        "Opening Arkime sessions view%1.\n\n"
+                        "\u23f3  Malcolm processes uploaded PCAPs in the background \u2014 "
+                        "it may take a minute before sessions appear.\n"
+                        "If Arkime shows no results, wait ~60 seconds and reload the page.")
+                    .arg(startTime > 0
+                         ? QString(" filtered to the capture time window (%1 \u2013 %2)")
+                               .arg(QDateTime::fromSecsSinceEpoch(startTime)
+                                        .toString("yyyy-MM-dd HH:mm:ss"))
+                               .arg(QDateTime::fromSecsSinceEpoch(stopTime)
+                                        .toString("HH:mm:ss"))
+                         : QString()));
+
+            QDesktopServices::openUrl(QUrl(arkimeUrl));
+        });
     });
 }
 
@@ -6691,9 +7340,10 @@ void ConnectionPopup::showContextMenu(const QPoint &pos)
     }
     /* Light theme: no custom stylesheet — use native platform menu */
 
+    /* ── Wireshark section ── */
+    menu.addSection("Wireshark");
     QAction *filterAction     = menu.addAction("Apply Filter in Wireshark");
     QAction *followAction     = menu.addAction("Follow TCP Stream");
-    menu.addSeparator();
     QAction *throughputAction = menu.addAction("TCP Throughput Graph");
     QAction *rttAction        = menu.addAction("TCP Round-Trip Time Graph");
 
@@ -6709,10 +7359,10 @@ void ConnectionPopup::showContextMenu(const QPoint &pos)
         rttAction->setText("TCP Round-Trip Time Graph (TCP only)");
     }
 
-    /* ── Direct protocol info action for the clicked port ─────────────
-     * Map the row's port to the appropriate protocol info function.
-     * If the port matches a known protocol, a labelled action is added
-     * directly to the menu — no intermediate dialog needed.             */
+    /* ── PacketCircle section ── */
+    menu.addSection("PacketCircle");
+
+    /* Map the row's port to the appropriate protocol info function.     */
     struct ProtoMatch { int id; QString label; };
     auto matchProto = [&]() -> ProtoMatch {
         quint16 p  = rd.port;
@@ -6742,15 +7392,12 @@ void ConnectionPopup::showContextMenu(const QPoint &pos)
     };
     ProtoMatch pm = matchProto();
 
-    /* ── Application-layer protocol info (port-specific) ── */
+    /* Protocol info action (port-specific, optional) */
     QAction *protoDirectAction = nullptr;
-    if (pm.id > 0) {
-        menu.addSeparator();
+    if (pm.id > 0)
         protoDirectAction = menu.addAction(pm.label + " Protocol Information");
-    }
 
-    /* ── Generic TCP/UDP transport info (always available) ── */
-    menu.addSeparator();
+    /* Generic TCP/UDP transport info */
     QAction *tcpStatAction = nullptr;
     QAction *udpStatAction = nullptr;
     if (isTCP) {
@@ -6759,7 +7406,6 @@ void ConnectionPopup::showContextMenu(const QPoint &pos)
         udpStatAction = menu.addAction("UDP Transport Details\u2026");
     }
 
-    menu.addSeparator();
     QAction *supportedProtosAction = menu.addAction("Supported Protocols\u2026");
 
     /* Guard: prevent auto-close timer while QMenu::exec()'s event loop runs */
@@ -6811,6 +7457,59 @@ void ConnectionPopup::showContextMenu(const QPoint &pos)
         m_contextMenuActive = false;
         m_autoCloseTimer->start();
     }
+}
+
+/* ── triggerInfoForPort / triggerTransportDetails ──────────────────────────
+ * Called from the main-window table right-click menu to open a protocol info
+ * or transport-details dialog directly, without ever showing this popup.
+ *
+ * The popup is constructed by the caller but kept hidden; hide() is therefore
+ * a no-op and deleteLater() performs safe deferred cleanup after the dialog
+ * returns from its exec() call.                                              */
+void ConnectionPopup::triggerInfoForPort(quint16 port, int protoId)
+{
+    /* Find the m_rowData row whose port matches, then dispatch */
+    for (int i = 0; i < m_rowData.size(); i++) {
+        if (m_rowData[i].port != port) continue;
+        switch (protoId) {
+            case  1: showTlsInfoForRow(i);      return;
+            case  2: showHttpInfoForRow(i);     return;
+            case  3: showSmbInfoForRow(i);      return;
+            case  4: showKerberosInfoForRow(i); return;
+            case  5: showEmailInfoForRow(i);    return;
+            case  6: showSqlInfoForRow(i);      return;
+            case  7: showVoipInfoForRow(i);     return;
+            case  8: showDhcpInfoForRow(i);     return;
+            case  9: showDnsInfoForRow(i);      return;
+            case 10: showLdapInfoForRow(i);     return;
+            case 11: showSnmpInfoForRow(i);     return;
+            case 12: showSyslogInfoForRow(i);   return;
+            case 13: showSshInfoForRow(i);      return;
+            case 14: showFtpInfoForRow(i);      return;
+            case 15: showTelnetInfoForRow(i);   return;
+            case 16: showNbnsInfoForRow(i);     return;
+            case 17: showNbdgmInfoForRow(i);    return;
+            case 18: showNbssInfoForRow(i);     return;
+            default: break;
+        }
+        return;
+    }
+    /* Port not found (can happen if capture has no traffic on that port yet) */
+    deleteLater();
+}
+
+void ConnectionPopup::triggerTransportDetails(bool forTcp)
+{
+    for (int i = 0; i < m_rowData.size(); i++) {
+        if (forTcp && m_rowData[i].isTcp) {
+            showTcpStatInfoForRow(i);
+            return;
+        } else if (!forTcp && m_rowData[i].isUdp) {
+            showUdpStatInfoForRow(i);
+            return;
+        }
+    }
+    deleteLater();
 }
 
 /* ── Protocol Information Browser ──────────────────────────────────────────

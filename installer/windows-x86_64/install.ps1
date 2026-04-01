@@ -3,7 +3,7 @@
 # =============================================================================
 #
 # Supports:
-#   - Installing v.0.3.2 or v.0.4.6 (default: latest)
+#   - Installing v.0.3.2 or v.0.4.7 (default: latest)
 #   - Detecting an already-installed version
 #   - Upgrading, downgrading, and uninstalling
 #
@@ -25,7 +25,7 @@ Write-Host ""
 Write-Host "===========================================================" -ForegroundColor Cyan
 Write-Host "      PacketCircle Installer for Windows                   " -ForegroundColor Cyan
 Write-Host "      x86_64 (64-bit Intel/AMD)                            " -ForegroundColor Cyan
-Write-Host "      Available: v.0.3.2, v.0.4.6 (latest)               " -ForegroundColor Cyan
+Write-Host "      Available: v.0.3.2, v.0.4.7 (latest)                " -ForegroundColor Cyan
 Write-Host "===========================================================" -ForegroundColor Cyan
 Write-Host ""
 
@@ -88,7 +88,7 @@ if ($vcFound) {
 Write-Host ""
 Write-Host "  Plugin binaries in this installer:"
 $binariesOk = $true
-foreach ($ver in @("v.0.3.2", "v.0.4.6")) {
+foreach ($ver in @("v.0.3.2", "v.0.4.7")) {
     $path = Join-Path $ScriptDir "$ver\$PluginName"
     if (Test-Path $path) {
         $sz = [math]::Round((Get-Item $path).Length / 1KB)
@@ -268,7 +268,7 @@ if ($vcFound) { Write-Host "OK ($vcVersion)" -ForegroundColor Green } else { Wri
 Write-Host "  Wireshark       : " -NoNewline
 if ($WiresharkPath) { Write-Host "Found at $WiresharkPath" -ForegroundColor Green } else { Write-Host "Not found in standard locations" -ForegroundColor Yellow }
 Write-Host "  Wireshark ver   : " -NoNewline; Write-Host "$WsVersion  (plugin API: $PluginPathId)" -ForegroundColor Cyan
-Write-Host "  Plugin binaries : OK (v.0.3.2, v.0.4.6)"
+Write-Host "  Plugin binaries : v.0.3.2, v.0.4.7"
 Write-Host "  Installed now   : " -NoNewline
 if ($InstalledVersion) { Write-Host "v.$InstalledVersion  at $InstalledPath" -ForegroundColor Cyan } else { Write-Host "None" -ForegroundColor DarkGray }
 Write-Host "-----------------------------------------------------------" -ForegroundColor DarkGray
@@ -313,14 +313,14 @@ Write-Host ""
 Write-Host "Select version to install:"
 Write-Host ""
 
-if ($InstalledVersion -eq "0.4.6") {
-    Write-Host "  1) v.0.4.6 (latest)   - already installed, reinstall" -ForegroundColor Green
+if ($InstalledVersion -eq "0.4.7") {
+    Write-Host "  1) v.0.4.7 (latest)   - already installed, reinstall" -ForegroundColor Green
     Write-Host "  2) v.0.3.2             - downgrade (legacy)"           -ForegroundColor Yellow
 } elseif ($InstalledVersion -eq "0.3.2") {
-    Write-Host "  1) v.0.4.6 (latest)   - upgrade (recommended)"         -ForegroundColor Green
+    Write-Host "  1) v.0.4.7 (latest)   - upgrade (recommended)"         -ForegroundColor Green
     Write-Host "  2) v.0.3.2             - already installed, reinstall"  -ForegroundColor Yellow
 } else {
-    Write-Host "  1) v.0.4.6 (latest)   - protocol info dialogs, ntopng & Malcolm/Arkime integrations, settings menu" -ForegroundColor Green
+    Write-Host "  1) v.0.4.7 (latest)   - table view interactivity, improved Malcolm/Arkime time window" -ForegroundColor Green
     Write-Host "  2) v.0.3.2             - TCP stream stats, Select Results, theme-aware UI" -ForegroundColor Yellow
 }
 
@@ -329,7 +329,7 @@ $verChoice = Read-Host "Choice [1]"
 if (-not $verChoice) { $verChoice = "1" }
 
 switch ($verChoice) {
-    "1" { $SelectedVersion = "0.4.6" }
+    "1" { $SelectedVersion = "0.4.7" }
     "2" { $SelectedVersion = "0.3.2" }
     default {
         Write-Host "Invalid choice." -ForegroundColor Red

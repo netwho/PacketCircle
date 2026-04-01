@@ -27,6 +27,7 @@
 #include <QDebug>
 #include <wsutil/wslog.h>
 #include <epan/plugin_if.h>
+#include <epan/frame_data.h>
 #include <cfile.h>
 
 #define WS_LOG_DOMAIN "circle_vis"
@@ -198,6 +199,23 @@ const char *circle_vis_get_capture_filename(void)
     if (cf && cf->filename)
         return g_strdup(cf->filename);
     return NULL;
+}
+
+int circle_vis_get_capture_time_range(unsigned int *start_sec, unsigned int *stop_sec)
+{
+    capture_file *cf = (capture_file *)plugin_if_get_capture_file(extract_capture_file, NULL);
+    if (!cf || cf->count == 0 || !cf->provider.frames)
+        return 0;
+
+    frame_data *first = frame_data_sequence_find(cf->provider.frames, 1);
+    if (!first)
+        return 0;
+
+    frame_data *last = frame_data_sequence_find(cf->provider.frames, cf->count);
+
+    if (start_sec) *start_sec = (unsigned int)first->abs_ts.secs;
+    if (stop_sec)  *stop_sec  = (unsigned int)(last ? last->abs_ts.secs : first->abs_ts.secs);
+    return 1;
 }
 
 #ifdef __cplusplus

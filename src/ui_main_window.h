@@ -72,6 +72,11 @@ public:
     ConnectionPopup(comm_pair_t *pair, comm_pair_t *reversePair, gboolean useMAC, QWidget *parent = nullptr);
     ~ConnectionPopup();
 
+    /* Called from the table view right-click menu to open a protocol info
+     * dialog directly without first displaying the popup window itself.   */
+    void triggerInfoForPort(quint16 port, int protoId);
+    void triggerTransportDetails(bool forTcp);
+
 protected:
     void enterEvent(QEnterEvent *event) override;
     void leaveEvent(QEvent *event) override;
@@ -203,6 +208,8 @@ public slots:
     void onSendToMalcolmClicked();
     void onLineClicked(comm_pair_t *pair, const QPoint &globalPos);
     void onPairListBlinkTimer();
+    void onTableCellClicked(int row, int col);
+    void onTableContextMenu(const QPoint &pos);
 
 protected:
     void resizeEvent(QResizeEvent *event) override;

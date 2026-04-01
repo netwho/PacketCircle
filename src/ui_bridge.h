@@ -42,6 +42,11 @@ void circle_vis_pump_events(void);
  * Caller must g_free() the returned string. */
 const char *circle_vis_get_capture_filename(void);
 
+/* Get first/last packet timestamps from Wireshark's parsed frame data.
+ * Returns non-zero if at least one packet exists; sets *start_sec and
+ * *stop_sec to Unix epoch seconds (as parsed by Wireshark itself). */
+int circle_vis_get_capture_time_range(unsigned int *start_sec, unsigned int *stop_sec);
+
 #ifdef __cplusplus
 }
 #endif

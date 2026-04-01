@@ -4,7 +4,7 @@
 # =============================================================================
 #
 # Supports:
-#   - Installing v.0.4.6 (latest) or v.0.3.2 (legacy)
+#   - Installing v.0.4.7 (latest) or v.0.3.2 (legacy)
 #   - Detecting an already-installed version
 #   - Upgrading, downgrading, and uninstalling
 #   - Auto-detecting Wireshark version (4.0.x, 4.2.x, 4.4.x, 4.6.x)
@@ -13,7 +13,7 @@
 #   ~/.local/lib/wireshark/plugins/<version>/epan/
 #
 # Binaries are in version subdirectories next to this script:
-#   v.0.4.6/packetcircle-wsNN.so   (ws40, ws42, ws44, ws46)
+#   v.0.4.7/packetcircle-wsNN.so   (ws40, ws42, ws44, ws46)
 #   v.0.3.2/packetcircle-wsNN.so   (ws42, ws44, ws46)
 #
 # Usage:
@@ -38,7 +38,7 @@ printf "${BLUE}╔════════════════════�
 printf "${BLUE}║   PacketCircle Installer for Linux               ║${NC}\n"
 printf "${BLUE}║   x86_64 (64-bit Intel/AMD)                      ║${NC}\n"
 printf "${BLUE}║   Supports Wireshark 4.0.x, 4.2.x, 4.4.x, 4.6.x  ║${NC}\n"
-printf "${BLUE}║   Available: v.0.4.6 (latest), v.0.3.2 (legacy)  ║${NC}\n"
+printf "${BLUE}║   Available: v.0.4.7 (latest), v.0.3.2 (legacy)  ║${NC}\n"
 printf "${BLUE}╚══════════════════════════════════════════════════╝${NC}\n"
 printf "\n"
 
@@ -57,18 +57,18 @@ fi
 printf "Checking prerequisites...\n\n"
 
 # --- Verify which plugin binaries are present ---
-# v.0.3.2 supports ws42/ws44/ws46; v.0.4.6 adds ws40.
-# v.0.4.6 Linux binaries may not be built yet — report availability without failing.
+# v.0.3.2 supports ws42/ws44/ws46; v.0.4.7 adds ws40.
+# v.0.4.7 Linux binaries may not be built yet — report availability without failing.
 printf "  Plugin binaries in this installer:\n"
 
 V046_OK=1
 for ws in ws40 ws42 ws44 ws46; do
-    f="$SCRIPT_DIR/v.0.4.6/packetcircle-${ws}.so"
+    f="$SCRIPT_DIR/v.0.4.7/packetcircle-${ws}.so"
     if [ -f "$f" ]; then
         sz=$(ls -lh "$f" | awk '{print $5}')
-        printf "    ${GREEN}[FOUND]${NC}   v.0.4.6/packetcircle-%s.so  (%s)\n" "$ws" "$sz"
+        printf "    ${GREEN}[FOUND]${NC}   v.0.4.7/packetcircle-%s.so  (%s)\n" "$ws" "$sz"
     else
-        printf "    ${GRAY}[missing]${NC} v.0.4.6/packetcircle-%s.so\n" "$ws"
+        printf "    ${GRAY}[missing]${NC} v.0.4.7/packetcircle-%s.so\n" "$ws"
         V046_OK=0
     fi
 done
@@ -92,8 +92,8 @@ if [ "$V046_OK" = "0" ] && [ "$V032_OK" = "0" ]; then
 fi
 
 if [ "$V046_OK" = "0" ]; then
-    printf "\n  ${YELLOW}Note: v.0.4.6 Linux binaries are not yet included in this release.${NC}\n"
-    printf "  ${YELLOW}      v.0.3.2 will be installed. Update when v.0.4.6 binaries are available.${NC}\n"
+    printf "\n  ${YELLOW}Note: v.0.4.7 Linux binaries are not yet included in this release.${NC}\n"
+    printf "  ${YELLOW}      v.0.3.2 will be installed. Update when v.0.4.7 binaries are available.${NC}\n"
 fi
 
 # --- Detect Wireshark version ---
@@ -279,7 +279,7 @@ printf "  Prerequisites Summary\n"
 printf "%s\n" "$SEP"
 printf "  Wireshark       : %s.%s  (plugin API dir: %s)\n" "$WS_MAJOR" "$WS_MINOR" "$PLUGIN_PATH_ID"
 printf "  Binary tag      : %s  (%s)\n" "$SELECTED_WS_TAG" "$SELECTED_WS_LABEL"
-printf "  v.0.4.6 binaries: "
+printf "  v.0.4.7 binaries: "
 if [ "$V046_OK" = "1" ]; then printf "${GREEN}all present${NC}\n"; else printf "${YELLOW}not yet built for Linux${NC}\n"; fi
 printf "  v.0.3.2 binaries: "
 if [ "$V032_OK" = "1" ]; then printf "${GREEN}all present${NC}\n"; else printf "${RED}missing${NC}\n"; fi
@@ -342,41 +342,41 @@ esac
 # --- Version selection ---
 printf "\nSelect version to install:\n\n"
 
-# ws40 only exists in v.0.4.6
+# ws40 only exists in v.0.4.7
 if [ "$SELECTED_WS_TAG" = "ws40" ]; then
     if [ "$V046_OK" = "1" ]; then
-        printf "  ${GREEN}1${NC}) v.0.4.6 (latest)  — the only version with Wireshark 4.0.x support\n"
+        printf "  ${GREEN}1${NC}) v.0.4.7 (latest)  — the only version with Wireshark 4.0.x support\n"
         printf "\nChoice [1]: "
         read -r VER_CHOICE
         VER_CHOICE=${VER_CHOICE:-1}
         case "$VER_CHOICE" in
-            1) SELECTED_VERSION="0.4.6" ;;
+            1) SELECTED_VERSION="0.4.7" ;;
             *) printf "Invalid choice. Exiting.\n"; exit 1 ;;
         esac
     else
-        printf "  ${RED}v.0.4.6 is not yet available for Linux and is required for Wireshark 4.0.x.${NC}\n"
-        printf "  ${YELLOW}Please check back once v.0.4.6 Linux binaries are released.${NC}\n\n"
+        printf "  ${RED}v.0.4.7 is not yet available for Linux and is required for Wireshark 4.0.x.${NC}\n"
+        printf "  ${YELLOW}Please check back once v.0.4.7 Linux binaries are released.${NC}\n\n"
         exit 1
     fi
 else
-    # v.0.4.6 is strongly recommended; v.0.3.2 is legacy
-    printf "  ${GREEN}★ RECOMMENDED: use v.0.4.6 unless you have a specific reason to stay on v.0.3.2${NC}\n\n"
+    # v.0.4.7 is strongly recommended; v.0.3.2 is legacy
+    printf "  ${GREEN}★ RECOMMENDED: use v.0.4.7 unless you have a specific reason to stay on v.0.3.2${NC}\n\n"
 
     if [ "$V046_OK" = "1" ]; then
-        if [ "$INSTALLED_VERSION" = "0.4.6" ]; then
-            printf "  ${GREEN}1${NC}) v.0.4.6 (latest)   — already installed, reinstall\n"
+        if [ "$INSTALLED_VERSION" = "0.4.7" ]; then
+            printf "  ${GREEN}1${NC}) v.0.4.7 (latest)   — already installed, reinstall\n"
         elif [ "$INSTALLED_VERSION" = "0.3.2" ]; then
-            printf "  ${GREEN}1${NC}) v.0.4.6 (latest)   — upgrade (recommended)\n"
+            printf "  ${GREEN}1${NC}) v.0.4.7 (latest)   — upgrade (recommended)\n"
         else
-            printf "  ${GREEN}1${NC}) v.0.4.6 (latest)   — protocol info dialogs, ntopng & Malcolm/Arkime integrations, settings menu\n"
+            printf "  ${GREEN}1${NC}) v.0.4.7 (latest)   — table view interactivity, improved Malcolm/Arkime time window\n"
         fi
     else
-        printf "  ${YELLOW}1${NC}) v.0.4.6             — ${YELLOW}not yet available for Linux (binaries pending build)${NC}\n"
+        printf "  ${YELLOW}1${NC}) v.0.4.7             — ${YELLOW}not yet available for Linux (binaries pending build)${NC}\n"
     fi
 
     if [ "$INSTALLED_VERSION" = "0.3.2" ]; then
         printf "  ${YELLOW}2${NC}) v.0.3.2 (legacy)    — already installed, reinstall\n"
-    elif [ "$INSTALLED_VERSION" = "0.4.6" ]; then
+    elif [ "$INSTALLED_VERSION" = "0.4.7" ]; then
         printf "  ${YELLOW}2${NC}) v.0.3.2 (legacy)    — downgrade; only if you have a specific compatibility reason\n"
     else
         printf "  ${YELLOW}2${NC}) v.0.3.2 (legacy)    — TCP stream stats, Select Results, theme-aware UI\n"
@@ -390,12 +390,12 @@ else
     case "$VER_CHOICE" in
         1)
             if [ "$V046_OK" = "0" ]; then
-                printf "\n${RED}v.0.4.6 Linux binaries are not yet available in this installer.${NC}\n"
-                printf "${YELLOW}Please download the latest installer once v.0.4.6 binaries are released,${NC}\n"
+                printf "\n${RED}v.0.4.7 Linux binaries are not yet available in this installer.${NC}\n"
+                printf "${YELLOW}Please download the latest installer once v.0.4.7 binaries are released,${NC}\n"
                 printf "${YELLOW}or install v.0.3.2 in the meantime.${NC}\n\n"
                 exit 1
             fi
-            SELECTED_VERSION="0.4.6"
+            SELECTED_VERSION="0.4.7"
             ;;
         2)
             if [ "$V032_OK" = "0" ]; then
@@ -404,7 +404,7 @@ else
             SELECTED_VERSION="0.3.2"
             if [ "$VER_CHOICE" = "2" ] && [ "$INSTALLED_VERSION" != "0.3.2" ]; then
                 printf "\n  ${YELLOW}You chose v.0.3.2. This is a legacy release.${NC}\n"
-                printf "  ${YELLOW}Use v.0.4.6 unless you specifically need v.0.3.2 compatibility.${NC}\n"
+                printf "  ${YELLOW}Use v.0.4.7 unless you specifically need v.0.3.2 compatibility.${NC}\n"
                 printf "  Continue with v.0.3.2? [y/N]: "
                 read -r CONFIRM_LEGACY
                 if [ "$CONFIRM_LEGACY" != "y" ] && [ "$CONFIRM_LEGACY" != "Y" ]; then

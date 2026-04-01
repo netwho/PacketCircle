@@ -4,7 +4,7 @@
   <img src="PacketCircle.png" alt="PacketCircle Logo" width="128">
 </p>
 
-[![Version](https://img.shields.io/badge/version-0.4.6-blue.svg)](CHANGELOG.md)
+[![Version](https://img.shields.io/badge/version-0.4.7-blue.svg)](CHANGELOG.md)
 [![Status](https://img.shields.io/badge/status-public%20beta-orange.svg)](CHANGELOG.md)
 [![License: GPL v2](https://img.shields.io/badge/License-GPL%20v2-blue.svg)](LICENSE)
 [![Wireshark](https://img.shields.io/badge/Wireshark-4.0.x%20%7C%204.2.x%20%7C%204.4.x%20%7C%204.6.x-1679A7.svg)](https://www.wireshark.org/)
@@ -15,7 +15,7 @@
 
 **A native Wireshark plugin that turns packet captures into interactive circle diagrams** — with protocol color coding, deep protocol inspection, traffic volume indicators, and PDF report export.
 
-> **Beta Status**: v0.4.6, fully functional, actively developed. Report issues via [GitHub Issues](https://github.com/netwho/PacketCircle/issues).
+> **Beta Status**: v0.4.7, fully functional, actively developed. Report issues via [GitHub Issues](https://github.com/netwho/PacketCircle/issues).
 
 ---
 

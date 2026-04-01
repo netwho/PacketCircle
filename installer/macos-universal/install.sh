@@ -4,7 +4,7 @@
 # =============================================================================
 #
 # Supports:
-#   - Installing v.0.3.2 or v.0.4.6 (default: latest)
+#   - Installing v.0.3.2 or v.0.4.7 (default: latest)
 #   - Detecting an already-installed version
 #   - Upgrading, downgrading, and uninstalling
 #
@@ -34,7 +34,7 @@ printf "\n"
 printf "${BLUE}╔══════════════════════════════════════════════════╗${NC}\n"
 printf "${BLUE}║   PacketCircle Installer for macOS               ║${NC}\n"
 printf "${BLUE}║   Universal Binary (Intel + Apple Silicon)       ║${NC}\n"
-printf "${BLUE}║   Available: v.0.3.2, v.0.4.6 (latest)           ║${NC}\n"
+printf "${BLUE}║   Available: v.0.3.2, v.0.4.7 (latest)           ║${NC}\n"
 printf "${BLUE}╚══════════════════════════════════════════════════╝${NC}\n"
 printf "\n"
 
@@ -207,14 +207,14 @@ printf "\n"
 printf "Select version to install:\n"
 printf "\n"
 
-if [ "$INSTALLED_VERSION" = "0.4.6" ]; then
-    printf "  ${GREEN}1${NC}) v.0.4.6 (latest)   — already installed, reinstall\n"
+if [ "$INSTALLED_VERSION" = "0.4.7" ]; then
+    printf "  ${GREEN}1${NC}) v.0.4.7 (latest)   — already installed, reinstall\n"
     printf "  ${YELLOW}2${NC}) v.0.3.2             — downgrade (legacy)\n"
 elif [ "$INSTALLED_VERSION" = "0.3.2" ]; then
-    printf "  ${GREEN}1${NC}) v.0.4.6 (latest)   — upgrade (recommended)\n"
+    printf "  ${GREEN}1${NC}) v.0.4.7 (latest)   — upgrade (recommended)\n"
     printf "  ${YELLOW}2${NC}) v.0.3.2             — already installed, reinstall\n"
 else
-    printf "  ${GREEN}1${NC}) v.0.4.6 (latest)   — protocol info dialogs, ntopng & Malcolm/Arkime integrations, settings menu\n"
+    printf "  ${GREEN}1${NC}) v.0.4.7 (latest)   — table view interactivity, improved Malcolm/Arkime time window\n"
     printf "  ${YELLOW}2${NC}) v.0.3.2             — TCP stream stats, Select Results, theme-aware UI\n"
 fi
 
@@ -224,7 +224,7 @@ read -r VER_CHOICE
 VER_CHOICE=${VER_CHOICE:-1}
 
 case "$VER_CHOICE" in
-    1) SELECTED_VERSION="0.4.6" ;;
+    1) SELECTED_VERSION="0.4.7" ;;
     2) SELECTED_VERSION="0.3.2" ;;
     *) printf "Invalid choice. Exiting.\n"; exit 1 ;;
 esac
@@ -242,7 +242,7 @@ printf "  Architecture: "
 file "$PLUGIN_FILE" | grep -o "universal binary.*" || file "$PLUGIN_FILE" | grep -o "Mach-O.*"
 
 # --- Version compatibility check ---
-# v.0.4.6 is built against Wireshark 4.6.x; v.0.3.2 is also 4.6.x.
+# v.0.4.7 is built against Wireshark 4.6.x; v.0.3.2 is also 4.6.x.
 # Warn if the installed Wireshark is not 4.6.x.
 if [ "$WS_MAJOR" != "4" ] || [ "$WS_MINOR" != "6" ]; then
     printf "\n${YELLOW}Warning: This installer contains binaries built against Wireshark 4.6.x.${NC}\n"
