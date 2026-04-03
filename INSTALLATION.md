@@ -42,11 +42,11 @@ The `installer/` directory is included in the repository at the root level.
 
 ## Which Version to Install?
 
-The installer offers **v.0.4.6** (latest) and **v.0.3.2** (legacy). **Always choose v.0.4.6** unless you have a specific reason to stay on v.0.3.2.
+The installer offers **v.0.4.7** (latest) and **v.0.3.2** (legacy). **Always choose v.0.4.7** unless you have a specific reason to stay on v.0.3.2.
 
 | Version | Highlights |
 |---|---|
-| **v.0.4.6** (recommended) | 20+ protocol info dialogs, ntopng & Malcolm/Arkime integration, settings menu, TCP/UDP transport details |
+| **v.0.4.7** (recommended) | 20+ protocol info dialogs, ntopng & Malcolm/Arkime integration, settings menu, TCP/UDP transport details, Connection Details popup & context menu |
 | **v.0.3.2** (legacy) | TCP stream stats, Select Results, theme-aware UI |
 
 You can switch versions at any time by re-running the installer.
@@ -78,8 +78,8 @@ Find your exact plugin path in Wireshark under **Help → About Wireshark → Fo
 # Create the plugin directory (macOS uses dashes: 4-6)
 mkdir -p ~/.local/lib/wireshark/plugins/4-6/epan/
 
-# Install v.0.4.6 (latest):
-cp installer/macos-universal/v.0.4.6/packetcircle.so \
+# Install v.0.4.7 (latest):
+cp installer/macos-universal/v.0.4.7/packetcircle.so \
    ~/.local/lib/wireshark/plugins/4-6/epan/packetcircle.so
 
 # Or install v.0.3.2 (legacy):
@@ -108,7 +108,7 @@ The installer:
 - Searches for the correct plugin directory (dots vs dashes)
 - Checks Qt6 runtime availability and offers to install it if missing
 - Pauses for you to review the prerequisites summary before proceeding
-- Recommends v.0.4.6 and warns if you select v.0.3.2
+- Recommends v.0.4.7 and warns if you select v.0.3.2
 
 > **Note:** Run with `bash install.sh` or `chmod +x install.sh && ./install.sh`. Do not use `sh install.sh` — the script requires bash.
 
@@ -133,20 +133,20 @@ sudo zypper install libQt6Widgets6       # openSUSE
 #   packetcircle-ws46.so  →  Wireshark 4.6.x
 # (v.0.3.2 has ws42/ws44/ws46 only — no 4.0.x support)
 
-# Example: Wireshark 4.6.x, v.0.4.6:
+# Example: Wireshark 4.6.x, v.0.4.7:
 mkdir -p ~/.local/lib/wireshark/plugins/4.6/epan/
-cp installer/linux-x86_64/v.0.4.6/packetcircle-ws46.so \
+cp installer/linux-x86_64/v.0.4.7/packetcircle-ws46.so \
    ~/.local/lib/wireshark/plugins/4.6/epan/packetcircle.so
 
-# Example: Wireshark 4.2.x, v.0.4.6:
+# Example: Wireshark 4.2.x, v.0.4.7:
 mkdir -p ~/.local/lib/wireshark/plugins/4.2/epan/
-cp installer/linux-x86_64/v.0.4.6/packetcircle-ws42.so \
+cp installer/linux-x86_64/v.0.4.7/packetcircle-ws42.so \
    ~/.local/lib/wireshark/plugins/4.2/epan/packetcircle.so
 ```
 
 ### Supported Wireshark × Plugin Version Matrix (Linux)
 
-| Wireshark | v.0.4.6 binary | v.0.3.2 binary |
+| Wireshark | v.0.4.7 binary | v.0.3.2 binary |
 |---|---|---|
 | 4.0.x | `packetcircle-ws40.so` | — (not supported) |
 | 4.2.x | `packetcircle-ws42.so` | `packetcircle-ws42.so` |
@@ -177,7 +177,7 @@ The installer:
 - Shows which plugin binaries are present (with file sizes)
 - Detects any existing PacketCircle installation and its version
 - Prints a prerequisites summary before prompting
-- Recommends v.0.4.6; warns if you choose v.0.3.2
+- Recommends v.0.4.7; warns if you choose v.0.3.2
 
 <details>
 <summary>Run the PowerShell script directly</summary>
@@ -198,8 +198,8 @@ Set-ExecutionPolicy -Scope CurrentUser -ExecutionPolicy RemoteSigned
 ```powershell
 # Check your exact path: Help → About Wireshark → Folders → Personal Plugins
 
-# Install v.0.4.6 (latest):
-Copy-Item installer\windows-x86_64\v.0.4.6\packetcircle.dll `
+# Install v.0.4.7 (latest):
+Copy-Item installer\windows-x86_64\v.0.4.7\packetcircle.dll `
           "$env:APPDATA\Wireshark\plugins\4.6\epan\"
 
 # Or install v.0.3.2 (legacy):
@@ -246,11 +246,11 @@ For unsupported platforms or Wireshark versions, or to develop PacketCircle itse
 - GLib 2.54+
 - C/C++ compiler (Clang recommended on macOS)
 
-> **Critical:** Do not use Homebrew's `qt@6` — even a minor version mismatch causes ABI errors at runtime. Use `aqtinstall` to get the exact matching version. See `src/v.0.4.6/BUILD.md`.
+> **Critical:** Do not use Homebrew's `qt@6` — even a minor version mismatch causes ABI errors at runtime. Use `aqtinstall` to get the exact matching version. See `tools/build-tools/BUILD-MACOS-HOST.md`.
 
 ```bash
 # Place src/ contents into the Wireshark plugin directory
-cp -r src/v.0.4.6/* /path/to/wireshark-source/plugins/epan/packetcircle/
+cp -r src/v.0.4.7/* /path/to/wireshark-source/plugins/epan/packetcircle/
 
 cd /path/to/wireshark-source
 mkdir build && cd build
