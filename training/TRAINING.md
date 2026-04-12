@@ -6,7 +6,7 @@ This repository contains the training material for the **PacketCircle Quickstart
 
 ## Training Video
 
-▶️ **[Watch on YouTube](https://www.youtube.com/watch?v=YOUR_LINK_HERE)**
+▶️ **[Watch on YouTube](https://youtu.be/f1wBlKo-7nI)**
 
 **Duration:** ~51 minutes
 
@@ -104,6 +104,6 @@ If you are a trainer, educator, or consultant and want to use this material in y
 
 ## About the Author
 
-Walter H. is a network security practitioner, educator, and open-source developer. He has presented at SharkFest and teaches hands-on Wireshark and packet analysis courses.
+Walter is a network security practitioner, educator, and open-source developer. He has presented at SharkFest and teaches hands-on Wireshark and packet analysis courses.
 
 *If you'd like a live session or workshop based on this training material — with Q&A — feel free to reach out via GitHub or LinkedIn.*
