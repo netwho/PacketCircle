@@ -53,6 +53,9 @@ This repository contains the training material for the **PacketCircle Quickstart
 | `PacketCircle-Training_1_7.pdf` | Slide deck used in the training video |
 | `TRAINING.md` | This file |
 
+**[PDF Training Deck](https://github.com/netwho/PacketCircle/blob/main/training/PacketCircle-Training_1_7.pdf)**
+
+
 ---
 
 ## License
