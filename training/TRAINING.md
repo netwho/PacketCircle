@@ -50,7 +50,7 @@ This repository contains the training material for the **PacketCircle Quickstart
 
 | File | Description |
 |------|-------------|
-| `PacketCircle-Training_x_x.pptx` | Slide deck used in the training video |
+| `PacketCircle-Training_1_7.pdf` | Slide deck used in the training video |
 | `TRAINING.md` | This file |
 
 ---
