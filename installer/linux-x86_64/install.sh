@@ -4,7 +4,8 @@
 # =============================================================================
 #
 # Supports:
-#   - Installing v.0.4.7 (latest) or v.0.3.2 (legacy)
+#   - Installing v.0.5.1 (latest) or v.0.4.7 (stable legacy)
+#   - Two flavors: Standard (default) or Experimental (enables Graph View)
 #   - Detecting an already-installed version
 #   - Upgrading, downgrading, and uninstalling
 #   - Auto-detecting Wireshark version (4.0.x, 4.2.x, 4.4.x, 4.6.x)
@@ -13,8 +14,8 @@
 #   ~/.local/lib/wireshark/plugins/<version>/epan/
 #
 # Binaries are in version subdirectories next to this script:
+#   v.0.5.1/packetcircle-wsNN.so   (ws40, ws42, ws44, ws46)
 #   v.0.4.7/packetcircle-wsNN.so   (ws40, ws42, ws44, ws46)
-#   v.0.3.2/packetcircle-wsNN.so   (ws42, ws44, ws46)
 #
 # Usage:
 #   chmod +x install.sh && ./install.sh
@@ -24,12 +25,15 @@ set -e
 
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 PLUGIN_NAME="packetcircle.so"
+LATEST_VERSION="0.5.1"
+LEGACY_VERSION="0.4.7"
 
 RED='\033[0;31m'
 GREEN='\033[0;32m'
 YELLOW='\033[1;33m'
 BLUE='\033[0;34m'
 CYAN='\033[0;36m'
+BOLD='\033[1m'
 GRAY='\033[0;90m'
 NC='\033[0m'
 
@@ -38,7 +42,7 @@ printf "${BLUE}╔════════════════════�
 printf "${BLUE}║   PacketCircle Installer for Linux               ║${NC}\n"
 printf "${BLUE}║   x86_64 (64-bit Intel/AMD)                      ║${NC}\n"
 printf "${BLUE}║   Supports Wireshark 4.0.x, 4.2.x, 4.4.x, 4.6.x  ║${NC}\n"
-printf "${BLUE}║   Available: v.0.4.7 (latest), v.0.3.2 (legacy)  ║${NC}\n"
+printf "${BLUE}║   Available: v.0.5.1 (latest), v.0.4.7            ║${NC}\n"
 printf "${BLUE}╚══════════════════════════════════════════════════╝${NC}\n"
 printf "\n"
 
@@ -57,11 +61,22 @@ fi
 printf "Checking prerequisites...\n\n"
 
 # --- Verify which plugin binaries are present ---
-# v.0.3.2 supports ws42/ws44/ws46; v.0.4.7 adds ws40.
-# v.0.4.7 Linux binaries may not be built yet — report availability without failing.
 printf "  Plugin binaries in this installer:\n"
 
-V046_OK=1
+V051_OK=1
+for ws in ws40 ws42 ws44 ws46; do
+    f="$SCRIPT_DIR/v.0.5.1/packetcircle-${ws}.so"
+    if [ -f "$f" ]; then
+        sz=$(ls -lh "$f" | awk '{print $5}')
+        printf "    ${GREEN}[FOUND]${NC}   v.0.5.1/packetcircle-%s.so  (%s)\n" "$ws" "$sz"
+    else
+        printf "    ${GRAY}[missing]${NC} v.0.5.1/packetcircle-%s.so\n" "$ws"
+        V051_OK=0
+    fi
+done
+
+printf "\n"
+V047_OK=1
 for ws in ws40 ws42 ws44 ws46; do
     f="$SCRIPT_DIR/v.0.4.7/packetcircle-${ws}.so"
     if [ -f "$f" ]; then
@@ -69,31 +84,13 @@ for ws in ws40 ws42 ws44 ws46; do
         printf "    ${GREEN}[FOUND]${NC}   v.0.4.7/packetcircle-%s.so  (%s)\n" "$ws" "$sz"
     else
         printf "    ${GRAY}[missing]${NC} v.0.4.7/packetcircle-%s.so\n" "$ws"
-        V046_OK=0
+        V047_OK=0
     fi
 done
 
-printf "\n"
-V032_OK=1
-for ws in ws42 ws44 ws46; do
-    f="$SCRIPT_DIR/v.0.3.2/packetcircle-${ws}.so"
-    if [ -f "$f" ]; then
-        sz=$(ls -lh "$f" | awk '{print $5}')
-        printf "    ${GREEN}[FOUND]${NC}   v.0.3.2/packetcircle-%s.so  (%s)\n" "$ws" "$sz"
-    else
-        printf "    ${RED}[MISSING]${NC} v.0.3.2/packetcircle-%s.so\n" "$ws"
-        V032_OK=0
-    fi
-done
-
-if [ "$V046_OK" = "0" ] && [ "$V032_OK" = "0" ]; then
+if [ "$V051_OK" = "0" ] && [ "$V047_OK" = "0" ]; then
     printf "\n${RED}Error: No usable plugin binaries found in this installer package.${NC}\n"
     exit 1
-fi
-
-if [ "$V046_OK" = "0" ]; then
-    printf "\n  ${YELLOW}Note: v.0.4.7 Linux binaries are not yet included in this release.${NC}\n"
-    printf "  ${YELLOW}      v.0.3.2 will be installed. Update when v.0.4.7 binaries are available.${NC}\n"
 fi
 
 # --- Detect Wireshark version ---
@@ -121,15 +118,10 @@ if [ -z "$WS_VERSION" ] && command -v wireshark >/dev/null 2>&1; then
     WS_VERSION=$(wireshark --version 2>/dev/null | head -1 | grep -oE '[0-9]+\.[0-9]+\.[0-9]+' | head -1)
     if [ -n "$WS_VERSION" ]; then
         printf "    ${GREEN}[FOUND]${NC}   wireshark at %s  →  version %s\n" "$WS_PATH" "$WS_VERSION"
-    else
-        printf "    ${YELLOW}[found]${NC}   wireshark at %s  (could not parse version)\n" "$WS_PATH"
     fi
-else
-    [ -z "$WS_VERSION" ] && printf "    ${GRAY}[not found]${NC} wireshark not on PATH\n"
 fi
 
 if [ -z "$WS_VERSION" ] && command -v dpkg-query >/dev/null 2>&1; then
-    printf "    Trying dpkg-query...\n"
     for pkg in wireshark-common wireshark wireshark-qt libwireshark-data; do
         if dpkg-query -W -f='${Status}' "$pkg" 2>/dev/null | grep -q "install ok installed"; then
             WS_VERSION=$(dpkg-query -W -f='${Version}' "$pkg" 2>/dev/null | extract_dpkg_version)
@@ -137,21 +129,16 @@ if [ -z "$WS_VERSION" ] && command -v dpkg-query >/dev/null 2>&1; then
                 printf "    ${GREEN}[FOUND]${NC}   dpkg package %-22s  →  version %s\n" "$pkg" "$WS_VERSION"
                 break
             fi
-        else
-            printf "    ${GRAY}[not installed]${NC} dpkg: %s\n" "$pkg"
         fi
     done
 fi
 
 if [ -z "$WS_VERSION" ] && command -v rpm >/dev/null 2>&1; then
-    printf "    Trying rpm...\n"
     for pkg in wireshark wireshark-qt wireshark-cli; do
         WS_VERSION=$(rpm -q "$pkg" 2>/dev/null | grep -oE '[0-9]+\.[0-9]+\.[0-9]+' | head -1)
         if [ -n "$WS_VERSION" ]; then
             printf "    ${GREEN}[FOUND]${NC}   rpm package %-24s  →  version %s\n" "$pkg" "$WS_VERSION"
             break
-        else
-            printf "    ${GRAY}[not installed]${NC} rpm: %s\n" "$pkg"
         fi
     done
 fi
@@ -160,32 +147,25 @@ if [ -z "$WS_VERSION" ] && command -v pacman >/dev/null 2>&1; then
     WS_VERSION=$(pacman -Q wireshark-qt 2>/dev/null | grep -oE '[0-9]+\.[0-9]+\.[0-9]+' | head -1)
     if [ -n "$WS_VERSION" ]; then
         printf "    ${GREEN}[FOUND]${NC}   pacman: wireshark-qt  →  version %s\n" "$WS_VERSION"
-    else
-        printf "    ${GRAY}[not installed]${NC} pacman: wireshark-qt\n"
     fi
 fi
 
 if [ -z "$WS_VERSION" ]; then
-    printf "    Trying libwireshark.so soname...\n"
     for lib in /usr/lib/x86_64-linux-gnu/libwireshark.so \
                /usr/lib64/libwireshark.so \
                /usr/lib/libwireshark.so; do
         if [ -L "$lib" ] || [ -f "$lib" ]; then
             SONAME=$(readlink -f "$lib" 2>/dev/null | grep -oE 'libwireshark\.so\.[0-9]+' | grep -oE '[0-9]+$')
             case "$SONAME" in
-                16) WS_VERSION="4.0.0"; label="4.0.x" ;;
-                17) WS_VERSION="4.2.0"; label="4.2.x" ;;
-                18) WS_VERSION="4.4.0"; label="4.4.x" ;;
-                19) WS_VERSION="4.6.0"; label="4.6.x" ;;
+                16) WS_VERSION="4.0.0" ;;
+                17) WS_VERSION="4.2.0" ;;
+                18) WS_VERSION="4.4.0" ;;
+                19) WS_VERSION="4.6.0" ;;
             esac
             if [ -n "$WS_VERSION" ]; then
-                printf "    ${GREEN}[FOUND]${NC}   %s (soname .%s)  →  %s\n" "$lib" "$SONAME" "$label"
+                printf "    ${GREEN}[FOUND]${NC}   %s (soname .%s)  →  %s\n" "$lib" "$SONAME" "$WS_VERSION"
                 break
-            else
-                printf "    ${GRAY}[found]${NC}   %s  (unrecognised soname .%s)\n" "$lib" "$SONAME"
             fi
-        else
-            printf "    ${GRAY}[not found]${NC} %s\n" "$lib"
         fi
     done
 fi
@@ -204,7 +184,7 @@ WS_MINOR=$(printf "%s" "$WS_VERSION" | cut -d. -f2)
 case "$WS_MINOR" in
     0) SELECTED_WS_TAG="ws40"; SELECTED_WS_LABEL="Wireshark 4.0.x (built against 4.0.17)" ;;
     2) SELECTED_WS_TAG="ws42"; SELECTED_WS_LABEL="Wireshark 4.2.x (built against 4.2.14)" ;;
-    4) SELECTED_WS_TAG="ws44"; SELECTED_WS_LABEL="Wireshark 4.4.x (built against 4.4.7)"  ;;
+    4) SELECTED_WS_TAG="ws44"; SELECTED_WS_LABEL="Wireshark 4.4.x (built against 4.4.14)"  ;;
     6) SELECTED_WS_TAG="ws46"; SELECTED_WS_LABEL="Wireshark 4.6.x (built against 4.6.3)"  ;;
     *)
         printf "\n${RED}Unsupported Wireshark version: %s.%s${NC}\n" "$WS_MAJOR" "$WS_MINOR"
@@ -248,7 +228,6 @@ done
 if [ -z "$PLUGIN_PATH_ID" ]; then
     PLUGIN_PATH_ID="${WS_MAJOR}.${WS_MINOR}"
     printf "    ${YELLOW}No existing plugin dir found; will create: %s${NC}\n" "$PLUGIN_PATH_ID"
-    printf "    ${YELLOW}If the plugin does not load: Help > About Wireshark > Folders > Personal Plugins${NC}\n"
 fi
 
 INSTALL_DIR="$HOME/.local/lib/wireshark/plugins/$PLUGIN_PATH_ID/epan"
@@ -263,32 +242,12 @@ if [ -f "$INSTALL_DIR/$PLUGIN_NAME" ]; then
         | grep -oE '[0-9]+\.[0-9]+\.[0-9]+')
     INSTALLED_PATH="$INSTALL_DIR/$PLUGIN_NAME"
     if [ -n "$INSTALLED_VERSION" ]; then
-        printf "    ${GREEN}[FOUND]${NC}   %s\n" "$INSTALLED_PATH"
-        printf "    Embedded version string: ${CYAN}v.%s${NC}\n" "$INSTALLED_VERSION"
+        printf "    ${GREEN}[FOUND]${NC}   v.%s at %s\n" "$INSTALLED_VERSION" "$INSTALLED_PATH"
     else
         printf "    ${YELLOW}[found]${NC}   %s  (no version string in binary)\n" "$INSTALLED_PATH"
     fi
 else
     printf "    ${GRAY}[none]${NC}    %s  (not installed)\n" "$INSTALL_DIR/$PLUGIN_NAME"
-fi
-
-# --- Prerequisites summary ---
-SEP="-----------------------------------------------------------"
-printf "\n%s\n" "$SEP"
-printf "  Prerequisites Summary\n"
-printf "%s\n" "$SEP"
-printf "  Wireshark       : %s.%s  (plugin API dir: %s)\n" "$WS_MAJOR" "$WS_MINOR" "$PLUGIN_PATH_ID"
-printf "  Binary tag      : %s  (%s)\n" "$SELECTED_WS_TAG" "$SELECTED_WS_LABEL"
-printf "  v.0.4.7 binaries: "
-if [ "$V046_OK" = "1" ]; then printf "${GREEN}all present${NC}\n"; else printf "${YELLOW}not yet built for Linux${NC}\n"; fi
-printf "  v.0.3.2 binaries: "
-if [ "$V032_OK" = "1" ]; then printf "${GREEN}all present${NC}\n"; else printf "${RED}missing${NC}\n"; fi
-printf "  Install dir     : %s\n" "$INSTALL_DIR"
-printf "  Installed now   : "
-if [ -n "$INSTALLED_VERSION" ]; then
-    printf "${CYAN}v.%s${NC}\n" "$INSTALLED_VERSION"
-else
-    printf "${GRAY}none${NC}\n"
 fi
 
 # --- Qt6 runtime check ---
@@ -298,11 +257,27 @@ for libdir in /usr/lib/x86_64-linux-gnu /usr/lib64 /usr/lib; do
         QT6_OK=1; break
     fi
 done
-if [ "$QT6_OK" = "1" ]; then
-    printf "  Qt6 runtime     : ${GREEN}found${NC}\n"
+
+# --- Prerequisites summary ---
+SEP="-----------------------------------------------------------"
+printf "\n%s\n" "$SEP"
+printf "  Prerequisites Summary\n"
+printf "%s\n" "$SEP"
+printf "  Wireshark       : %s.%s  (plugin API dir: %s)\n" "$WS_MAJOR" "$WS_MINOR" "$PLUGIN_PATH_ID"
+printf "  Binary tag      : %s  (%s)\n" "$SELECTED_WS_TAG" "$SELECTED_WS_LABEL"
+printf "  v.0.5.1 binaries: "
+if [ "$V051_OK" = "1" ]; then printf "${GREEN}all present${NC}\n"; else printf "${YELLOW}some missing${NC}\n"; fi
+printf "  v.0.4.7 binaries: "
+if [ "$V047_OK" = "1" ]; then printf "${GREEN}all present${NC}\n"; else printf "${YELLOW}some missing${NC}\n"; fi
+printf "  Install dir     : %s\n" "$INSTALL_DIR"
+printf "  Installed now   : "
+if [ -n "$INSTALLED_VERSION" ]; then
+    printf "${CYAN}v.%s${NC}\n" "$INSTALLED_VERSION"
 else
-    printf "  Qt6 runtime     : ${YELLOW}not found${NC}  (PacketCircle requires Qt6)\n"
+    printf "${GRAY}none${NC}\n"
 fi
+printf "  Qt6 runtime     : "
+if [ "$QT6_OK" = "1" ]; then printf "${GREEN}found${NC}\n"; else printf "${YELLOW}not found${NC}  (PacketCircle requires Qt6)\n"; fi
 printf "%s\n" "$SEP"
 printf "\n  Press Enter to continue..."
 read -r _
@@ -342,79 +317,52 @@ esac
 # --- Version selection ---
 printf "\nSelect version to install:\n\n"
 
-# ws40 only exists in v.0.4.7
-if [ "$SELECTED_WS_TAG" = "ws40" ]; then
-    if [ "$V046_OK" = "1" ]; then
-        printf "  ${GREEN}1${NC}) v.0.4.7 (latest)  — the only version with Wireshark 4.0.x support\n"
-        printf "\nChoice [1]: "
-        read -r VER_CHOICE
-        VER_CHOICE=${VER_CHOICE:-1}
-        case "$VER_CHOICE" in
-            1) SELECTED_VERSION="0.4.7" ;;
-            *) printf "Invalid choice. Exiting.\n"; exit 1 ;;
-        esac
-    else
-        printf "  ${RED}v.0.4.7 is not yet available for Linux and is required for Wireshark 4.0.x.${NC}\n"
-        printf "  ${YELLOW}Please check back once v.0.4.7 Linux binaries are released.${NC}\n\n"
-        exit 1
-    fi
-else
-    # v.0.4.7 is strongly recommended; v.0.3.2 is legacy
-    printf "  ${GREEN}★ RECOMMENDED: use v.0.4.7 unless you have a specific reason to stay on v.0.3.2${NC}\n\n"
-
-    if [ "$V046_OK" = "1" ]; then
-        if [ "$INSTALLED_VERSION" = "0.4.7" ]; then
-            printf "  ${GREEN}1${NC}) v.0.4.7 (latest)   — already installed, reinstall\n"
-        elif [ "$INSTALLED_VERSION" = "0.3.2" ]; then
-            printf "  ${GREEN}1${NC}) v.0.4.7 (latest)   — upgrade (recommended)\n"
-        else
-            printf "  ${GREEN}1${NC}) v.0.4.7 (latest)   — table view interactivity, improved Malcolm/Arkime time window\n"
-        fi
-    else
-        printf "  ${YELLOW}1${NC}) v.0.4.7             — ${YELLOW}not yet available for Linux (binaries pending build)${NC}\n"
-    fi
-
-    if [ "$INSTALLED_VERSION" = "0.3.2" ]; then
-        printf "  ${YELLOW}2${NC}) v.0.3.2 (legacy)    — already installed, reinstall\n"
-    elif [ "$INSTALLED_VERSION" = "0.4.7" ]; then
-        printf "  ${YELLOW}2${NC}) v.0.3.2 (legacy)    — downgrade; only if you have a specific compatibility reason\n"
-    else
-        printf "  ${YELLOW}2${NC}) v.0.3.2 (legacy)    — TCP stream stats, Select Results, theme-aware UI\n"
-        printf "                       (only choose this if you need v.0.3.2 specifically)\n"
-    fi
-
-    printf "\nChoice [1]: "
-    read -r VER_CHOICE
-    VER_CHOICE=${VER_CHOICE:-1}
-
-    case "$VER_CHOICE" in
-        1)
-            if [ "$V046_OK" = "0" ]; then
-                printf "\n${RED}v.0.4.7 Linux binaries are not yet available in this installer.${NC}\n"
-                printf "${YELLOW}Please download the latest installer once v.0.4.7 binaries are released,${NC}\n"
-                printf "${YELLOW}or install v.0.3.2 in the meantime.${NC}\n\n"
-                exit 1
-            fi
-            SELECTED_VERSION="0.4.7"
-            ;;
-        2)
-            if [ "$V032_OK" = "0" ]; then
-                printf "\n${RED}v.0.3.2 binaries are missing.${NC}\n"; exit 1
-            fi
-            SELECTED_VERSION="0.3.2"
-            if [ "$VER_CHOICE" = "2" ] && [ "$INSTALLED_VERSION" != "0.3.2" ]; then
-                printf "\n  ${YELLOW}You chose v.0.3.2. This is a legacy release.${NC}\n"
-                printf "  ${YELLOW}Use v.0.4.7 unless you specifically need v.0.3.2 compatibility.${NC}\n"
-                printf "  Continue with v.0.3.2? [y/N]: "
-                read -r CONFIRM_LEGACY
-                if [ "$CONFIRM_LEGACY" != "y" ] && [ "$CONFIRM_LEGACY" != "Y" ]; then
-                    printf "Installation cancelled.\n"; exit 0
-                fi
-            fi
-            ;;
-        *) printf "Invalid choice. Exiting.\n"; exit 1 ;;
-    esac
+# ws40 only exists in v.0.4.7+; handle gracefully
+if [ "$SELECTED_WS_TAG" = "ws40" ] && [ "$V051_OK" = "0" ] && [ "$V047_OK" = "0" ]; then
+    printf "  ${RED}No binaries available for Wireshark 4.0.x in this installer.${NC}\n\n"
+    exit 1
 fi
+
+if [ "$INSTALLED_VERSION" = "$LATEST_VERSION" ]; then
+    printf "  ${GREEN}1${NC}) v.%s ${BOLD}(latest)${NC}   — already installed, reinstall\n" "$LATEST_VERSION"
+    printf "  ${YELLOW}2${NC}) v.%s             — downgrade to stable legacy\n" "$LEGACY_VERSION"
+elif [ "$INSTALLED_VERSION" = "$LEGACY_VERSION" ]; then
+    printf "  ${GREEN}1${NC}) v.%s ${BOLD}(latest)${NC}   — upgrade (recommended)\n" "$LATEST_VERSION"
+    printf "  ${YELLOW}2${NC}) v.%s             — already installed, reinstall\n" "$LEGACY_VERSION"
+else
+    printf "  ${GREEN}1${NC}) v.%s ${BOLD}(latest)${NC}   — 3-page PDF reports, graph view (opt-in), TCP Window analysis\n" "$LATEST_VERSION"
+    printf "  ${YELLOW}2${NC}) v.%s             — stable legacy: table view, protocol info dialogs, Wi-Fi mode\n" "$LEGACY_VERSION"
+fi
+
+printf "\nChoice [1]: "
+read -r VER_CHOICE
+VER_CHOICE=${VER_CHOICE:-1}
+
+case "$VER_CHOICE" in
+    1)
+        if [ "$V051_OK" = "0" ] || [ ! -f "$SCRIPT_DIR/v.0.5.1/packetcircle-${SELECTED_WS_TAG}.so" ]; then
+            printf "\n${RED}v.0.5.1 binary for %s is not available in this installer.${NC}\n" "$SELECTED_WS_TAG"
+            exit 1
+        fi
+        SELECTED_VERSION="$LATEST_VERSION"
+        ;;
+    2)
+        if [ "$V047_OK" = "0" ] || [ ! -f "$SCRIPT_DIR/v.0.4.7/packetcircle-${SELECTED_WS_TAG}.so" ]; then
+            printf "\n${RED}v.0.4.7 binary for %s is not available in this installer.${NC}\n" "$SELECTED_WS_TAG"
+            exit 1
+        fi
+        SELECTED_VERSION="$LEGACY_VERSION"
+        if [ "$INSTALLED_VERSION" != "$LEGACY_VERSION" ]; then
+            printf "\n  ${YELLOW}You chose v.0.4.7. This is the legacy release.${NC}\n"
+            printf "  Continue with v.0.4.7? [y/N]: "
+            read -r CONFIRM_LEGACY
+            if [ "$CONFIRM_LEGACY" != "y" ] && [ "$CONFIRM_LEGACY" != "Y" ]; then
+                printf "Installation cancelled.\n"; exit 0
+            fi
+        fi
+        ;;
+    *) printf "Invalid choice. Exiting.\n"; exit 1 ;;
+esac
 
 PLUGIN_FILE="$SCRIPT_DIR/v.${SELECTED_VERSION}/packetcircle-${SELECTED_WS_TAG}.so"
 
@@ -427,7 +375,32 @@ FILESIZE=$(ls -lh "$PLUGIN_FILE" | awk '{print $5}')
 printf "\n${GREEN}✓${NC} Selected: PacketCircle v.%s  |  %s  |  %s\n" \
     "$SELECTED_VERSION" "$SELECTED_WS_LABEL" "$FILESIZE"
 
-# --- Qt6 warning (if not found, remind before install) ---
+# --- Feature set selection (v.0.5.1 only) ---
+ENABLE_EXPERIMENTAL=false
+if [ "$SELECTED_VERSION" = "$LATEST_VERSION" ]; then
+    printf "\n"
+    printf "Feature set:\n"
+    printf "\n"
+    printf "  ${GREEN}1${NC}) ${BOLD}Standard${NC} (recommended)\n"
+    printf "     Circle view, Table view, Wi-Fi mode, 20+ protocol info dialogs,\n"
+    printf "     PDF reports, ntopng/Malcolm integration — stable, fully tested\n"
+    printf "\n"
+    printf "  ${CYAN}2${NC}) ${BOLD}Experimental${NC} — enables Graph View (beta)\n"
+    printf "     Everything in Standard, plus an interactive node-link topology\n"
+    printf "     diagram with 8 layouts, TCP Health / Anomaly Score / High Risk\n"
+    printf "     edge colors, and score breakdowns. Beta quality — may have rough edges.\n"
+    printf "\n"
+    printf "Choice [1]: "
+    read -r FEAT_CHOICE
+    FEAT_CHOICE=${FEAT_CHOICE:-1}
+    case "$FEAT_CHOICE" in
+        2) ENABLE_EXPERIMENTAL=true ;;
+        1|"") ENABLE_EXPERIMENTAL=false ;;
+        *) printf "Invalid choice. Exiting.\n"; exit 1 ;;
+    esac
+fi
+
+# --- Qt6 warning ---
 if [ "$QT6_OK" = "0" ]; then
     printf "\n${YELLOW}⚠ Qt6 runtime libraries not found.${NC}\n"
     printf "  PacketCircle requires Qt6 (libQt6Widgets, libQt6Gui, libQt6Core).\n"
@@ -451,11 +424,23 @@ if [ "$QT6_OK" = "0" ]; then
     fi
 fi
 
-# --- Install ---
+# --- Install binary ---
 printf "\n${BLUE}Installing to: %s${NC}\n" "$INSTALL_DIR"
 mkdir -p "$INSTALL_DIR"
 cp "$PLUGIN_FILE" "$INSTALL_DIR/$PLUGIN_NAME"
 chmod 644 "$INSTALL_DIR/$PLUGIN_NAME"
+
+# --- Write experimental settings if requested ---
+SETTINGS_FILE="$HOME/.PacketCircle/settings.ini"
+if [ "$ENABLE_EXPERIMENTAL" = true ]; then
+    mkdir -p "$HOME/.PacketCircle"
+    if [ -f "$SETTINGS_FILE" ]; then
+        grep -v '^\[Beta\]' "$SETTINGS_FILE" | grep -v '^EnableGraphView' > "${SETTINGS_FILE}.tmp" || true
+        mv "${SETTINGS_FILE}.tmp" "$SETTINGS_FILE"
+    fi
+    printf "\n[Beta]\nEnableGraphView=true\n" >> "$SETTINGS_FILE"
+    printf "${CYAN}✓${NC} Experimental Graph View enabled in %s\n" "$SETTINGS_FILE"
+fi
 
 # --- Verify ---
 if [ -f "$INSTALL_DIR/$PLUGIN_NAME" ]; then
@@ -465,7 +450,11 @@ if [ -f "$INSTALL_DIR/$PLUGIN_NAME" ]; then
     printf "${GREEN}║      Installation successful!                    ║${NC}\n"
     printf "${GREEN}╚══════════════════════════════════════════════════╝${NC}\n"
     printf "\n"
-    printf "  Installed:  PacketCircle ${CYAN}v.%s${NC} (%s)\n" "$SELECTED_VERSION" "$SELECTED_WS_LABEL"
+    printf "  Installed:  PacketCircle ${CYAN}v.%s${NC} (%s)" "$SELECTED_VERSION" "$SELECTED_WS_LABEL"
+    if [ "$ENABLE_EXPERIMENTAL" = true ]; then
+        printf " ${CYAN}[Experimental]${NC}"
+    fi
+    printf "\n"
     printf "  Size:       %s\n" "$INSTALLED_SIZE"
     printf "  Location:   ${BLUE}%s/%s${NC}\n" "$INSTALL_DIR" "$PLUGIN_NAME"
     printf "\n"
@@ -473,8 +462,17 @@ if [ -f "$INSTALL_DIR/$PLUGIN_NAME" ]; then
     printf "  1. Restart Wireshark (if running)\n"
     printf "  2. Open a capture or start a live capture\n"
     printf "  3. Look for PacketCircle in the Tools menu\n"
+    if [ "$ENABLE_EXPERIMENTAL" = true ]; then
+        printf "  4. The Graph button appears in the PacketCircle toolbar\n"
+    fi
     printf "\n"
     printf "  To uninstall, run this script again and choose 'u'.\n"
+    if [ "$ENABLE_EXPERIMENTAL" = true ]; then
+        printf "\n"
+        printf "  ${YELLOW}⚠ Graph View (Experimental) — QA on Linux has been basic only.${NC}\n"
+        printf "  ${YELLOW}  If you encounter issues, run the installer again and choose Standard${NC}\n"
+        printf "  ${YELLOW}  to disable it (removes EnableGraphView from settings.ini).${NC}\n"
+    fi
     printf "\n"
     printf "  ${YELLOW}Troubleshooting:${NC}\n"
     printf "  - Verify path: Help > About Wireshark > Folders > Personal Plugins\n"
