@@ -4,7 +4,8 @@
 # =============================================================================
 #
 # Supports:
-#   - Installing v.0.3.2 or v.0.4.7 (default: latest)
+#   - Installing v.0.5.1 (latest) or v.0.4.7 (stable legacy)
+#   - Two flavors: Standard (default) or Experimental (enables Graph View)
 #   - Detecting an already-installed version
 #   - Upgrading, downgrading, and uninstalling
 #
@@ -22,19 +23,22 @@ set -e
 
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 PLUGIN_NAME="packetcircle.so"
+LATEST_VERSION="0.5.1"
+LEGACY_VERSION="0.4.7"
 
 RED='\033[0;31m'
 GREEN='\033[0;32m'
 YELLOW='\033[1;33m'
 BLUE='\033[0;34m'
 CYAN='\033[0;36m'
+BOLD='\033[1m'
 NC='\033[0m'
 
 printf "\n"
 printf "${BLUE}╔══════════════════════════════════════════════════╗${NC}\n"
 printf "${BLUE}║   PacketCircle Installer for macOS               ║${NC}\n"
 printf "${BLUE}║   Universal Binary (Intel + Apple Silicon)       ║${NC}\n"
-printf "${BLUE}║   Available: v.0.3.2, v.0.4.7 (latest)           ║${NC}\n"
+printf "${BLUE}║   Available: v.0.5.1 (latest), v.0.4.7           ║${NC}\n"
 printf "${BLUE}╚══════════════════════════════════════════════════╝${NC}\n"
 printf "\n"
 
@@ -74,12 +78,8 @@ WS_MINOR=$(printf "%s" "$WS_VERSION" | cut -d. -f2)
 printf "${GREEN}✓${NC} Wireshark version: ${CYAN}%s${NC}\n" "$WS_VERSION"
 
 # --- Determine plugin directory ---
-# Wireshark uses either "4.6" or "4-6" as the version directory name depending on
-# the build. We discover the correct format rather than hardcoding it.
 PLUGIN_PATH_ID=""
 
-# Step 1: look inside Wireshark.app — most authoritative, tells us the exact name
-#         the build uses (e.g. "4-6" for the official .dmg installer)
 if [ -n "$WIRESHARK_APP" ]; then
     for dir in "$WIRESHARK_APP/Contents/PlugIns/wireshark"/*/; do
         b=$(basename "$dir" 2>/dev/null) || continue
@@ -91,7 +91,6 @@ if [ -n "$WIRESHARK_APP" ]; then
     done
 fi
 
-# Step 2: scan known personal plugin locations for an existing matching version dir
 if [ -z "$PLUGIN_PATH_ID" ]; then
     for base in \
         "$HOME/.local/lib/wireshark/plugins" \
@@ -109,8 +108,6 @@ if [ -z "$PLUGIN_PATH_ID" ]; then
     done
 fi
 
-# Step 3: infer separator convention from any existing version dir in the app bundle
-#         (e.g. if "3-4" exists, then "4-6" is also dash-separated)
 if [ -z "$PLUGIN_PATH_ID" ] && [ -n "$WIRESHARK_APP" ]; then
     for dir in "$WIRESHARK_APP/Contents/PlugIns/wireshark"/*/; do
         b=$(basename "$dir" 2>/dev/null) || continue
@@ -126,7 +123,6 @@ if [ -z "$PLUGIN_PATH_ID" ] && [ -n "$WIRESHARK_APP" ]; then
     done
 fi
 
-# Step 4: fallback — use dot format (XDG/Linux convention, also valid on macOS)
 if [ -z "$PLUGIN_PATH_ID" ]; then
     PLUGIN_PATH_ID="${WS_MAJOR}.${WS_MINOR}"
     printf "  ${YELLOW}Warning: Could not detect plugin path format. Defaulting to: %s${NC}\n" "$PLUGIN_PATH_ID"
@@ -138,8 +134,6 @@ SYSTEM_PLUGIN_DIR=""
 [ -n "$WIRESHARK_APP" ] && SYSTEM_PLUGIN_DIR="$WIRESHARK_APP/Contents/PlugIns/wireshark/$PLUGIN_PATH_ID/epan"
 
 # --- Detect currently installed version ---
-# Check all known personal plugin locations in addition to the derived path,
-# in case Wireshark was previously installed with a different path convention.
 INSTALLED_VERSION=""
 INSTALLED_PATH=""
 EXTRA_PERSONAL_DIRS=""
@@ -202,20 +196,20 @@ case "$ACTION" in
     *) printf "Invalid choice. Exiting.\n"; exit 1 ;;
 esac
 
-# --- Version selection (context-aware) ---
+# --- Version selection ---
 printf "\n"
 printf "Select version to install:\n"
 printf "\n"
 
-if [ "$INSTALLED_VERSION" = "0.4.7" ]; then
-    printf "  ${GREEN}1${NC}) v.0.4.7 (latest)   — already installed, reinstall\n"
-    printf "  ${YELLOW}2${NC}) v.0.3.2             — downgrade (legacy)\n"
-elif [ "$INSTALLED_VERSION" = "0.3.2" ]; then
-    printf "  ${GREEN}1${NC}) v.0.4.7 (latest)   — upgrade (recommended)\n"
-    printf "  ${YELLOW}2${NC}) v.0.3.2             — already installed, reinstall\n"
+if [ "$INSTALLED_VERSION" = "$LATEST_VERSION" ]; then
+    printf "  ${GREEN}1${NC}) v.%s ${BOLD}(latest)${NC}   — already installed, reinstall\n" "$LATEST_VERSION"
+    printf "  ${YELLOW}2${NC}) v.%s             — downgrade to stable legacy\n" "$LEGACY_VERSION"
+elif [ "$INSTALLED_VERSION" = "$LEGACY_VERSION" ]; then
+    printf "  ${GREEN}1${NC}) v.%s ${BOLD}(latest)${NC}   — upgrade (recommended): 3-page PDF, graph view, protocol improvements\n" "$LATEST_VERSION"
+    printf "  ${YELLOW}2${NC}) v.%s             — already installed, reinstall\n" "$LEGACY_VERSION"
 else
-    printf "  ${GREEN}1${NC}) v.0.4.7 (latest)   — table view interactivity, improved Malcolm/Arkime time window\n"
-    printf "  ${YELLOW}2${NC}) v.0.3.2             — TCP stream stats, Select Results, theme-aware UI\n"
+    printf "  ${GREEN}1${NC}) v.%s ${BOLD}(latest)${NC}   — 3-page PDF reports, graph view (opt-in), TCP Window analysis\n" "$LATEST_VERSION"
+    printf "  ${YELLOW}2${NC}) v.%s             — stable legacy: table view, protocol info dialogs, Wi-Fi mode\n" "$LEGACY_VERSION"
 fi
 
 printf "\n"
@@ -224,8 +218,8 @@ read -r VER_CHOICE
 VER_CHOICE=${VER_CHOICE:-1}
 
 case "$VER_CHOICE" in
-    1) SELECTED_VERSION="0.4.7" ;;
-    2) SELECTED_VERSION="0.3.2" ;;
+    1) SELECTED_VERSION="$LATEST_VERSION" ;;
+    2) SELECTED_VERSION="$LEGACY_VERSION" ;;
     *) printf "Invalid choice. Exiting.\n"; exit 1 ;;
 esac
 
@@ -241,9 +235,32 @@ printf "  Binary: %s\n" "$PLUGIN_FILE"
 printf "  Architecture: "
 file "$PLUGIN_FILE" | grep -o "universal binary.*" || file "$PLUGIN_FILE" | grep -o "Mach-O.*"
 
-# --- Version compatibility check ---
-# v.0.4.7 is built against Wireshark 4.6.x; v.0.3.2 is also 4.6.x.
-# Warn if the installed Wireshark is not 4.6.x.
+# --- Feature set selection (v.0.5.1 only) ---
+ENABLE_EXPERIMENTAL=false
+if [ "$SELECTED_VERSION" = "$LATEST_VERSION" ]; then
+    printf "\n"
+    printf "Feature set:\n"
+    printf "\n"
+    printf "  ${GREEN}1${NC}) ${BOLD}Standard${NC} (recommended)\n"
+    printf "     Circle view, Table view, Wi-Fi mode, 20+ protocol info dialogs,\n"
+    printf "     PDF reports, ntopng/Malcolm integration — stable, fully tested\n"
+    printf "\n"
+    printf "  ${CYAN}2${NC}) ${BOLD}Experimental${NC} — enables Graph View (beta)\n"
+    printf "     Everything in Standard, plus an interactive node-link topology\n"
+    printf "     diagram with 8 layouts, TCP Health / Anomaly Score / High Risk\n"
+    printf "     edge colors, and score breakdowns. Beta quality — may have rough edges.\n"
+    printf "\n"
+    printf "Choice [1]: "
+    read -r FEAT_CHOICE
+    FEAT_CHOICE=${FEAT_CHOICE:-1}
+    case "$FEAT_CHOICE" in
+        2) ENABLE_EXPERIMENTAL=true ;;
+        1|"") ENABLE_EXPERIMENTAL=false ;;
+        *) printf "Invalid choice. Exiting.\n"; exit 1 ;;
+    esac
+fi
+
+# --- Compatibility warning ---
 if [ "$WS_MAJOR" != "4" ] || [ "$WS_MINOR" != "6" ]; then
     printf "\n${YELLOW}Warning: This installer contains binaries built against Wireshark 4.6.x.${NC}\n"
     printf "  Your version: ${YELLOW}%s${NC}  — plugin may not load.\n" "$WS_VERSION"
@@ -278,7 +295,7 @@ else
     NEED_SUDO=false
 fi
 
-# --- Install ---
+# --- Install binary ---
 printf "\n${BLUE}Installing to: %s${NC}\n" "$INSTALL_DIR"
 
 if [ "$NEED_SUDO" = true ]; then
@@ -291,6 +308,20 @@ else
     chmod 644 "$INSTALL_DIR/$PLUGIN_NAME"
 fi
 
+# --- Write experimental settings if requested ---
+SETTINGS_FILE="$HOME/.PacketCircle/settings.ini"
+if [ "$ENABLE_EXPERIMENTAL" = true ]; then
+    mkdir -p "$HOME/.PacketCircle"
+    # Add [Beta] EnableGraphView=true — preserve any existing content
+    if [ -f "$SETTINGS_FILE" ]; then
+        # Remove any existing Beta section then re-append it
+        grep -v '^\[Beta\]' "$SETTINGS_FILE" | grep -v '^EnableGraphView' > "${SETTINGS_FILE}.tmp" || true
+        mv "${SETTINGS_FILE}.tmp" "$SETTINGS_FILE"
+    fi
+    printf "\n[Beta]\nEnableGraphView=true\n" >> "$SETTINGS_FILE"
+    printf "${CYAN}✓${NC} Experimental Graph View enabled in %s\n" "$SETTINGS_FILE"
+fi
+
 # --- Verify ---
 if [ -f "$INSTALL_DIR/$PLUGIN_NAME" ]; then
     printf "\n"
@@ -298,15 +329,32 @@ if [ -f "$INSTALL_DIR/$PLUGIN_NAME" ]; then
     printf "${GREEN}║      Installation successful!                    ║${NC}\n"
     printf "${GREEN}╚══════════════════════════════════════════════════╝${NC}\n"
     printf "\n"
-    printf "  Installed:  PacketCircle ${CYAN}v.%s${NC}\n" "$SELECTED_VERSION"
+    printf "  Installed:  PacketCircle ${CYAN}v.%s${NC}" "$SELECTED_VERSION"
+    if [ "$ENABLE_EXPERIMENTAL" = true ]; then
+        printf " ${CYAN}[Experimental — Graph View enabled]${NC}"
+    fi
+    printf "\n"
     printf "  Location:   ${BLUE}%s/%s${NC}\n" "$INSTALL_DIR" "$PLUGIN_NAME"
     printf "\n"
     printf "  Next steps:\n"
     printf "  1. Restart Wireshark (if running)\n"
     printf "  2. Open a capture or start a live capture\n"
     printf "  3. Look for PacketCircle in the Tools menu\n"
+    if [ "$ENABLE_EXPERIMENTAL" = true ]; then
+        printf "  4. The Graph button appears in the PacketCircle toolbar\n"
+    fi
     printf "\n"
     printf "  To uninstall, run this script again and choose 'u'.\n"
+    if [ "$ENABLE_EXPERIMENTAL" = true ]; then
+        printf "\n"
+        printf "  ${YELLOW}⚠ Graph View is experimental (beta quality).${NC}\n"
+        printf "  To disable it, run the installer again and choose Standard.\n"
+    elif [ "$SELECTED_VERSION" = "$LATEST_VERSION" ]; then
+        printf "\n"
+        printf "  Tip: Run the installer again and choose Experimental to enable\n"
+        printf "  the beta Graph View — interactive topology with health scoring,\n"
+        printf "  anomaly detection, and 8 layout modes.\n"
+    fi
     printf "\n"
 else
     printf "${RED}Error: Installation failed.${NC}\n"
