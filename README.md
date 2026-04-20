@@ -85,6 +85,12 @@
 
 *Star layout with TCP Window edge coloring: the busiest host anchors the centre; edge color reveals receiver-side buffer pressure — green = healthy, orange = constrained, red = zero-window stall.*
 
+### Graph View — Hierarchical Layout with Anomaly Score
+
+![Graph Anomaly](screenshots/graph-anomaly.png)
+
+*Hierarchical layout with Anomaly Score edge coloring: hosts are ranked top-to-bottom by traffic role; edge color surfaces port scans, flood patterns, and exfiltration — green = normal, red = high anomaly.*
+
 ### Graph View — Cluster Layout by Protocol / Service
 
 ![Graph Cluster](screenshots/graph-cluster.png)
