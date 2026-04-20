@@ -59,6 +59,7 @@ signals:
     void pairSelectionChanged(QList<comm_pair_t*> selected);
     void nodeVisibilityToggle(QList<comm_pair_t*> pairs, bool enable);
     void lineClicked(comm_pair_t *pair, const QPoint &globalPos);
+    void lineHovered(comm_pair_t *pair);  /**< nullptr when hover ends */
 
 private slots:
     void onBlinkTimer();
@@ -92,8 +93,8 @@ private:
     void calculateLayout();
     QPointF getNodePosition(guint index, guint total);
     QPointF getLineHexagonIntersection(const QPointF &lineStart, const QPointF &lineEnd, const QPointF &hexCenter, qreal hexRadius);
-    void drawConnection(QPainter &painter, const NodePosition &src, const NodePosition &dst, 
-                       comm_pair_t *pair, guint64 max_volume, bool is_emphasized);
+    void drawConnection(QPainter &painter, const NodePosition &src, const NodePosition &dst,
+                       comm_pair_t *pair, guint64 max_volume, bool is_emphasized, bool isOneway);
     void drawNode(QPainter &painter, NodePosition *node, QColor node_color, bool drawInnerOnly = false);
     QColor getProtocolColor(const gchar *protocol_name);
     QColor getRssiColor(comm_pair_t *pair);
@@ -126,7 +127,8 @@ private:
     bool m_pdfMode;
     bool m_darkTheme;
     bool m_wifiMode;
-    QString m_last_hovered_label;
+    QString      m_last_hovered_label;
+    comm_pair_t *m_hoveredLinePair;  /**< Line currently hovered (nullptr = none) */
 };
 
 #endif /* CIRCLE_WIDGET_H */

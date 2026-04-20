@@ -227,6 +227,13 @@ static comm_pair_t* get_or_create_pair(GHashTable *pairs_table, const gchar *src
         pair->byte_count = 0;
         pair->top_protocol = NULL;  /* Will be set when first packet is processed */
         pair->dst_ports = g_hash_table_new_full(g_direct_hash, g_direct_equal, NULL, free_port_stats);
+        pair->tcp_win_min             = G_MAXUINT32;
+        pair->tcp_win_max             = 0;
+        pair->tcp_win_sum             = 0.0;
+        pair->tcp_win_count           = 0;
+        pair->tcp_zero_win_count      = 0;
+        pair->tcp_zero_win_start      = 0.0;
+        pair->tcp_zero_win_max_dur_ms = 0.0;
         g_hash_table_insert(pairs_table, key, pair);
     } else {
         g_free(key);
@@ -261,6 +268,32 @@ typedef struct {
     AnalysisMode mode;          /* Current analysis mode */
 } tap_data_t;
 
+/* Recursive walker: finds tcp.window_size_value (or tcp.window_size as fallback).
+ * Uses the same node->finfo / first_child / next traversal as walk_wifi_proto_tree
+ * to avoid any quirks with the proto_tree_children_foreach API. */
+typedef struct { guint32 win; gboolean found; } tcp_win_ctx_t;
+
+static void find_tcp_win_node(proto_node *node, tcp_win_ctx_t *ctx, int depth)
+{
+    if (!node || ctx->found || depth > 40) return;
+
+    field_info *fi = node->finfo;
+    if (fi && fi->hfinfo && fi->hfinfo->abbrev) {
+        const gchar *ab = fi->hfinfo->abbrev;
+        if (g_strcmp0(ab, "tcp.window_size_value") == 0 ||
+            g_strcmp0(ab, "tcp.window_size") == 0) {
+            ctx->win   = fvalue_get_uinteger(PC_FI_VALUE(fi));
+            ctx->found = TRUE;
+            return;
+        }
+    }
+
+    for (proto_node *child = node->first_child; child; child = child->next) {
+        find_tcp_win_node(child, ctx, depth + 1);
+        if (ctx->found) return;
+    }
+}
+
 /* Packet tap callback - processes each packet */
 static tap_packet_status circle_vis_tap_packet_cb(void *tapdata, packet_info *pinfo, epan_dissect_t *edt, const void *data, tap_flags_t flags)
 {
@@ -272,7 +305,6 @@ static tap_packet_status circle_vis_tap_packet_cb(void *tapdata, packet_info *pi
     guint32 packet_len;
     static guint32 callback_count = 0;
 
-    (void)edt;
     (void)data;
     (void)flags;
 
@@ -631,10 +663,43 @@ static tap_packet_status circle_vis_tap_packet_cb(void *tapdata, packet_info *pi
         return TAP_PACKET_DONT_REDRAW;
     }
 
-    if (g_strcmp0(protocol_name, "TCP") == 0) {
+    gboolean is_tcp_packet = (pinfo->ptype == PT_TCP)
+                          || (g_strcmp0(protocol_name, "TCP") == 0);
+
+    if (is_tcp_packet) {
         pair->has_tcp = TRUE;
     } else if (g_strcmp0(protocol_name, "UDP") == 0) {
         pair->has_udp = TRUE;
+    }
+
+    /* TCP window extraction — triggered for any TCP packet (raw or app-layer).
+     * pinfo->ptype == PT_TCP catches HTTP/TLS/SSH/etc. layered over TCP.
+     * protocol_name == "TCP" is the fallback for plain TCP streams.         */
+    if (is_tcp_packet) {
+        if (edt && edt->tree) {
+            tcp_win_ctx_t wctx = { 0, FALSE };
+            find_tcp_win_node((proto_node *)edt->tree, &wctx, 0);
+            if (wctx.found) {
+                guint32 win = wctx.win;
+                gdouble ts  = nstime_to_sec(&pinfo->fd->abs_ts);
+                if (win == 0) {
+                    pair->tcp_zero_win_count++;
+                    if (pair->tcp_zero_win_start == 0.0 && ts > 0.0)
+                        pair->tcp_zero_win_start = ts;
+                } else {
+                    if (pair->tcp_zero_win_start > 0.0 && ts > 0.0) {
+                        gdouble dur_ms = (ts - pair->tcp_zero_win_start) * 1000.0;
+                        if (dur_ms > pair->tcp_zero_win_max_dur_ms)
+                            pair->tcp_zero_win_max_dur_ms = dur_ms;
+                        pair->tcp_zero_win_start = 0.0;
+                    }
+                }
+                if (pair->tcp_win_count == 0 || win < pair->tcp_win_min) pair->tcp_win_min = win;
+                if (win > pair->tcp_win_max)                              pair->tcp_win_max = win;
+                pair->tcp_win_sum += (gdouble)win;
+                pair->tcp_win_count++;
+            }
+        }
     }
 
     /* Track destination port for this pair — ONLY for TCP / UDP packets so
@@ -696,15 +761,19 @@ static tap_packet_status circle_vis_tap_packet_cb(void *tapdata, packet_info *pi
 
     /* Update statistics */
     pair->packet_count++;
-    
-    /* Safely get packet length */
+
+    /* Safely get packet length and timestamps */
     if (pinfo->fd) {
         packet_len = pinfo->fd->pkt_len;
         if (packet_len > 0) {
             pair->byte_count += packet_len;
         }
+        /* Track first / last packet timestamps for throughput + response-time metrics */
+        gdouble ts = nstime_to_sec(&pinfo->fd->abs_ts);
+        if (pair->first_ts == 0.0) pair->first_ts = ts;
+        pair->last_ts = ts;
     } else {
-        
+
         packet_len = 0;
     }
 
@@ -1220,12 +1289,15 @@ static tap_packet_status wifi_tap_packet_cb(void *tapdata, packet_info *pinfo,
     if (ctx.phy_found && pair->wifi_phy == 0)
         pair->wifi_phy = ctx.phy;
 
-    /* Packet / byte counts */
+    /* Packet / byte counts + timestamps */
     pair->packet_count++;
     if (pinfo->fd) {
         guint32 pkt_len = pinfo->fd->pkt_len;
         if (pkt_len > 0)
             pair->byte_count += pkt_len;
+        gdouble ts = nstime_to_sec(&pinfo->fd->abs_ts);
+        if (pair->first_ts == 0.0) pair->first_ts = ts;
+        pair->last_ts = ts;
     }
 
     /* Top protocol label */
@@ -1381,7 +1453,7 @@ analysis_result_t* packet_analyzer_analyze(capture_file *cf, gboolean use_mac)
     /* Register tap listener for "frame" tap (all packets).
      * Wi-Fi mode needs a proto tree to walk for BSSID/RSSI/etc. */
     tap_packet_cb tap_cb = is_wifi ? wifi_tap_packet_cb : circle_vis_tap_packet_cb;
-    guint tap_flags = is_wifi ? TL_REQUIRES_PROTO_TREE : TL_REQUIRES_NOTHING;
+    guint tap_flags = TL_REQUIRES_PROTO_TREE;  /* needed for TCP window extraction */
     error_string = register_tap_listener("frame", s_tap_data, NULL, 
                                         tap_flags,
                                         circle_vis_tap_reset_cb,
@@ -1418,11 +1490,11 @@ analysis_result_t* packet_analyzer_analyze(capture_file *cf, gboolean use_mac)
         guint32 processed_count = 0;
         const guint32 BATCH_SIZE = 100; /* Process in batches to avoid UI freezing */
         
-        /* Initialize dissector:
-         * - Wi-Fi mode needs TRUE, TRUE to build a proto tree for our walker.
-         * - Normal mode uses FALSE, FALSE (lightweight) to save memory. */
-        gboolean need_tree = is_wifi;
-        edt = epan_dissect_new(cf->epan, need_tree, need_tree);
+        /* Always build the proto tree: Wi-Fi mode needs it for BSSID/RSSI/etc.,
+         * and normal mode needs it for TCP window size extraction.
+         * epan_dissect_reset() frees the tree after each frame, so peak memory
+         * is just one frame at a time — safe for large captures. */
+        edt = epan_dissect_new(cf->epan, TRUE, TRUE);
         /* WH: guard — epan_dissect_new() can return NULL on OOM; in that case we
          * skip the frame-iteration loop and return an empty (but valid) result so
          * the UI doesn't crash.  The tap listener is still registered so live-capture
@@ -2002,6 +2074,7 @@ tls_info_t* packet_analyzer_extract_tls_info(capture_file *cf,
         frame_data *fdata = frame_data_sequence_find(cf->provider.frames, framenum);
         if (!fdata || fdata->file_off < 0)
             continue;
+        if (cf->dfilter && !fdata->passed_dfilter) continue; /* Tier1: skip display-filtered frames */
 
         int err = 0;
         gchar *err_info_str = NULL;
@@ -2240,6 +2313,7 @@ http_info_t* packet_analyzer_extract_http_info(capture_file *cf,
         frame_data *fdata = frame_data_sequence_find(cf->provider.frames, framenum);
         if (!fdata || fdata->file_off < 0)
             continue;
+        if (cf->dfilter && !fdata->passed_dfilter) continue; /* Tier1: skip display-filtered frames */
 
         int err = 0;
         gchar *err_info_str = NULL;
@@ -2534,6 +2608,7 @@ smb_info_t* packet_analyzer_extract_smb_info(capture_file *cf,
         frame_data *fdata = frame_data_sequence_find(cf->provider.frames, framenum);
         if (!fdata || fdata->file_off < 0)
             continue;
+        if (cf->dfilter && !fdata->passed_dfilter) continue; /* Tier1: skip display-filtered frames */
 
         int err = 0;
         gchar *err_info_str = NULL;
@@ -2767,6 +2842,7 @@ kerberos_info_t* packet_analyzer_extract_kerberos_info(capture_file *cf,
         frame_data *fdata = frame_data_sequence_find(cf->provider.frames, framenum);
         if (!fdata || fdata->file_off < 0)
             continue;
+        if (cf->dfilter && !fdata->passed_dfilter) continue; /* Tier1: skip display-filtered frames */
 
         int err = 0;
         gchar *err_info_str = NULL;
@@ -3098,6 +3174,7 @@ email_info_t* packet_analyzer_extract_email_info(capture_file *cf,
         frame_data *fdata = frame_data_sequence_find(cf->provider.frames, framenum);
         if (!fdata || fdata->file_off < 0)
             continue;
+        if (cf->dfilter && !fdata->passed_dfilter) continue; /* Tier1: skip display-filtered frames */
 
         int err = 0;
         gchar *err_info_str = NULL;
@@ -3518,6 +3595,7 @@ sql_info_t* packet_analyzer_extract_sql_info(capture_file *cf,
         frame_data *fdata = frame_data_sequence_find(cf->provider.frames, framenum);
         if (!fdata || fdata->file_off < 0)
             continue;
+        if (cf->dfilter && !fdata->passed_dfilter) continue; /* Tier1: skip display-filtered frames */
 
         int err = 0;
         gchar *err_info_str = NULL;
@@ -3797,6 +3875,7 @@ voip_info_t* packet_analyzer_extract_voip_info(capture_file *cf,
         frame_data *fdata = frame_data_sequence_find(cf->provider.frames, framenum);
         if (!fdata || fdata->file_off < 0)
             continue;
+        if (cf->dfilter && !fdata->passed_dfilter) continue; /* Tier1: skip display-filtered frames */
 
         int err = 0;
         gchar *err_info_str = NULL;
@@ -4039,6 +4118,7 @@ l2_info_t* packet_analyzer_extract_l2_info(capture_file *cf,
     for (guint32 framenum = 1; framenum <= cf->count; framenum++) {
         frame_data *fdata = frame_data_sequence_find(cf->provider.frames, framenum);
         if (!fdata || fdata->file_off < 0) continue;
+        if (cf->dfilter && !fdata->passed_dfilter) continue; /* Tier1: skip display-filtered frames */
 
         int err = 0;
         gchar *err_info_str = NULL;
@@ -4282,6 +4362,7 @@ stp_info_t* packet_analyzer_extract_stp_info(capture_file *cf,
     for (guint32 framenum = 1; framenum <= cf->count; framenum++) {
         frame_data *fdata = frame_data_sequence_find(cf->provider.frames, framenum);
         if (!fdata || fdata->file_off < 0) continue;
+        if (cf->dfilter && !fdata->passed_dfilter) continue; /* Tier1: skip display-filtered frames */
 
         int err = 0;
         gchar *err_info_str = NULL;
@@ -4454,6 +4535,7 @@ lldp_info_t* packet_analyzer_extract_lldp_info(capture_file *cf,
     for (guint32 framenum = 1; framenum <= cf->count; framenum++) {
         frame_data *fdata = frame_data_sequence_find(cf->provider.frames, framenum);
         if (!fdata || fdata->file_off < 0) continue;
+        if (cf->dfilter && !fdata->passed_dfilter) continue; /* Tier1: skip display-filtered frames */
 
         int err = 0;
         gchar *err_info_str = NULL;
@@ -4612,6 +4694,7 @@ lacp_info_t* packet_analyzer_extract_lacp_info(capture_file *cf,
     for (guint32 framenum = 1; framenum <= cf->count; framenum++) {
         frame_data *fdata = frame_data_sequence_find(cf->provider.frames, framenum);
         if (!fdata || fdata->file_off < 0) continue;
+        if (cf->dfilter && !fdata->passed_dfilter) continue; /* Tier1: skip display-filtered frames */
 
         int err = 0;
         gchar *err_info_str = NULL;
@@ -4748,6 +4831,7 @@ vlan_info_t* packet_analyzer_extract_vlan_info(capture_file *cf,
     for (guint32 framenum = 1; framenum <= cf->count; framenum++) {
         frame_data *fdata = frame_data_sequence_find(cf->provider.frames, framenum);
         if (!fdata || fdata->file_off < 0) continue;
+        if (cf->dfilter && !fdata->passed_dfilter) continue; /* Tier1: skip display-filtered frames */
 
         int err = 0;
         gchar *err_info_str = NULL;
@@ -4934,6 +5018,7 @@ eap_info_t* packet_analyzer_extract_eap_info(capture_file *cf,
     for (guint32 framenum = 1; framenum <= cf->count; framenum++) {
         frame_data *fdata = frame_data_sequence_find(cf->provider.frames, framenum);
         if (!fdata || fdata->file_off < 0) continue;
+        if (cf->dfilter && !fdata->passed_dfilter) continue; /* Tier1: skip display-filtered frames */
 
         int err = 0;
         gchar *err_info_str = NULL;
@@ -5147,6 +5232,7 @@ macsec_info_t* packet_analyzer_extract_macsec_info(capture_file *cf,
     for (guint32 framenum = 1; framenum <= cf->count; framenum++) {
         frame_data *fdata = frame_data_sequence_find(cf->provider.frames, framenum);
         if (!fdata || fdata->file_off < 0) continue;
+        if (cf->dfilter && !fdata->passed_dfilter) continue; /* Tier1: skip display-filtered frames */
 
         int err = 0;
         gchar *err_info_str = NULL;
@@ -5352,6 +5438,7 @@ arp_info_t* packet_analyzer_extract_arp_info(capture_file *cf,
     for (guint32 framenum = 1; framenum <= cf->count; framenum++) {
         frame_data *fdata = frame_data_sequence_find(cf->provider.frames, framenum);
         if (!fdata || fdata->file_off < 0) continue;
+        if (cf->dfilter && !fdata->passed_dfilter) continue; /* Tier1: skip display-filtered frames */
 
         int err = 0;
         gchar *err_info_str = NULL;
@@ -5679,6 +5766,7 @@ dhcp_info_t* packet_analyzer_extract_dhcp_info(capture_file *cf,
     for (guint32 framenum = 1; framenum <= cf->count; framenum++) {
         frame_data *fdata = frame_data_sequence_find(cf->provider.frames, framenum);
         if (!fdata || fdata->file_off < 0) continue;
+        if (cf->dfilter && !fdata->passed_dfilter) continue; /* Tier1: skip display-filtered frames */
 
         int err = 0;
         gchar *err_info_str = NULL;
@@ -6047,6 +6135,7 @@ dns_info_t* packet_analyzer_extract_dns_info(capture_file *cf,
     for (guint32 framenum = 1; framenum <= cf->count; framenum++) {
         frame_data *fdata = frame_data_sequence_find(cf->provider.frames, framenum);
         if (!fdata || fdata->file_off < 0) continue;
+        if (cf->dfilter && !fdata->passed_dfilter) continue; /* Tier1: skip display-filtered frames */
 
         int err = 0;
         gchar *err_info_str = NULL;
@@ -6314,6 +6403,7 @@ icmp_info_t* packet_analyzer_extract_icmp_info(capture_file *cf,
     for (guint32 framenum = 1; framenum <= cf->count; framenum++) {
         frame_data *fdata = frame_data_sequence_find(cf->provider.frames, framenum);
         if (!fdata || fdata->file_off < 0) continue;
+        if (cf->dfilter && !fdata->passed_dfilter) continue; /* Tier1: skip display-filtered frames */
 
         int err = 0;
         gchar *err_info_str = NULL;
@@ -6635,6 +6725,7 @@ ldap_info_t* packet_analyzer_extract_ldap_info(capture_file *cf,
     for (guint32 framenum = 1; framenum <= cf->count; framenum++) {
         frame_data *fdata = frame_data_sequence_find(cf->provider.frames, framenum);
         if (!fdata || fdata->file_off < 0) continue;
+        if (cf->dfilter && !fdata->passed_dfilter) continue; /* Tier1: skip display-filtered frames */
 
         int err = 0;
         gchar *err_info_str = NULL;
@@ -6954,6 +7045,7 @@ snmp_info_t* packet_analyzer_extract_snmp_info(capture_file *cf,
     for (guint32 framenum = 1; framenum <= cf->count; framenum++) {
         frame_data *fdata = frame_data_sequence_find(cf->provider.frames, framenum);
         if (!fdata || fdata->file_off < 0) continue;
+        if (cf->dfilter && !fdata->passed_dfilter) continue; /* Tier1: skip display-filtered frames */
 
         int err = 0;
         gchar *err_info_str = NULL;
@@ -7243,6 +7335,7 @@ syslog_info_t* packet_analyzer_extract_syslog_info(capture_file *cf,
     for (guint32 framenum = 1; framenum <= cf->count; framenum++) {
         frame_data *fdata = frame_data_sequence_find(cf->provider.frames, framenum);
         if (!fdata || fdata->file_off < 0) continue;
+        if (cf->dfilter && !fdata->passed_dfilter) continue; /* Tier1: skip display-filtered frames */
 
         int err = 0;
         gchar *err_info_str = NULL;
@@ -7699,6 +7792,7 @@ ssh_info_t* packet_analyzer_extract_ssh_info(capture_file *cf,
     for (guint32 framenum = 1; framenum <= cf->count; framenum++) {
         frame_data *fdata = frame_data_sequence_find(cf->provider.frames, framenum);
         if (!fdata || fdata->file_off < 0) continue;
+        if (cf->dfilter && !fdata->passed_dfilter) continue; /* Tier1: skip display-filtered frames */
 
         int err = 0;
         gchar *err_info_str = NULL;
@@ -7944,6 +8038,7 @@ ftp_info_t* packet_analyzer_extract_ftp_info(capture_file *cf,
     for (guint32 framenum = 1; framenum <= cf->count; framenum++) {
         frame_data *fdata = frame_data_sequence_find(cf->provider.frames, framenum);
         if (!fdata || fdata->file_off < 0) continue;
+        if (cf->dfilter && !fdata->passed_dfilter) continue; /* Tier1: skip display-filtered frames */
 
         int err = 0;
         gchar *err_info_str = NULL;
@@ -8184,6 +8279,7 @@ telnet_info_t* packet_analyzer_extract_telnet_info(capture_file *cf,
     for (guint32 framenum = 1; framenum <= cf->count; framenum++) {
         frame_data *fdata = frame_data_sequence_find(cf->provider.frames, framenum);
         if (!fdata || fdata->file_off < 0) continue;
+        if (cf->dfilter && !fdata->passed_dfilter) continue; /* Tier1: skip display-filtered frames */
 
         int err = 0;
         gchar *err_info_str = NULL;
@@ -8389,6 +8485,7 @@ nbns_info_t *packet_analyzer_extract_nbns_info(capture_file *cf,
     for (guint32 framenum = 1; framenum <= cf->count; framenum++) {
         frame_data *fdata = frame_data_sequence_find(cf->provider.frames, framenum);
         if (!fdata || fdata->file_off < 0) continue;
+        if (cf->dfilter && !fdata->passed_dfilter) continue; /* Tier1: skip display-filtered frames */
 
         int err = 0; gchar *err_info_str = NULL;
         wtap_rec rec; gboolean read_ok;
@@ -8565,6 +8662,7 @@ nbdgm_info_t *packet_analyzer_extract_nbdgm_info(capture_file *cf,
     for (guint32 framenum = 1; framenum <= cf->count; framenum++) {
         frame_data *fdata = frame_data_sequence_find(cf->provider.frames, framenum);
         if (!fdata || fdata->file_off < 0) continue;
+        if (cf->dfilter && !fdata->passed_dfilter) continue; /* Tier1: skip display-filtered frames */
 
         int err = 0; gchar *err_info_str = NULL;
         wtap_rec rec; gboolean read_ok;
@@ -8719,6 +8817,7 @@ nbss_info_t *packet_analyzer_extract_nbss_info(capture_file *cf,
     for (guint32 framenum = 1; framenum <= cf->count; framenum++) {
         frame_data *fdata = frame_data_sequence_find(cf->provider.frames, framenum);
         if (!fdata || fdata->file_off < 0) continue;
+        if (cf->dfilter && !fdata->passed_dfilter) continue; /* Tier1: skip display-filtered frames */
 
         int err = 0; gchar *err_info_str = NULL;
         wtap_rec rec; gboolean read_ok;
@@ -8906,6 +9005,7 @@ tcp_stat_info_t *packet_analyzer_extract_tcp_stat_info(capture_file *cf,
     for (guint32 framenum = 1; framenum <= cf->count; framenum++) {
         frame_data *fdata = frame_data_sequence_find(cf->provider.frames, framenum);
         if (!fdata || fdata->file_off < 0) continue;
+        if (cf->dfilter && !fdata->passed_dfilter) continue; /* Tier1: skip display-filtered frames */
 
         int err = 0; gchar *err_info_str = NULL;
         wtap_rec rec; gboolean read_ok;
@@ -9044,6 +9144,7 @@ udp_stat_info_t *packet_analyzer_extract_udp_stat_info(capture_file *cf,
     for (guint32 framenum = 1; framenum <= cf->count; framenum++) {
         frame_data *fdata = frame_data_sequence_find(cf->provider.frames, framenum);
         if (!fdata || fdata->file_off < 0) continue;
+        if (cf->dfilter && !fdata->passed_dfilter) continue; /* Tier1: skip display-filtered frames */
 
         int err = 0; gchar *err_info_str = NULL;
         wtap_rec rec; gboolean read_ok;

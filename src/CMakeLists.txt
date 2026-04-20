@@ -5,7 +5,7 @@
 include(WiresharkPlugin)
 
 # Plugin name and version info (major minor micro extra)
-set_module_info(packetcircle 0 4 7 0)
+set_module_info(packetcircle 0 5 1 0)
 
 # Enable Qt MOC and resource compilation
 SET(CMAKE_AUTOMOC ON)
@@ -28,6 +28,7 @@ set(DISSECTOR_SRC
     packet_analyzer.c
     circle_plugin.c
     circle_widget.c
+    graph_widget.c
     ui_main_window.c
     ui_bridge.cpp
 )
@@ -35,6 +36,7 @@ set(DISSECTOR_SRC
 # Set C++ for Qt source files (.c files that are actually C++)
 set_source_files_properties(
     circle_widget.c
+    graph_widget.c
     ui_main_window.c
     ui_bridge.cpp
     PROPERTIES LANGUAGE CXX
@@ -70,6 +72,7 @@ set(PLUGIN_FILES
 set(PLUGIN_HEADERS
     packet_analyzer.h
     circle_widget.h
+    graph_widget.h
     circle_plugin.h
     ui_main_window.h
     ui_bridge.h

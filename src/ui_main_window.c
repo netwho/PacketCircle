@@ -37,6 +37,7 @@
 #include <QHBoxLayout>
 #include <QLabel>
 #include <QDialog>
+#include <QScrollArea>
 #include <QVBoxLayout>
 #include <QPushButton>
 #include <QTextEdit>
@@ -56,6 +57,7 @@
 #include <QScreen>
 #include <algorithm>
 #include <QPainter>
+#include <QLinearGradient>
 #include <QNetworkAccessManager>
 #include <QNetworkReply>
 #include <QNetworkRequest>
@@ -91,6 +93,35 @@ static bool isDarkTheme()
     return qApp->palette().windowText().color().lightness() >
            qApp->palette().window().color().lightness();
 }
+
+/* ── Tier 3: Analysis result cache ─────────────────────────────────────────
+ * Caches the result of expensive full-capture scans so repeated clicks on
+ * the same connection pair return instantly.
+ * Key format:  "L2|src|dst"   /  "TCP|src|dst|port"  /  "UDP|src|dst|port"
+ * Lifetime: cleared whenever a new analysis result arrives (new capture /
+ *           display-filter change), so stale results are never shown.       */
+namespace {
+struct AnalysisCache {
+    QHash<QString, l2_info_t*>       l2;
+    QHash<QString, tcp_stat_info_t*> tcpStat;
+    QHash<QString, udp_stat_info_t*> udpStat;
+
+    void clear() {
+        for (auto *v : std::as_const(l2))      packet_analyzer_free_l2_info(v);
+        for (auto *v : std::as_const(tcpStat)) packet_analyzer_free_tcp_stat_info(v);
+        for (auto *v : std::as_const(udpStat)) packet_analyzer_free_udp_stat_info(v);
+        l2.clear(); tcpStat.clear(); udpStat.clear();
+    }
+
+    static QString l2Key(const char *a, const char *b)
+        { return QString("L2|%1|%2").arg(a, b); }
+    static QString tcpKey(const char *a, const char *b, quint16 port)
+        { return QString("TCP|%1|%2|%3").arg(a, b, QString::number(port)); }
+    static QString udpKey(const char *a, const char *b, quint16 port)
+        { return QString("UDP|%1|%2|%3").arg(a, b, QString::number(port)); }
+};
+static AnalysisCache s_analysisCache;
+} // namespace
 
 static bool parse_ipv4(const QString &ip, quint32 *out)
 {
@@ -158,11 +189,9 @@ MainWindow::MainWindow(QWidget *parent)
     , m_bytesBtn(nullptr)
     , m_circleBtn(nullptr)
     , m_tableBtn(nullptr)
+    , m_graphBtn(nullptr)
     , m_macBtn(nullptr)
     , m_ipBtn(nullptr)
-    , m_selectAllBtn(nullptr)
-    , m_selectSearchBtn(nullptr)
-    , m_selectNoneBtn(nullptr)
     , m_applyFilterBtn(nullptr)
     , m_clearFilterBtn(nullptr)
     , m_reloadDataBtn(nullptr)
@@ -174,11 +203,15 @@ MainWindow::MainWindow(QWidget *parent)
     , m_malcolmEnabled(false)
     , m_splitter(nullptr)
     , m_splitterSizesRestored(false)
+    , m_graphControlsRow(nullptr)
+    , m_graphEdgeColorCombo(nullptr)
+    , m_graphNodeColorCombo(nullptr)
+    , m_graphLayoutCombo(nullptr)
     , m_viewStack(nullptr)
     , m_circleWidget(nullptr)
     , m_circleContainer(nullptr)
+    , m_graphWidget(nullptr)
     , m_searchLineEdit(nullptr)
-    , m_searchLabel(nullptr)
     , m_tableWidget(nullptr)
     , m_pairListWidget(nullptr)
     , m_pairListContainer(nullptr)
@@ -188,6 +221,7 @@ MainWindow::MainWindow(QWidget *parent)
     , m_lineThicknessCheckBox(nullptr)
     , m_pairListBlinkTimer(nullptr)
     , m_pairListBlinkState(false)
+    , m_hoveredPairListItem(nullptr)
     , m_connectionPopup(nullptr)
     , m_networkManager(nullptr)
     , m_analysisResult(NULL)
@@ -201,7 +235,19 @@ MainWindow::MainWindow(QWidget *parent)
     , m_useMAC(FALSE)
     , m_darkTheme(isDarkTheme())
     , m_wifiMode(false)
+    , m_betaGraphEnabled(false)
+    , m_enableL2Analysis(true)
+    , m_enableTransportStats(true)
+    , m_enableDeepInspection(true)
+    , m_activeThresholdGroup(0)
+    , m_reportCompany("Demo")
+    , m_reportPreparedBy("John Doe")
+    , m_reportProject("")
+    , m_reportComments("Demo Segment Analysis")
+    , m_reportPaperSize(0)
 {
+    m_thresholdGroups.append(GraphWidget::GraphThresholds::defaults());
+    m_internalSubnets = GraphWidget::defaultInternalSubnets();
     setupUI();
 }
 
@@ -268,6 +314,34 @@ void MainWindow::savePreferences()
     settings.beginGroup("Integrations");
     settings.setValue("ntop_enabled",    m_ntopEnabled);
     settings.setValue("malcolm_enabled", m_malcolmEnabled);
+    settings.endGroup();
+
+    /* Performance toggles */
+    settings.beginGroup("Performance");
+    settings.setValue("enable_l2_analysis",     m_enableL2Analysis);
+    settings.setValue("enable_transport_stats", m_enableTransportStats);
+    settings.setValue("enable_deep_inspection", m_enableDeepInspection);
+
+    /* Graph threshold groups */
+    saveThresholdGroups();
+    settings.setValue("active_threshold_group", m_activeThresholdGroup);
+    settings.endGroup();
+
+    /* Report configuration */
+    settings.beginGroup("Report");
+    settings.setValue("company",     m_reportCompany);
+    settings.setValue("prepared_by", m_reportPreparedBy);
+    settings.setValue("project",     m_reportProject);
+    settings.setValue("comments",    m_reportComments);
+    settings.setValue("paper_size",  m_reportPaperSize);
+    settings.endGroup();
+
+    settings.beginGroup("Network");
+    QStringList snEntries;
+    for (const auto &sn : m_internalSubnets)
+        snEntries.append(QString("%1/%2:%3").arg(sn.prefix).arg(sn.bits)
+                         .arg(sn.builtIn ? "builtin" : "custom"));
+    settings.setValue("internalSubnets", snEntries);
     settings.endGroup();
 
     settings.sync();
@@ -342,10 +416,12 @@ void MainWindow::loadPreferences()
     updateSearchBarForMode();
 
     int viewIdx = settings.value("view", 0).toInt();
-    if (m_viewStack && (viewIdx == 0 || viewIdx == 1)) {
+    if (m_viewStack && viewIdx >= 0 && viewIdx <= 2) {
         m_viewStack->setCurrentIndex(viewIdx);
         if (m_circleBtn) m_circleBtn->setChecked(viewIdx == 0);
-        if (m_tableBtn) m_tableBtn->setChecked(viewIdx == 1);
+        if (m_tableBtn)  m_tableBtn->setChecked(viewIdx == 1);
+        if (m_graphBtn)  m_graphBtn->setChecked(viewIdx == 2);
+        if (m_graphControlsRow) m_graphControlsRow->setVisible(viewIdx == 2);
     }
 
     bool lineThickness = settings.value("lineThickness", false).toBool();
@@ -364,6 +440,60 @@ void MainWindow::loadPreferences()
     /* Apply visibility immediately */
     if (m_sendToNtopBtn)    m_sendToNtopBtn->setVisible(m_ntopEnabled);
     if (m_sendToMalcolmBtn) m_sendToMalcolmBtn->setVisible(m_malcolmEnabled);
+
+    /* Performance toggles */
+    settings.beginGroup("Performance");
+    m_enableL2Analysis     = settings.value("enable_l2_analysis",     true).toBool();
+    m_enableTransportStats = settings.value("enable_transport_stats",  true).toBool();
+    m_enableDeepInspection = settings.value("enable_deep_inspection",  true).toBool();
+
+    /* Graph threshold groups */
+    loadThresholdGroups();
+    m_activeThresholdGroup = settings.value("active_threshold_group", 0).toInt();
+    if (m_activeThresholdGroup < 0 || m_activeThresholdGroup >= m_thresholdGroups.size())
+        m_activeThresholdGroup = 0;
+    settings.endGroup();
+
+    /* Report configuration */
+    settings.beginGroup("Report");
+    m_reportCompany    = settings.value("company",     "Demo").toString();
+    m_reportPreparedBy = settings.value("prepared_by", "John Doe").toString();
+    m_reportProject    = settings.value("project",     "").toString();
+    m_reportComments   = settings.value("comments",    "Demo Segment Analysis").toString();
+    m_reportPaperSize  = settings.value("paper_size",  0).toInt();
+    settings.endGroup();
+
+    settings.beginGroup("Network");
+    QStringList snEntries = settings.value("internalSubnets").toStringList();
+    if (!snEntries.isEmpty()) {
+        m_internalSubnets.clear();
+        for (const QString &e : snEntries) {
+            QStringList tok = e.split(':');
+            if (tok.size() < 1) continue;
+            QStringList addrBits = tok[0].split('/');
+            if (addrBits.size() != 2) continue;
+            GraphWidget::InternalSubnet sn;
+            sn.prefix  = addrBits[0].trimmed();
+            sn.bits    = addrBits[1].trimmed().toInt();
+            sn.builtIn = (tok.size() >= 2 && tok[1].trimmed() == "builtin");
+            if (sn.bits > 0 && sn.bits <= 32)
+                m_internalSubnets.append(sn);
+        }
+    }
+    settings.endGroup();
+    if (m_graphWidget) m_graphWidget->setInternalSubnets(m_internalSubnets);
+
+    /* Beta features — graph view is hidden until opted in via settings.ini */
+    settings.beginGroup("Beta");
+    m_betaGraphEnabled = settings.value("EnableGraphView", false).toBool();
+    settings.endGroup();
+    if (m_graphBtn) m_graphBtn->setVisible(m_betaGraphEnabled);
+    /* If graph was the saved view but beta is now disabled, fall back to circle */
+    if (!m_betaGraphEnabled && m_viewStack && m_viewStack->currentIndex() == 2) {
+        m_viewStack->setCurrentIndex(0);
+        if (m_circleBtn) m_circleBtn->setChecked(true);
+        if (m_graphControlsRow) m_graphControlsRow->setVisible(false);
+    }
 }
 
 void MainWindow::closeEvent(QCloseEvent *event)
@@ -385,10 +515,25 @@ void MainWindow::setupUI()
     createTableView();
     /* Legend will be created in createTableView after pair list container is ready */
 
-    /* Create view stack for circle/table */
+    /* Graph view */
+    m_graphWidget = new GraphWidget(this);
+    m_graphWidget->setDarkTheme(m_darkTheme);
+    connect(m_graphWidget, &GraphWidget::pairSelectionChanged,
+            this, &MainWindow::onPairSelectionChanged);
+    connect(m_graphWidget, &GraphWidget::nodeVisibilityToggle,
+            this, &MainWindow::onNodeVisibilityToggle);
+    connect(m_graphWidget, &GraphWidget::lineClicked,
+            this, &MainWindow::onLineClicked);
+    connect(m_graphWidget, &GraphWidget::lineHovered,
+            this, &MainWindow::onLineHovered);
+    connect(m_graphWidget, &GraphWidget::legendFilterChanged,
+            this, &MainWindow::onGraphLegendFilter);
+
+    /* Create view stack: Page 0=Circle, 1=Table, 2=Graph */
     m_viewStack = new QStackedWidget(this);
-    m_viewStack->addWidget(m_circleContainer);
-    m_viewStack->addWidget(m_tableWidget);
+    m_viewStack->addWidget(m_circleContainer);  /* Page 0 */
+    m_viewStack->addWidget(m_tableWidget);      /* Page 1 */
+    m_viewStack->addWidget(m_graphWidget);      /* Page 2 */
     m_viewStack->setSizePolicy(QSizePolicy::Expanding, QSizePolicy::Expanding);
     
     /* Create splitter for main content */
@@ -430,6 +575,7 @@ void MainWindow::setupUI()
     /* Set initial view */
     m_circleBtn->setChecked(true);
     m_viewStack->setCurrentIndex(0);
+    if (m_graphControlsRow) m_graphControlsRow->setVisible(false);
     
     /* Make window resizable with a reasonable minimum size
      * 640x480 fits older laptops; 1280x780 is comfortable on 1080p */
@@ -437,7 +583,7 @@ void MainWindow::setupUI()
     resize(1280, 780);
     
     /* Set window title and flags */
-setWindowTitle("PacketCircle v.0.4.7"); /* WH: version bump */
+setWindowTitle("PacketCircle v.0.5.1"); /* WH: version bump */
     
     /* Create pair list blink timer for synchronized search highlighting */
     m_pairListBlinkTimer = new QTimer(this);
@@ -675,16 +821,19 @@ void MainWindow::createControls()
     /* -- View segment group -- */
     QLabel *viewLabel = new QLabel("View:", m_controlsWidget);
     m_circleBtn = makeSegBtn("Circle", "left");
-    m_tableBtn = makeSegBtn("Table", "right");
+    m_tableBtn  = makeSegBtn("Table",  "mid");
+    m_graphBtn  = makeSegBtn("Graph",  "right");
     m_circleBtn->setChecked(true);
 
     QButtonGroup *viewGroup = new QButtonGroup(this);
     viewGroup->setExclusive(true);
     viewGroup->addButton(m_circleBtn);
     viewGroup->addButton(m_tableBtn);
+    viewGroup->addButton(m_graphBtn);
 
     connect(m_circleBtn, &QPushButton::clicked, this, [this]() { onCircleViewToggled(true); });
-    connect(m_tableBtn, &QPushButton::clicked, this, [this]() { onTableViewToggled(true); });
+    connect(m_tableBtn,  &QPushButton::clicked, this, [this]() { onTableViewToggled(true); });
+    connect(m_graphBtn,  &QPushButton::clicked, this, [this]() { onGraphViewToggled(true); });
 
     /* -- Mode segment group -- */
     QLabel *modeLabel = new QLabel("Mode:", m_controlsWidget);
@@ -699,11 +848,6 @@ void MainWindow::createControls()
 
     connect(m_ipBtn, &QPushButton::clicked, this, [this]() { onIPToggled(true); });
     connect(m_macBtn, &QPushButton::clicked, this, [this]() { onMACToggled(true); });
-
-    /* -- Weight checkbox -- */
-    m_lineThicknessCheckBox = new QCheckBox("Weight", m_controlsWidget);
-    m_lineThicknessCheckBox->setChecked(false);
-    connect(m_lineThicknessCheckBox, &QCheckBox::toggled, this, &MainWindow::onLineThicknessToggled);
 
     /* -- Shared style factory for small circular icon buttons (gear + help) -- */
     auto makeIconBtn = [&](const QString &label, const QString &tip, QWidget *parent) {
@@ -738,6 +882,12 @@ void MainWindow::createControls()
     QPushButton *helpBtn = makeIconBtn("?", "Show help and controls description", m_row1Widget);
     connect(helpBtn, &QPushButton::clicked, this, &MainWindow::onHelpClicked);
 
+    /* -- Weight checkbox -- */
+    m_lineThicknessCheckBox = new QCheckBox("Weight", m_row1Widget);
+    m_lineThicknessCheckBox->setToolTip("Toggle line weight: scale line thickness by traffic volume");
+    m_lineThicknessCheckBox->setChecked(false);
+    connect(m_lineThicknessCheckBox, &QCheckBox::toggled, this, &MainWindow::onLineThicknessToggled);
+
     /* Layout Row 1 */
     m_controlsRow1->addWidget(topLabel);
     m_controlsRow1->addWidget(m_top10Btn);
@@ -751,6 +901,7 @@ void MainWindow::createControls()
     m_controlsRow1->addWidget(viewLabel);
     m_controlsRow1->addWidget(m_circleBtn);
     m_controlsRow1->addWidget(m_tableBtn);
+    m_controlsRow1->addWidget(m_graphBtn);
     m_controlsRow1->addSpacing(8);
     m_controlsRow1->addWidget(modeLabel);
     m_controlsRow1->addWidget(m_ipBtn);
@@ -767,8 +918,6 @@ void MainWindow::createControls()
     m_controlsRow2->setSpacing(6);
     m_controlsRow2->setContentsMargins(0, 0, 0, 0);
 
-    m_selectAllBtn = makeActionBtn("Select All");
-    m_selectNoneBtn = makeActionBtn("Select None");
     m_applyFilterBtn = makeActionBtn("Filter");
     m_applyFilterBtn->setStyleSheet(
         m_applyFilterBtn->styleSheet() +
@@ -783,13 +932,6 @@ void MainWindow::createControls()
     m_sendToNtopBtn->setToolTip("Upload current capture to ntopng for analysis");
     m_sendToMalcolmBtn = makeActionBtn("Send to Malcolm");
     m_sendToMalcolmBtn->setToolTip("Upload current capture to Malcolm / Arkime for deep analysis");
-    m_selectSearchBtn = makeActionBtn("Select Results");
-    m_selectSearchBtn->setToolTip("Select only the communication pairs matching the current search");
-    m_selectSearchBtn->setEnabled(false);
-
-    connect(m_selectAllBtn, &QPushButton::clicked, this, &MainWindow::onSelectAllClicked);
-    connect(m_selectSearchBtn, &QPushButton::clicked, this, &MainWindow::onSelectSearchResultsClicked);
-    connect(m_selectNoneBtn, &QPushButton::clicked, this, &MainWindow::onSelectNoneClicked);
     connect(m_applyFilterBtn, &QPushButton::clicked, this, &MainWindow::onApplyFilterClicked);
     connect(m_clearFilterBtn, &QPushButton::clicked, this, &MainWindow::onClearFilterClicked);
     connect(m_reloadDataBtn, &QPushButton::clicked, this, &MainWindow::onReloadDataClicked);
@@ -798,8 +940,7 @@ void MainWindow::createControls()
     connect(m_sendToMalcolmBtn, &QPushButton::clicked, this, &MainWindow::onSendToMalcolmClicked);
     /* (ntopng right-click config removed — use ⚙ Settings instead) */
 
-    /* Search bar (moved from circle container) */
-    m_searchLabel = new QLabel("Search IP", m_controlsWidget);
+    /* Search bar */
     m_searchLineEdit = new QLineEdit(m_controlsWidget);
     m_searchLineEdit->setPlaceholderText("Partial IP or CIDR (e.g., 192.168.1 or 10.0.0.0/24)");
     m_searchLineEdit->setMinimumWidth(160);
@@ -854,9 +995,6 @@ void MainWindow::createControls()
     });
 
     /* Layout Row 2 */
-    m_controlsRow2->addWidget(m_selectAllBtn);
-    m_controlsRow2->addWidget(m_selectSearchBtn);
-    m_controlsRow2->addWidget(m_selectNoneBtn);
     m_controlsRow2->addWidget(m_applyFilterBtn);
     m_controlsRow2->addWidget(m_clearFilterBtn);
     m_controlsRow2->addSpacing(6);
@@ -865,11 +1003,124 @@ void MainWindow::createControls()
     m_controlsRow2->addWidget(m_sendToNtopBtn);
     m_controlsRow2->addWidget(m_sendToMalcolmBtn);
     m_controlsRow2->addSpacing(12);
-    m_controlsRow2->addWidget(m_searchLabel);
     m_controlsRow2->addWidget(m_searchLineEdit, 1);
+
+    /* === Row 3: Graph-specific controls (hidden until Graph view is active) === */
+    m_graphControlsRow = new QWidget(m_controlsWidget);
+    QHBoxLayout *graphRow = new QHBoxLayout(m_graphControlsRow);
+    graphRow->setSpacing(6);
+    graphRow->setContentsMargins(0, 0, 0, 0);
+
+    /* Edge color */
+    QLabel *edgeColorLabel = new QLabel("Edge:", m_graphControlsRow);
+    m_graphEdgeColorCombo  = new QComboBox(m_graphControlsRow);
+    m_graphEdgeColorCombo->addItem("Protocol",      QVariant(0));
+    m_graphEdgeColorCombo->addItem("TCP Window",    QVariant(6));
+    m_graphEdgeColorCombo->addItem("TCP Health",    QVariant(1));
+    m_graphEdgeColorCombo->addItem("Response Time", QVariant(3));
+    m_graphEdgeColorCombo->addItem("Throughput",    QVariant(4));
+    m_graphEdgeColorCombo->addItem("Anomaly Score", QVariant(2));
+    m_graphEdgeColorCombo->addItem("High Risk",     QVariant(5));
+    m_graphEdgeColorCombo->setToolTip(
+        "Edge colour encoding:\n"
+        "  Protocol: application protocol (same palette as circle view)\n"
+        "  TCP Health: green=healthy / yellow=moderate / orange=degraded / red=unhealthy\n"
+        "  Anomaly Score: green=normal / yellow=noteworthy / orange=suspicious / red=anomalous\n"
+        "  Response Time: green=<5ms / yellow-green=5–50ms / yellow=50–200ms / orange=200–500ms / red=>500ms\n"
+        "  Throughput: blue=<10KB/s / green=10–100KB/s / yellow=100KB–1MB/s / orange=1–10MB/s / red=>10MB/s\n"
+        "  High Risk: grey=safe / yellow=elevated (SSH,SNMP) / orange=high (RDP,WinRM) / red=critical (Telnet,VNC,FTP) / purple=VPN/TOR\n"
+        "  TCP Window: green=ok (>=32KB) / yellow-green=mild (8-32KB) / yellow=moderate (4-8KB) / orange=constrained (<4KB) / red=zero-window stall");
+
+    /* Node color */
+    QLabel *nodeColorLabel = new QLabel("Node:", m_graphControlsRow);
+    m_graphNodeColorCombo  = new QComboBox(m_graphControlsRow);
+    m_graphNodeColorCombo->addItem("Service / Port",  QVariant(0));
+    m_graphNodeColorCombo->addItem("Role (Int/Ext)",  QVariant(1));
+    m_graphNodeColorCombo->addItem("Protocol",        QVariant(2));
+    m_graphNodeColorCombo->addItem("Function",        QVariant(3));
+    m_graphNodeColorCombo->setToolTip(
+        "Node colour encoding:\n"
+        "  Service/Port: colour by top TCP/UDP port on this host\n"
+        "  Role: Internal (blue) / External (red) / MAC (purple) / Broadcast (amber)\n"
+        "  Function: Remote (crimson) / Interactive (orange) / Messaging (teal) / Filetransfer (green) / Other (grey)\n"
+        "            Based on inbound destination ports — useful with Cluster layout\n"
+        "  Protocol: dominant application protocol (same palette as circle view)");
+
+    /* Layout */
+    QLabel *layoutLabel = new QLabel("Layout:", m_graphControlsRow);
+    m_graphLayoutCombo  = new QComboBox(m_graphControlsRow);
+    m_graphLayoutCombo->addItem("Force-directed", QVariant(0));
+    m_graphLayoutCombo->addItem("Star",           QVariant(1));
+    m_graphLayoutCombo->addItem("Circular",       QVariant(2));
+    m_graphLayoutCombo->addItem("Grid",           QVariant(3));
+    m_graphLayoutCombo->addItem("Cluster",        QVariant(4));
+    m_graphLayoutCombo->addItem("Concentric",     QVariant(5));
+    m_graphLayoutCombo->addItem("Hierarchical",   QVariant(6));
+    m_graphLayoutCombo->addItem("Radial",         QVariant(7));
+    m_graphLayoutCombo->setToolTip(
+        "Initial node arrangement:\n"
+        "  Force-directed: physics simulation (nodes can be dragged)\n"
+        "  Star: busiest node at centre, others radially arranged\n"
+        "  Circular: equal angular spacing (like circle view)\n"
+        "  Grid: deterministic grid, sorted by traffic\n"
+        "  Cluster: context-aware grouping — by Function category when Node=Function,\n"
+        "           by network role when Node=Role, by IP subnet otherwise\n"
+        "           (802.11 frame type in Wi-Fi mode)\n"
+        "  Concentric: rings sorted by connection count (most-connected inner)\n"
+        "  Hierarchical: tiers top-to-bottom: External / Gateway / Server / Client\n"
+        "  Radial: BFS rings outward from most-connected node\n"
+        "Pan: middle-mouse drag or Space+left-drag on empty space");
+
+    QPushButton *relayoutBtn = new QPushButton("\u21BA Re-layout", m_graphControlsRow);
+    relayoutBtn->setToolTip("Re-run selected layout from scratch");
+    relayoutBtn->setFixedHeight(24);
+
+    connect(m_graphEdgeColorCombo, QOverload<int>::of(&QComboBox::currentIndexChanged),
+            this, &MainWindow::onGraphEdgeColorChanged);
+    connect(m_graphNodeColorCombo, QOverload<int>::of(&QComboBox::currentIndexChanged),
+            this, &MainWindow::onGraphNodeColorChanged);
+    connect(m_graphLayoutCombo,    QOverload<int>::of(&QComboBox::currentIndexChanged),
+            this, &MainWindow::onGraphLayoutChanged);
+    connect(relayoutBtn, &QPushButton::clicked, this, &MainWindow::onGraphRelayout);
+
+    graphRow->addWidget(edgeColorLabel);
+    graphRow->addWidget(m_graphEdgeColorCombo);
+    graphRow->addSpacing(8);
+    graphRow->addWidget(nodeColorLabel);
+    graphRow->addWidget(m_graphNodeColorCombo);
+    graphRow->addSpacing(8);
+    graphRow->addWidget(layoutLabel);
+    graphRow->addWidget(m_graphLayoutCombo);
+    graphRow->addSpacing(8);
+    graphRow->addWidget(relayoutBtn);
+    graphRow->addSpacing(12);
+
+    /* Zoom controls */
+    QLabel *zoomLabel = new QLabel("Zoom:", m_graphControlsRow);
+    QPushButton *zoomOutBtn   = new QPushButton("\u2212", m_graphControlsRow);  /* − */
+    QPushButton *zoomResetBtn = new QPushButton("1:1",    m_graphControlsRow);
+    QPushButton *zoomInBtn    = new QPushButton("+",      m_graphControlsRow);
+    zoomOutBtn->setFixedSize(24, 24);
+    zoomInBtn->setFixedSize(24, 24);
+    zoomResetBtn->setFixedHeight(24);
+    zoomOutBtn->setToolTip("Zoom out  (or scroll wheel down)");
+    zoomInBtn->setToolTip("Zoom in  (or scroll wheel up)");
+    zoomResetBtn->setToolTip("Reset zoom to 100%");
+    connect(zoomOutBtn,   &QPushButton::clicked, this, [this]{ if (m_graphWidget) m_graphWidget->zoomOut(); });
+    connect(zoomInBtn,    &QPushButton::clicked, this, [this]{ if (m_graphWidget) m_graphWidget->zoomIn(); });
+    connect(zoomResetBtn, &QPushButton::clicked, this, [this]{ if (m_graphWidget) m_graphWidget->zoomReset(); });
+
+    graphRow->addWidget(zoomLabel);
+    graphRow->addWidget(zoomOutBtn);
+    graphRow->addWidget(zoomResetBtn);
+    graphRow->addWidget(zoomInBtn);
+    graphRow->addStretch();
+
+    m_graphControlsRow->setVisible(false);  /* hidden until Graph view is active */
 
     m_controlsOuterLayout->addWidget(m_row1Widget);
     m_controlsOuterLayout->addWidget(m_row2Widget);
+    m_controlsOuterLayout->addWidget(m_graphControlsRow);
 
     m_controlsWidget->setSizePolicy(QSizePolicy::Expanding, QSizePolicy::Fixed);
     m_mainLayout->addWidget(m_controlsWidget);
@@ -885,6 +1136,8 @@ void MainWindow::createCircleView()
             this, &MainWindow::onNodeVisibilityToggle);
     connect(m_circleWidget, &CircleWidget::lineClicked,
             this, &MainWindow::onLineClicked);
+    connect(m_circleWidget, &CircleWidget::lineHovered,
+            this, &MainWindow::onLineHovered);
 
     m_circleContainer = new QWidget(this);
     QVBoxLayout *circleLayout = new QVBoxLayout(m_circleContainer);
@@ -906,6 +1159,14 @@ void MainWindow::createTableView()
     m_tableWidget->setEditTriggers(QAbstractItemView::NoEditTriggers);
     m_tableWidget->horizontalHeader()->setStretchLastSection(true);
     m_tableWidget->setContextMenuPolicy(Qt::CustomContextMenu);
+    m_tableWidget->setMouseTracking(true);   /* needed for cellEntered */
+    connect(m_tableWidget, &QTableWidget::cellEntered,
+            this, [this](int row, int /*col*/) {
+        QTableWidgetItem *it = m_tableWidget->item(row, 1);  /* col 1 stores pair ptr */
+        if (!it) return;
+        void *ptr = it->data(Qt::UserRole).value<void*>();
+        onLineHovered(static_cast<comm_pair_t*>(ptr));
+    });
     connect(m_tableWidget, &QTableWidget::cellClicked,
             this, &MainWindow::onTableCellClicked);
     connect(m_tableWidget, &QTableWidget::customContextMenuRequested,
@@ -965,8 +1226,13 @@ void MainWindow::createTableView()
     /* Connect item changed signal to update circle widget selections */
     connect(m_pairListWidget, &QListWidget::itemChanged, this, &MainWindow::onPairListItemChanged);
 
+    /* Right-click context menu for selection operations */
+    m_pairListWidget->setContextMenuPolicy(Qt::CustomContextMenu);
+    connect(m_pairListWidget, &QListWidget::customContextMenuRequested,
+            this, &MainWindow::onPairListContextMenu);
+
     /* Event filter for direction-arrow toggling: clicking a row (non-checkbox area)
-     * on a bidirectional item cycles the arrow between → ↔ ← */
+     * on a bidirectional item cycles the arrow between --> <-> <-- */
     m_pairListWidget->viewport()->installEventFilter(this);
 
     /* Add pair list to container - it will expand */
@@ -1018,23 +1284,8 @@ void MainWindow::updateViews()
     updating = true;
     
     if (!m_analysisResult) {
-        if (m_circleWidget) {
-            m_circleWidget->setPairs(NULL, NULL);
-        }
-        if (m_circle_pairs) {
-            g_list_free(m_circle_pairs);
-            m_circle_pairs = NULL;
-        }
-        m_tableWidget->setRowCount(0);
-        m_pairListWidget->clear();
-        updating = false;
-        return;
-    }
-    
-    if (!m_analysisResult->pairs) {
-        if (m_circleWidget) {
-            m_circleWidget->setPairs(NULL, NULL);
-        }
+        if (m_circleWidget) m_circleWidget->setPairs(NULL, NULL);
+        if (m_graphWidget)  m_graphWidget->setPairs(NULL, NULL);
         if (m_circle_pairs) {
             g_list_free(m_circle_pairs);
             m_circle_pairs = NULL;
@@ -1045,11 +1296,23 @@ void MainWindow::updateViews()
         return;
     }
 
-    /* Clear CircleWidget's reference to old pairs first */
-    if (m_circleWidget) {
-        m_circleWidget->setPairs(NULL, NULL);
+    if (!m_analysisResult->pairs) {
+        if (m_circleWidget) m_circleWidget->setPairs(NULL, NULL);
+        if (m_graphWidget)  m_graphWidget->setPairs(NULL, NULL);
+        if (m_circle_pairs) {
+            g_list_free(m_circle_pairs);
+            m_circle_pairs = NULL;
+        }
+        m_tableWidget->setRowCount(0);
+        m_pairListWidget->clear();
+        updating = false;
+        return;
     }
-    
+
+    /* Clear widget references to old pairs first */
+    if (m_circleWidget) m_circleWidget->setPairs(NULL, NULL);
+    if (m_graphWidget)  m_graphWidget->setPairs(NULL, NULL);
+
     /* Free old circle_pairs list if it exists (only list nodes, pairs are owned by m_analysisResult) */
     if (m_circle_pairs) {
         g_list_free(m_circle_pairs);
@@ -1109,6 +1372,20 @@ void MainWindow::updateViews()
         
         /* Note: m_circle_pairs list nodes will be freed in destructor or when updateViews is called again */
         /* The pairs themselves are owned by m_analysisResult, so we don't free them */
+    }
+
+    /* Update graph view — uses the same m_circle_pairs list as circle view */
+    if (m_graphWidget) {
+        m_graphWidget->setMaxPairs(display_limit);
+        m_graphWidget->setUseBytes(m_useBytes);
+        m_graphWidget->setShowLineThickness(m_lineThicknessCheckBox
+                                            ? (gboolean)m_lineThicknessCheckBox->isChecked()
+                                            : FALSE);
+        /* Apply active threshold group */
+        if (m_activeThresholdGroup >= 0 && m_activeThresholdGroup < m_thresholdGroups.size())
+            m_graphWidget->setThresholds(m_thresholdGroups[m_activeThresholdGroup]);
+        m_graphWidget->setPairs(m_circle_pairs, m_analysisResult->protocols);
+        m_graphWidget->setSelectedPairs(m_selectedPairs);
     }
 
     /* Update table view — adjust columns for Wi-Fi vs standard mode */
@@ -1397,10 +1674,11 @@ void MainWindow::updateViews()
         src_addr = src_addr.leftJustified(max_src_len, ' ');
         dst_addr = dst_addr.leftJustified(max_dst_len, ' ');
 
-        /* Arrow character: ⇒ ⇔ ⇐  (double-stroke for better visibility) */
-        const char *arrow = (dir == 1) ? "  \xE2\x87\x94  "   /* ⇔ */
-                          : (dir == 2) ? "  \xE2\x87\x90  "   /* ⇐ */
-                          :              "  \xE2\x87\x92  ";   /* ⇒ */
+        /* ASCII arrows: consistent advance-width in any monospace font on all platforms.
+         * Unicode ⇒/⇔/⇐ render at inconsistent widths in Consolas on Windows. */
+        const char *arrow = (dir == 1) ? " <-> "
+                          : (dir == 2) ? " <-- "
+                          :              " --> ";
 
         QString text = src_addr + QString::fromUtf8(arrow) + dst_addr;
         QListWidgetItem *item = new QListWidgetItem(m_pairListWidget);
@@ -1703,7 +1981,10 @@ void MainWindow::updateAnalysis(analysis_result_t *result)
     /* Don't free m_top_pairs - it contains pointers to pairs owned by m_analysisResult */
     /* Setting to NULL prevents use-after-free issues */
     m_top_pairs = NULL;
-    
+
+    /* Tier 3: invalidate analysis cache — pairs and capture data are about to change */
+    s_analysisCache.clear();
+
     if (m_analysisResult) {
         packet_analyzer_free_result(m_analysisResult);
     }
@@ -1715,9 +1996,27 @@ void MainWindow::updateAnalysis(analysis_result_t *result)
     if (m_circleWidget) {
         m_circleWidget->setWiFiMode(m_wifiMode);
     }
+    if (m_graphWidget) {
+        m_graphWidget->setWiFiMode(m_wifiMode);
+    }
     /* Hide IP/MAC toggle in Wi-Fi mode (always uses MAC internally) */
     if (m_ipBtn)  m_ipBtn->setVisible(!m_wifiMode);
     if (m_macBtn) m_macBtn->setVisible(!m_wifiMode);
+    /* In WiFi mode: hide protocol-based edge/node color combos in the graph
+     * controls row — signal quality is always used instead.             */
+    if (m_graphEdgeColorCombo) m_graphEdgeColorCombo->setVisible(!m_wifiMode);
+    if (m_graphNodeColorCombo) m_graphNodeColorCombo->setVisible(!m_wifiMode);
+    /* Hide the Edge:/Node: labels that sit next to the combos */
+    if (m_graphControlsRow) {
+        const QList<QObject*> children = m_graphControlsRow->children();
+        int labelIdx = 0;
+        for (QObject *child : children) {
+            QLabel *lbl = qobject_cast<QLabel*>(child);
+            if (lbl && (lbl->text() == "Edge:" || lbl->text() == "Node:"))
+                lbl->setVisible(!m_wifiMode);
+        }
+        Q_UNUSED(labelIdx);
+    }
 
     /* WAN encapsulation advisory: show once when a non-Ethernet capture is detected.
      * PacketCircle automatically switches to IP mode for these capture types.       */
@@ -1747,7 +2046,6 @@ void MainWindow::updateAnalysis(analysis_result_t *result)
     }
     /* Update search bar hint for Wi-Fi */
     if (m_wifiMode) {
-        if (m_searchLabel) m_searchLabel->setText("Search Wi-Fi");
         if (m_searchLineEdit) m_searchLineEdit->setPlaceholderText("MAC, SSID, ap, signal quality  —  ? for help");
     } else if (wasWifi) {
         /* Restore normal hint when leaving Wi-Fi mode */
@@ -1819,6 +2117,7 @@ void MainWindow::updateAnalysis(analysis_result_t *result)
             enabled_protocols.clear();  /* Empty set = show all */
         }
         m_circleWidget->setProtocolFilter(enabled_protocols);
+        if (m_graphWidget) m_graphWidget->setProtocolFilter(enabled_protocols);
     }
 }
 
@@ -1838,17 +2137,99 @@ void MainWindow::onTop50Clicked()
     if (m_searchOverrideMode) exitSearchOverrideMode();
     m_topN = 50; m_top10Btn->setChecked(false); m_top25Btn->setChecked(false); updateViews(); updateLegend();
 }
-void MainWindow::onLineThicknessToggled(bool checked) 
-{ 
-    if (m_circleWidget) {
+void MainWindow::onLineThicknessToggled(bool checked)
+{
+    if (m_circleWidget)
         m_circleWidget->setShowLineThickness(checked ? TRUE : FALSE);
-    }
+    if (m_graphWidget)
+        m_graphWidget->setShowLineThickness(checked ? TRUE : FALSE);
 }
 
 void MainWindow::onPacketsToggled(bool checked) { if (checked) { m_useBytes = FALSE; updateViews(); } }
 void MainWindow::onBytesToggled(bool checked) { if (checked) { m_useBytes = TRUE; updateViews(); } }
-void MainWindow::onCircleViewToggled(bool checked) { if (checked) m_viewStack->setCurrentIndex(0); }
-void MainWindow::onTableViewToggled(bool checked) { if (checked) m_viewStack->setCurrentIndex(1); }
+void MainWindow::onCircleViewToggled(bool checked)
+{
+    if (!checked) return;
+    m_viewStack->setCurrentIndex(0);
+    if (m_graphControlsRow) m_graphControlsRow->setVisible(false);
+}
+
+void MainWindow::onTableViewToggled(bool checked)
+{
+    if (!checked) return;
+    m_viewStack->setCurrentIndex(1);
+    if (m_graphControlsRow) m_graphControlsRow->setVisible(false);
+}
+
+void MainWindow::onGraphViewToggled(bool checked)
+{
+    if (!checked) return;
+    m_viewStack->setCurrentIndex(2);
+    if (m_graphControlsRow) m_graphControlsRow->setVisible(true);
+    /* Propagate current metric setting to graph widget */
+    if (m_graphWidget) {
+        m_graphWidget->setUseBytes(m_useBytes);
+        m_graphWidget->setShowLineThickness(m_lineThicknessCheckBox
+                                            ? (gboolean)m_lineThicknessCheckBox->isChecked()
+                                            : FALSE);
+    }
+}
+
+void MainWindow::onGraphEdgeColorChanged(int index)
+{
+    if (!m_graphWidget) return;
+    QVariant v = m_graphEdgeColorCombo->itemData(index);
+    int mode = v.isValid() ? v.toInt() : index;
+    m_graphWidget->setEdgeColorMode(static_cast<GraphWidget::EdgeColorMode>(mode));
+}
+
+void MainWindow::onGraphNodeColorChanged(int index)
+{
+    if (!m_graphWidget) return;
+    m_graphWidget->setNodeColorMode(static_cast<GraphWidget::NodeColorMode>(index));
+}
+
+void MainWindow::onGraphLayoutChanged(int index)
+{
+    if (!m_graphWidget) return;
+    m_graphWidget->setLayoutMode(static_cast<GraphWidget::LayoutMode>(index));
+}
+
+void MainWindow::onGraphRelayout()
+{
+    if (m_graphWidget) m_graphWidget->relayout();
+}
+
+void MainWindow::onGraphLegendFilter(QList<comm_pair_t*> matchingPairs, bool active)
+{
+    if (!m_pairListWidget) return;
+
+    QSet<comm_pair_t*> matchSet(matchingPairs.begin(), matchingPairs.end());
+
+    /* Batch update — suppress itemChanged so we don't fire updateVisiblePairs for every tick */
+    disconnect(m_pairListWidget, &QListWidget::itemChanged,
+               this, &MainWindow::onPairListItemChanged);
+
+    for (int i = 0; i < m_pairListWidget->count(); i++) {
+        QListWidgetItem *item = m_pairListWidget->item(i);
+        if (!item) continue;
+        if (!active) {
+            item->setCheckState(Qt::Checked);
+        } else {
+            comm_pair_t *primary   = (comm_pair_t*)item->data(Qt::UserRole).value<void*>();
+            comm_pair_t *secondary = (comm_pair_t*)item->data(Qt::UserRole + 1).value<void*>();
+            bool matches = (primary   && matchSet.contains(primary))
+                        || (secondary && matchSet.contains(secondary));
+            item->setCheckState(matches ? Qt::Checked : Qt::Unchecked);
+        }
+    }
+
+    connect(m_pairListWidget, &QListWidget::itemChanged,
+            this, &MainWindow::onPairListItemChanged);
+
+    updateVisiblePairsFromWidgets();
+}
+
 void MainWindow::onMACToggled(bool checked) {
     if (checked) {
         m_useMAC = TRUE;
@@ -1893,15 +2274,12 @@ void MainWindow::onLineClicked(comm_pair_t *pair, const QPoint &globalPos)
         m_connectionPopup = nullptr;
     }
 
-    /* Find the reverse pair (B→A) so the popup can merge port data from
-     * both directions for a complete view.  Search through the same pair
-     * list that the circle widget uses.                                     */
+    /* Find the reverse pair (B→A) so the popup can show merged port data */
     comm_pair_t *reversePair = nullptr;
     if (m_circle_pairs) {
         for (GList *iter = m_circle_pairs; iter; iter = iter->next) {
             comm_pair_t *p = (comm_pair_t *)iter->data;
-            if (!p || !p->src_addr || !p->dst_addr) continue;
-            if (p == pair) continue;  /* skip self */
+            if (!p || !p->src_addr || !p->dst_addr || p == pair) continue;
             if (g_strcmp0(p->src_addr, pair->dst_addr) == 0 &&
                 g_strcmp0(p->dst_addr, pair->src_addr) == 0) {
                 reversePair = p;
@@ -1910,27 +2288,47 @@ void MainWindow::onLineClicked(comm_pair_t *pair, const QPoint &globalPos)
         }
     }
 
-    /* Create new connection popup with both directions */
+    /* Create and show popup immediately so basic info is visible right away */
     m_connectionPopup = new ConnectionPopup(pair, reversePair, m_useMAC, this);
-    
-    /* Position near the click point, offset slightly so cursor isn't on the popup */
+    m_connectionPopup->setPerformanceFlags(m_enableL2Analysis, m_enableTransportStats, m_enableDeepInspection);
+
     QPoint popupPos = globalPos + QPoint(10, 10);
-    
-    /* Ensure popup stays on screen */
     QScreen *screen = QApplication::screenAt(globalPos);
     if (screen) {
         QRect screenGeom = screen->availableGeometry();
         QSize popupSize = m_connectionPopup->sizeHint();
-        if (popupPos.x() + popupSize.width() > screenGeom.right()) {
+        if (popupPos.x() + popupSize.width() > screenGeom.right())
             popupPos.setX(globalPos.x() - popupSize.width() - 10);
-        }
-        if (popupPos.y() + popupSize.height() > screenGeom.bottom()) {
+        if (popupPos.y() + popupSize.height() > screenGeom.bottom())
             popupPos.setY(globalPos.y() - popupSize.height() - 10);
-        }
     }
-    
     m_connectionPopup->move(popupPos);
+
+    /* In graph view: show the score button immediately as "Calculating…" so the user
+     * knows it's coming; the deferred lambda below will enable it with final data. */
+    if (m_graphWidget && m_viewStack && m_viewStack->currentIndex() == 2)
+        m_connectionPopup->showScoreBtnCalculating();
+
     m_connectionPopup->show();
+
+    /* Defer score computation to after first paint — keeps popup snappy on large traces */
+    if (m_graphWidget && m_viewStack && m_viewStack->currentIndex() == 2) {
+        QPointer<ConnectionPopup> safePopup(m_connectionPopup);
+        QTimer::singleShot(0, this, [this, pair, reversePair, safePopup]() {
+            if (!safePopup) return;
+            QList<GraphWidget::ScoreFactor> healthFactors, anomalyFactors;
+            qreal hs = 0.5, as = 0.0, rtMs = -1.0, tpBps = 0.0;
+            m_graphWidget->getScoreBreakdown(pair, reversePair,
+                                             &healthFactors, &anomalyFactors,
+                                             &hs, &as, &rtMs, &tpBps);
+            /* Fetch window stats from the pre-computed edge (same source as edge colour) */
+            guint32 wMin = G_MAXUINT32, wMax = 0, wZero = 0;
+            gdouble wAvg = 0.0, wZeroDur = 0.0;
+            m_graphWidget->getEdgeWindowStats(pair, &wMin, &wMax, &wAvg, &wZero, &wZeroDur);
+            safePopup->setGraphScores(hs, as, healthFactors, anomalyFactors,
+                                      rtMs, tpBps, wMin, wMax, wAvg, wZero, wZeroDur);
+        });
+    }
 }
 
 /* ─── Table view: left-click opens ConnectionPopup ─────────────────────────
@@ -2204,10 +2602,12 @@ void MainWindow::onTableContextMenu(const QPoint &pos)
          * shown — hide() is a no-op and deleteLater() cleans it up after
          * the dialog returns.                                               */
         ConnectionPopup *tmp = new ConnectionPopup(pair, findReverse(), m_useMAC, this);
+        tmp->setPerformanceFlags(m_enableL2Analysis, m_enableTransportStats, m_enableDeepInspection);
         tmp->triggerInfoForPort(topPort, pm.id);
 
     } else if (selected == tcpStatAction || selected == udpStatAction) {
         ConnectionPopup *tmp = new ConnectionPopup(pair, findReverse(), m_useMAC, this);
+        tmp->setPerformanceFlags(m_enableL2Analysis, m_enableTransportStats, m_enableDeepInspection);
         tmp->triggerTransportDetails(selected == tcpStatAction);
 
     } else if (selected == detailsAction) {
@@ -2220,7 +2620,7 @@ void MainWindow::onTableContextMenu(const QPoint &pos)
 
 /* ─── Arrow-toggle event filter ───────────────────────────────────────────
  * Clicking the non-checkbox area of a bidirectional pair row cycles the
- * direction arrow:  ⇒ (forward only)  →  ⇔ (both)  →  ⇐ (reverse only)  →  …
+ * direction arrow:  --> (forward only)  →  <-> (both)  →  <-- (reverse only)  →  …
  * The checkbox at the far left (~first 30 px) is left untouched.
  * ─────────────────────────────────────────────────────────────────────────── */
 bool MainWindow::eventFilter(QObject *obj, QEvent *event)
@@ -2255,6 +2655,22 @@ bool MainWindow::eventFilter(QObject *obj, QEvent *event)
         }
     }
     return QMainWindow::eventFilter(obj, event);
+}
+
+void MainWindow::onPairListContextMenu(const QPoint &pos)
+{
+    QMenu menu(m_pairListWidget);
+    QAction *actAll    = menu.addAction("Select All");
+    QAction *actNone   = menu.addAction("Select None");
+    QAction *actInvert = menu.addAction("Invert Selection");
+    if (!m_highlightedPairItems.isEmpty()) {
+        menu.addSeparator();
+        menu.addAction("Select Search Results", this, &MainWindow::onSelectSearchResultsClicked);
+    }
+    QAction *chosen = menu.exec(m_pairListWidget->viewport()->mapToGlobal(pos));
+    if      (chosen == actAll)    onSelectAllClicked();
+    else if (chosen == actNone)   onSelectNoneClicked();
+    else if (chosen == actInvert) onInvertPairSelection();
 }
 
 void MainWindow::onSelectAllClicked()
@@ -2331,11 +2747,56 @@ void MainWindow::onSelectNoneClicked()
     }
 }
 
+void MainWindow::onInvertPairSelection()
+{
+    disconnect(m_pairListWidget, &QListWidget::itemChanged, this, &MainWindow::onPairListItemChanged);
+    for (int i = 0; i < m_pairListWidget->count(); i++) {
+        QListWidgetItem *item = m_pairListWidget->item(i);
+        if (item)
+            item->setCheckState(item->checkState() == Qt::Checked ? Qt::Unchecked : Qt::Checked);
+    }
+    connect(m_pairListWidget, &QListWidget::itemChanged, this, &MainWindow::onPairListItemChanged);
+    syncTableCheckboxesFromPairList();
+    updateVisiblePairsFromWidgets();
+}
+
+void MainWindow::onLineHovered(comm_pair_t *pair)
+{
+    if (!m_pairListWidget) return;
+
+    /* Scan the live list every call — avoids dangling-pointer crash when the
+     * list is rebuilt (top-N change, filter, reload) while a hover is active.
+     * The list is ≤50 items so the scan is negligible.                        */
+    QListWidgetItem *newHighlight = nullptr;
+    for (int i = 0; i < m_pairListWidget->count(); i++) {
+        QListWidgetItem *item = m_pairListWidget->item(i);
+        if (!item) continue;
+        void *primary   = item->data(Qt::UserRole).value<void*>();
+        void *secondary = item->data(Qt::UserRole + 1).value<void*>();
+        bool isMatch = pair && (primary == (void*)pair || secondary == (void*)pair);
+        if (isMatch) {
+            newHighlight = item;
+            if (item != m_hoveredPairListItem) {
+                item->setBackground(QColor(255, 160, 0, 200));
+                item->setForeground(QColor(0, 0, 0));
+            }
+        } else if (item == m_hoveredPairListItem) {
+            /* Was highlighted last time, clear it */
+            item->setBackground(QBrush());
+            item->setForeground(QBrush());
+        }
+    }
+
+    m_hoveredPairListItem = newHighlight;  /* nullptr when pair==nullptr or not found */
+    if (newHighlight)
+        m_pairListWidget->scrollToItem(newHighlight, QAbstractItemView::EnsureVisible);
+}
+
 void MainWindow::onHelpClicked()
 {
     /* Use custom QDialog instead of QMessageBox for full size control */
     QDialog *helpDialog = new QDialog(this);
-helpDialog->setWindowTitle("Help - PacketCircle v.0.4.7"); /* WH: version bump */
+helpDialog->setWindowTitle("Help - PacketCircle v.0.5.1"); /* WH: version bump */
     helpDialog->setMinimumSize(600, 400);
     helpDialog->resize(900, 650);
     /* Make dialog resizable */
@@ -2376,7 +2837,7 @@ helpDialog->setWindowTitle("Help - PacketCircle v.0.4.7"); /* WH: version bump *
         "&bull; <b>Filter</b>: Apply selected pairs as a Wireshark display filter (directional &mdash; filters by exact source&rarr;destination)<br/>"
         "&bull; <b>Clear</b>: Select all pairs, clear the Wireshark display filter, and show all packets<br/>"
         "&bull; <b>Reload</b>: Re-analyze current capture file (respects active Wireshark display filter)<br/>"
-        "&bull; <b>PDF</b>: Export a one-page PDF report containing the circle visualization and IP pair table"
+        "&bull; <b>PDF</b>: Export a 3-page PDF report (cover page, visualization + pair list, explanation page). Paper size and cover page fields are configured in <b>Settings &rarr; Configure Reports&hellip;</b>"
         "</p>"
 
         "<h3>Search & Highlighting:</h3>"
@@ -2462,9 +2923,9 @@ helpDialog->setWindowTitle("Help - PacketCircle v.0.4.7"); /* WH: version bump *
         "<h3>Filtering:</h3>"
         "<p style='font-weight: normal;'>The <b>Filter</b> button applies a Wireshark display filter for the currently checked pairs. "
         "The direction arrow on each pair controls what gets filtered:<br/>"
-        "&bull; <b>&#x21d2;</b> (forward) &mdash; filters only A &rarr; B packets<br/>"
-        "&bull; <b>&#x21d4;</b> (both) &mdash; filters both A &rarr; B and B &rarr; A packets<br/>"
-        "&bull; <b>&#x21d0;</b> (reverse) &mdash; filters only B &rarr; A packets<br/>"
+        "&bull; <b>--&gt;</b> (forward) &mdash; filters only A &rarr; B packets<br/>"
+        "&bull; <b>&lt;-&gt;</b> (both) &mdash; filters both A &rarr; B and B &rarr; A packets<br/>"
+        "&bull; <b>&lt;--</b> (reverse) &mdash; filters only B &rarr; A packets<br/>"
         "IPv6 addresses automatically use <code>ipv6.src</code> / <code>ipv6.dst</code> filter fields.</p>"
         "<p style='font-weight: normal;'>The <b>Clear</b> button resets everything: selects all pairs "
         "and sends an empty display filter to Wireshark so all packets are visible again.</p>"
@@ -2486,9 +2947,9 @@ helpDialog->setWindowTitle("Help - PacketCircle v.0.4.7"); /* WH: version bump *
         "Mixed TCP+UDP pairs display as alternating dotted lines.</p>"
 
         "<h3>Node Pair List:</h3>"
-        "<p style='font-weight: normal;'>Each row shows one connection. Bidirectional pairs (A&#x21d4;B) are merged into a "
+        "<p style='font-weight: normal;'>Each row shows one connection. Bidirectional pairs (A&lt;-&gt;B) are merged into a "
         "single row. The <b>checkbox</b> controls visibility of the connection line in the circle. "
-        "The <b>direction arrow</b> (&#x21d2; / &#x21d4; / &#x21d0;) controls the filter direction &mdash; click anywhere on the row "
+        "The <b>direction arrow</b> (--&gt; / &lt;-&gt; / &lt;--) controls the filter direction &mdash; click anywhere on the row "
         "<i>outside</i> the checkbox to cycle through the three states. "
         "Addresses are automatically truncated with \"...\" to fit the available panel width "
         "&mdash; drag the splitter to resize. MAC addresses and vendor names always show in full until space runs out, "
@@ -2505,13 +2966,14 @@ helpDialog->setWindowTitle("Help - PacketCircle v.0.4.7"); /* WH: version bump *
         "</p>"
 
         "<h3>PDF Export:</h3>"
-        "<p style='font-weight: normal;'>Click the <b>PDF</b> button to generate a one-page A4 landscape report containing:</p>"
+        "<p style='font-weight: normal;'>Click the <b>PDF</b> button to generate a 3-page PDF report:</p>"
         "<p style='margin-left: 0; padding-left: 0; font-weight: normal;'>"
-        "&bull; Header with the PacketCircle logo and report title<br/>"
-        "&bull; An introduction describing the analysis parameters<br/>"
-        "&bull; The circle visualization (rendered with a white background and darkened colors for print)<br/>"
-        "&bull; A table of all IP pairs with source, destination, packet count, and byte count"
+        "&bull; <b>Page 1 &mdash; Cover page</b>: PacketCircle logo, report title, and configurable metadata (Company Name, Prepared by, Project, Comments, Date)<br/>"
+        "&bull; <b>Page 2 &mdash; Report page</b>: the currently active view (Circle, Table, or Graph) at high resolution; the full communication pair list; a protocol legend (Circle/Table) or graph legend (Graph) below the visualization<br/>"
+        "&bull; <b>Page 3 &mdash; Explanation page</b>: plain-language interpretation guidance for the active view, plus common sections covering the pair list, active filters, Top-N setting, and metric"
         "</p>"
+        "<p style='font-weight: normal;'>Paper size (A4 or Legal, landscape) and all cover page fields are configured in "
+        "<b>Settings &rarr; Configure Reports&hellip;</b>. Settings are saved in <code>~/.PacketCircle/settings.ini</code>.</p>"
 
         "<h3>Preferences:</h3>"
         "<p style='font-weight: normal;'>PacketCircle automatically saves your preferences to "
@@ -2525,6 +2987,173 @@ helpDialog->setWindowTitle("Help - PacketCircle v.0.4.7"); /* WH: version bump *
         "&bull; Circle vs. Table view<br/>"
         "&bull; Line weight checkbox state"
         "</p>"
+
+        "<h3>Graph View:</h3>"
+        "<p style='font-weight: normal;'>The <b>Graph</b> view renders the same communication pairs as a "
+        "force-directed network topology. Switch to it with the <b>Graph</b> button in the toolbar. "
+        "The graph controls row (Edge, Node, Layout, Re-layout, Zoom) appears while in Graph mode.</p>"
+        "<p style='margin-left: 0; padding-left: 0; font-weight: normal;'>"
+        "&bull; <b>Edge: Protocol</b> — lines colored by dominant application protocol (same palette as circle view)<br/>"
+        "&bull; <b>Edge: TCP Health</b> — green=healthy / yellow=moderate / orange=degraded / red=unhealthy<br/>"
+        "&bull; <b>Edge: Anomaly Score</b> — green=clean / yellow=noteworthy / orange=suspicious / red=anomalous<br/>"
+        "&bull; <b>Edge: Response Time</b> — green=&lt;5ms / yellow-green=5-50ms / yellow=50-200ms / orange=200-500ms / red=&gt;500ms<br/>"
+        "&bull; <b>Edge: Throughput</b> — blue=&lt;10KB/s / green=10-100KB/s / yellow=100KB-1MB/s / orange=1-10MB/s / red=&gt;10MB/s<br/>"
+        "&bull; <b>Edge: TCP Window</b> — green=healthy / yellow=mild pressure / orange=constrained / red=zero-window stall<br/>"
+        "&bull; <b>Edge: High Risk</b> — grey=safe / yellow=elevated (SSH, MQTT, SNMP) / orange=high (RDP, WinRM, AnyDesk) / red=critical (Telnet, FTP, VNC, raw X11) / violet=VPN/TOR; hover an edge for a tooltip listing detected risk signals<br/>"
+        "&bull; <b>Node: Service/Port</b> — color by dominant destination port / service<br/>"
+        "&bull; <b>Node: Role</b> — Internal (RFC-1918) / External / Broadcast / MAC<br/>"
+        "&bull; <b>Node: Protocol</b> — dominant L7 protocol<br/>"
+        "&bull; <b>Node: Function</b> — service category by inbound ports: Remote Access (crimson) / Interactive Shell (orange) / Messaging (teal) / File Transfer (green) / Other (grey)<br/>"
+        "&bull; <b>Layout modes</b>: Force-directed, Star, Circular, Grid, Cluster, "
+        "Concentric (rings by connection count), Hierarchical (External / Gateway / Server / Client tiers), "
+        "Radial (BFS rings from most-connected node)<br/>"
+        "&bull; <b>Cluster grouping</b> adapts to the active node colour mode: "
+        "<i>Node: Function</i> &rarr; clusters by service category; "
+        "<i>Node: Role</i> &rarr; clusters by network role; "
+        "all other modes &rarr; clusters by /24 subnet<br/>"
+        "&bull; <b>Zoom</b>: scroll wheel or -/1:1/+ buttons<br/>"
+        "&bull; <b>Pan</b>: middle-mouse drag <i>or</i> hold Space then left-drag<br/>"
+        "&bull; <b>Move node</b>: left-drag a node"
+        "</p>"
+        "<p style='font-weight: normal;'>In <b>TCP Health</b> or <b>Anomaly Score</b> edge mode, "
+        "clicking a line opens the Connection Details popup with an additional <b>Score</b> button "
+        "in the header. Click Score to see a breakdown of every signal that contributed to the rating "
+        "with its direction (+/-) and percentage. "
+        "For TCP connections the Score breakdown also shows TCP Window statistics: "
+        "min/max/average window size, zero-window event count, and maximum zero-window stall duration. "
+        "For full scoring algorithm details see <b>graph-scores.md</b> in the repository.</p>"
+        "<p style='font-weight: normal;'>Scoring thresholds can be customised in "
+        "<b>Settings &rarr; Graph Thresholds</b>. Three built-in profiles are provided: "
+        "<b>Default</b> (balanced), <b>Strict</b> (flags problems earlier — for production / SLA environments), "
+        "and <b>Tolerant</b> (only flags obvious issues — for lab / internet traffic). "
+        "Custom profiles can also be created and named.</p>"
+
+        "<h3>Layout &amp; Colour Combination Guide</h3>"
+        "<p style='font-weight: normal;'>Each layout mode reveals a different structural aspect of the traffic. "
+        "Pairing it with the right edge and node colour modes sharpens the analysis. "
+        "The table below lists the most useful combinations.</p>"
+        "<table border='1' cellspacing='0' cellpadding='4' style='font-weight: normal; border-collapse: collapse;'>"
+        "<tr style='font-weight: bold;'>"
+        "  <td>Layout</td><td>Edge colour</td><td>Node colour</td><td>Best used for</td>"
+        "</tr>"
+        "<tr>"
+        "  <td><b>Force-directed</b></td><td>Protocol</td><td>Role</td>"
+        "  <td>General overview — organic clustering shows which hosts talk to each other most; "
+        "      node role (Internal / External / Broadcast) gives instant topology context</td>"
+        "</tr>"
+        "<tr>"
+        "  <td><b>Force-directed</b></td><td>TCP Health</td><td>Role</td>"
+        "  <td>Performance triage — red/orange edges stand out in the organic layout; "
+        "      quickly locate degraded connections without knowing the topology in advance</td>"
+        "</tr>"
+        "<tr>"
+        "  <td><b>Hierarchical</b></td><td>TCP Health</td><td>Service / Port</td>"
+        "  <td>Tier-by-tier health check — four fixed tiers (External → Gateway → Server → Client) "
+        "      show exactly which layer has unhealthy connections; service colour on nodes "
+        "      identifies the affected application</td>"
+        "</tr>"
+        "<tr>"
+        "  <td><b>Hierarchical</b></td><td>Response Time</td><td>Service / Port</td>"
+        "  <td>Latency / SLA analysis — the server tier is visually isolated; "
+        "      response-time colour on edges shows which services are slow; "
+        "      combine with the Strict threshold profile for tight SLA environments</td>"
+        "</tr>"
+        "<tr>"
+        "  <td><b>Radial</b></td><td>Anomaly Score</td><td>Role</td>"
+        "  <td>Scan &amp; sweep detection — BFS places the most-connected node (potential scanner) "
+        "      at the centre; anomaly-score edge colour highlights port-sweep and flood patterns "
+        "      radiating outward</td>"
+        "</tr>"
+        "<tr>"
+        "  <td><b>Radial</b></td><td>Protocol</td><td>Protocol</td>"
+        "  <td>Protocol spread from a hub — shows which protocols a dominant node uses with each "
+        "      peer; useful for diagnosing unexpected L7 traffic from a gateway or proxy</td>"
+        "</tr>"
+        "<tr>"
+        "  <td><b>Cluster</b></td><td>Protocol</td><td>Role</td>"
+        "  <td>Subnet segmentation — hosts are grouped by /24 subnet; cross-cluster edges "
+        "      immediately show inter-segment communication; protocol colour reveals what "
+        "      is crossing subnet boundaries</td>"
+        "</tr>"
+        "<tr>"
+        "  <td><b>Cluster</b></td><td>Anomaly Score</td><td>Role</td>"
+        "  <td>Lateral movement detection — suspicious cross-subnet traffic stands out "
+        "      as orange/red edges between clusters; role colour distinguishes internal "
+        "      pivots from external ingress</td>"
+        "</tr>"
+        "<tr>"
+        "  <td><b>Concentric</b></td><td>Throughput</td><td>Protocol</td>"
+        "  <td>Bandwidth consumers — high-degree nodes (most connections) sit in the inner "
+        "      rings; throughput edge colour immediately identifies high-bandwidth flows; "
+        "      node protocol colour shows what application is responsible</td>"
+        "</tr>"
+        "<tr>"
+        "  <td><b>Concentric</b></td><td>TCP Health</td><td>Role</td>"
+        "  <td>Infrastructure health at a glance — inner-ring nodes are the busiest; "
+        "      red/orange edges show where health degrades under load</td>"
+        "</tr>"
+        "<tr>"
+        "  <td><b>Star</b></td><td>Response Time</td><td>Service / Port</td>"
+        "  <td>Client&ndash;server latency — places one central server with all clients "
+        "      around it; response-time colour on spokes shows per-client latency; "
+        "      click a node to hide/show its spoke for a cleaner view</td>"
+        "</tr>"
+        "<tr>"
+        "  <td><b>Force-directed</b></td><td>High Risk</td><td>Role</td>"
+        "  <td>Instant risk audit — red/critical edges (Telnet, FTP, VNC) and violet VPN/TOR links stand out; "
+        "      node role identifies whether risky services are exposed to external hosts</td>"
+        "</tr>"
+        "<tr>"
+        "  <td><b>Cluster</b></td><td>High Risk</td><td>Function</td>"
+        "  <td>Service risk mapping — hosts grouped by function category (Remote Access, File Transfer, etc.); "
+        "      risky edge colours immediately reveal which service categories are using insecure protocols</td>"
+        "</tr>"
+        "<tr>"
+        "  <td><b>Cluster (Wi-Fi mode)</b></td><td>Wi-Fi RSSI</td><td>Role</td>"
+        "  <td>Wi-Fi site survey — clusters group by 802.11 frame type "
+        "      (Access Points / Management / Data Stations / Broadcast); "
+        "      RSSI edge colour (green &ge;-55 dBm → red &lt;-75 dBm) shows signal quality "
+        "      per link at a glance</td>"
+        "</tr>"
+        "</table>"
+
+        "<h3>Keyboard &amp; Mouse Reference</h3>"
+        "<p style='font-weight: normal;'><b>Pair list (right panel)</b></p>"
+        "<table cellspacing='0' cellpadding='2' style='font-weight: normal;'>"
+        "<tr><td width='180'><b>Check / uncheck</b></td><td>Toggle pair visibility in all views</td></tr>"
+        "<tr><td><b>Click label</b></td><td>Cycle direction filter: &rarr; (outbound) / &harr; (both) / &larr; (inbound)</td></tr>"
+        "<tr><td><b>Ctrl+A / Select All</b></td><td>Check all pairs</td></tr>"
+        "<tr><td><b>Invert button</b></td><td>Flip every checkbox (check &harr; uncheck)</td></tr>"
+        "<tr><td><b>Select None</b></td><td>Uncheck all pairs</td></tr>"
+        "<tr><td><b>Select Results</b></td><td>Check only pairs matching the current search</td></tr>"
+        "</table>"
+        "<p style='font-weight: normal;'><b>Circle view</b></p>"
+        "<table cellspacing='0' cellpadding='2' style='font-weight: normal;'>"
+        "<tr><td width='180'><b>Left-click line</b></td><td>Open Connection Details popup</td></tr>"
+        "<tr><td><b>Hover over line</b></td><td>Highlight matching pair in right panel</td></tr>"
+        "<tr><td><b>Left-click node</b></td><td>Hide / show all connections for that host (click again to restore)</td></tr>"
+        "<tr><td><b>Dashed line</b></td><td>One-way connection (no reverse traffic)</td></tr>"
+        "</table>"
+        "<p style='font-weight: normal;'><b>Table view</b></p>"
+        "<table cellspacing='0' cellpadding='2' style='font-weight: normal;'>"
+        "<tr><td width='180'><b>Left-click row</b></td><td>Open Connection Details popup</td></tr>"
+        "<tr><td><b>Right-click row</b></td><td>Context menu (filter, follow stream, protocol info)</td></tr>"
+        "<tr><td><b>Hover row</b></td><td>Highlight matching pair in right panel</td></tr>"
+        "</table>"
+        "<p style='font-weight: normal;'><b>Graph view</b></p>"
+        "<table cellspacing='0' cellpadding='2' style='font-weight: normal;'>"
+        "<tr><td width='180'><b>Scroll wheel</b></td><td>Zoom in / out</td></tr>"
+        "<tr><td><b>Middle-drag</b></td><td>Pan the canvas</td></tr>"
+        "<tr><td><b>Space + left-drag</b></td><td>Pan the canvas (keyboard-friendly alternative)</td></tr>"
+        "<tr><td><b>Left-drag node</b></td><td>Move individual node to a custom position</td></tr>"
+        "<tr><td><b>Left-click node</b></td><td>Hide / show all edges for that host (click again to restore)</td></tr>"
+        "<tr><td><b>Left-click edge</b></td><td>Open Connection Details popup</td></tr>"
+        "<tr><td><b>Hover over edge</b></td><td>Highlight matching pair in right panel</td></tr>"
+        "<tr><td><b>Dashed edge</b></td><td>One-way connection (no reverse traffic)</td></tr>"
+        "<tr><td><b>Ctrl+left-drag cluster</b></td><td>Move an entire cluster group as a unit (Cluster layout only)</td></tr>"
+        "<tr><td><b>Re-layout button</b></td><td>Reset to automatic layout (clears manual node moves)</td></tr>"
+        "<tr><td><b>1:1 button</b></td><td>Reset zoom to 100 %</td></tr>"
+        "</table>"
     );
     
     /* Footer row: "Built with..." label + OK button side by side */
@@ -2583,12 +3212,13 @@ void MainWindow::onSavePDFClicked()
     if (filePath.isEmpty())
         return;
 
-    /* --- Setup PDF writer (A4 landscape) --- */
+    /* --- Setup PDF writer --- */
+    QPageSize::PageSizeId psId = (m_reportPaperSize == 1) ? QPageSize::Legal : QPageSize::A4;
     QPdfWriter writer(filePath);
-    writer.setPageSize(QPageSize(QPageSize::A4));
+    writer.setPageSize(QPageSize(psId));
     writer.setPageOrientation(QPageLayout::Landscape);
-    writer.setResolution(300);  /* 300 DPI for crisp output */
-    writer.setPageMargins(QMarginsF(15, 15, 15, 15), QPageLayout::Millimeter);
+    writer.setResolution(300);
+    writer.setPageMargins(QMarginsF(12, 12, 12, 12), QPageLayout::Millimeter);
 
     QPainter painter(&writer);
     if (!painter.isActive()) {
@@ -2596,176 +3226,778 @@ void MainWindow::onSavePDFClicked()
         return;
     }
 
-    int pageW = writer.width();
-    int pageH = writer.height();
-    int dpi = writer.resolution();
+    const int pageW = writer.width();
+    const int pageH = writer.height();
+    const int dpi   = writer.resolution();
+    auto mm = [dpi](double millimeters) -> int {
+        return qRound(millimeters * dpi / 25.4);
+    };
 
-    /* Helper: mm to device units */
-    auto mm = [dpi](double millimeters) -> int { return (int)(millimeters * dpi / 25.4); };
-
-    /* ===== HEADER: Logo + Title ===== */
-    int headerY = 0;
-
-    /* Load logo from embedded resource */
     QPixmap logo(":/packetcircle/PacketCircle.png");
-    int logoH = mm(18);
-    if (!logo.isNull()) {
-        QPixmap scaled = logo.scaledToHeight(logoH, Qt::SmoothTransformation);
-        painter.drawPixmap(0, headerY, scaled);
-        /* Title to the right of the logo */
-        int textX = scaled.width() + mm(4);
-        QFont titleFont("Helvetica", 28, QFont::Bold);
-        painter.setFont(titleFont);
-        painter.setPen(Qt::black);
-        painter.drawText(textX, headerY, pageW - textX, logoH, Qt::AlignVCenter | Qt::AlignLeft, "PacketCircle Report");
-    } else {
-        /* No logo — just title */
-        QFont titleFont("Helvetica", 28, QFont::Bold);
-        painter.setFont(titleFont);
-        painter.setPen(Qt::black);
-        painter.drawText(0, headerY, pageW, logoH, Qt::AlignVCenter | Qt::AlignLeft, "PacketCircle Report");
-    }
+    QString nowStr = QDateTime::currentDateTime().toString("yyyy-MM-dd HH:mm");
+    int currentView = m_viewStack ? m_viewStack->currentIndex() : 0;
+    QString viewName = (currentView == 1) ? "Table" : (currentView == 2) ? "Graph" : "Circle";
 
-    headerY += logoH + mm(3);
+    /* ─────────────────────────────────────────────────────────────────
+     * Helper: draw the standard PDF page footer
+     * ───────────────────────────────────────────────────────────────── */
+    auto drawFooter = [&](int pageNum) {
+        QFont fFont("Helvetica", 7);
+        painter.setFont(fFont);
+        painter.setPen(QColor(140, 140, 140));
+        QFontMetrics ffm(fFont, &writer);
+        int fh = ffm.height();
+        painter.setPen(QPen(QColor(200, 200, 200), mm(0.2)));
+        painter.drawLine(0, pageH - fh - mm(3), pageW, pageH - fh - mm(3));
+        painter.setPen(QColor(140, 140, 140));
+        painter.drawText(0, pageH - fh - mm(1), pageW / 2, fh, Qt::AlignLeft,
+                         QString("PacketCircle v0.5.1  —  %1").arg(nowStr));
+        painter.drawText(pageW / 2, pageH - fh - mm(1), pageW / 2, fh, Qt::AlignRight,
+                         QString("Page %1 of 3").arg(pageNum));
+    };
 
-    /* Thin separator line */
-    painter.setPen(QPen(QColor(180, 180, 180), mm(0.3)));
-    painter.drawLine(0, headerY, pageW, headerY);
-    headerY += mm(4);
-
-    /* ===== INTRO TEXT ===== */
-    QFont introFont("Helvetica", 10);
-    painter.setFont(introFont);
-    painter.setPen(Qt::black);
-
-    QString intro = QString(
-        "This report was generated by the PacketCircle Wireshark plugin on %1. "
-        "It visualizes the top %2 communication pairs from the analysed capture, "
-        "sorted by %3. The circle diagram on the left shows network endpoints as nodes "
-        "with connections colored by protocol. The table on the right lists each "
-        "directional IP pair with packet and byte counts."
-    ).arg(QDateTime::currentDateTime().toString("yyyy-MM-dd HH:mm:ss"))
-     .arg(m_topN)
-     .arg(m_useBytes ? "byte volume" : "packet count");
-
-    QRect introRect(0, headerY, pageW, mm(30));
-    QRect introBound;
-    painter.drawText(introRect, Qt::AlignLeft | Qt::TextWordWrap, intro, &introBound);
-    headerY = introBound.bottom() + mm(5);
-
-    /* ===== MAIN CONTENT: Circle (left) + IP Pair List (right) ===== */
-    int footerH = mm(8);  /* Reserve space for footer */
-    int contentH = pageH - headerY - footerH;
-    int circleW = (int)(pageW * 0.62);
-    int listX = circleW + mm(3);
-    int listW = pageW - listX;
-
-    /* --- Render Circle visualization with PDF-optimized colors --- */
-    if (m_circleWidget) {
-        /* Render at high resolution with white background and dark colors */
-        int renderSize = 2000;  /* Large render for crisp output */
-        QPixmap circlePixmap = m_circleWidget->renderForPDF(renderSize, renderSize);
-        if (!circlePixmap.isNull()) {
-            /* Scale to fit the left area while keeping aspect ratio */
-            QPixmap scaled = circlePixmap.scaled(circleW, contentH, Qt::KeepAspectRatio, Qt::SmoothTransformation);
-            /* Center vertically in the left area */
-            int cy = headerY + (contentH - scaled.height()) / 2;
-            painter.drawPixmap(0, cy, scaled);
+    /* ─────────────────────────────────────────────────────────────────
+     * Helper: draw the compact page header (logo + title + meta line)
+     * ───────────────────────────────────────────────────────────────── */
+    auto drawPageHeader = [&]() -> int {
+        int y = 0;
+        int lh = mm(14);
+        if (!logo.isNull()) {
+            QPixmap sl = logo.scaledToHeight(lh, Qt::SmoothTransformation);
+            painter.drawPixmap(0, y, sl);
+            QFont hf("Helvetica", 16, QFont::Bold);
+            painter.setFont(hf);
+            painter.setPen(Qt::black);
+            painter.drawText(sl.width() + mm(4), y, pageW - sl.width() - mm(4), lh,
+                             Qt::AlignVCenter | Qt::AlignLeft, "PacketCircle Report");
+        } else {
+            QFont hf("Helvetica", 16, QFont::Bold);
+            painter.setFont(hf);
+            painter.setPen(Qt::black);
+            painter.drawText(0, y, pageW, lh, Qt::AlignVCenter | Qt::AlignLeft, "PacketCircle Report");
         }
+        y += lh + mm(1);
+
+        /* Meta line */
+        QFont mf("Helvetica", 8);
+        painter.setFont(mf);
+        painter.setPen(QColor(100, 100, 100));
+        QFontMetrics mfm(mf, &writer);
+        QString meta;
+        if (!m_reportCompany.isEmpty())    meta += m_reportCompany + "  |  ";
+        if (!m_reportPreparedBy.isEmpty()) meta += "Prepared by: " + m_reportPreparedBy + "  |  ";
+        meta += QString("View: %1  |  Top %2 pairs  |  Sorted by %3  |  %4")
+                    .arg(viewName).arg(m_topN)
+                    .arg(m_useBytes ? "bytes" : "packets")
+                    .arg(nowStr);
+        painter.drawText(0, y, pageW, mfm.height() + mm(1), Qt::AlignVCenter, meta);
+        y += mfm.height() + mm(3);
+
+        /* Separator */
+        painter.setPen(QPen(QColor(180, 180, 180), mm(0.3)));
+        painter.drawLine(0, y, pageW, y);
+        y += mm(4);
+        return y;
+    };
+
+    /* ─────────────────────────────────────────────────────────────────
+     * Helper: draw the pair list table into a given rectangle
+     * ───────────────────────────────────────────────────────────────── */
+    auto drawPairList = [&](int lx, int ly, int lw, int lh) {
+        QFont thf("Helvetica", 8, QFont::Bold);
+        QFont tf("Courier", 7);
+        QFontMetrics thfm(thf, &writer);
+        QFontMetrics tfm(tf, &writer);
+        int rowH = tfm.height() + mm(1.2);
+
+        int pad = mm(1);
+        int uw  = lw - 2 * pad;
+        int cSrc  = (int)(uw * 0.30);
+        int cDst  = (int)(uw * 0.30);
+        int cPkts = (int)(uw * 0.19);
+        int cBytes = uw - cSrc - cDst - cPkts;
+
+        /* Header row */
+        int hrH = thfm.height() + mm(1.8);
+        painter.setPen(Qt::NoPen);
+        painter.setBrush(QColor(55, 55, 55));
+        painter.drawRect(lx, ly, lw, hrH);
+        painter.setFont(thf);
+        painter.setPen(Qt::white);
+        int tx = lx + pad;
+        int tvc = ly + (hrH - thfm.height()) / 2;
+        painter.drawText(tx, tvc, cSrc, hrH,  Qt::AlignVCenter, "Source");        tx += cSrc;
+        painter.drawText(tx, tvc, cDst, hrH,  Qt::AlignVCenter, "Destination");   tx += cDst;
+        painter.drawText(tx, tvc, cPkts - pad, hrH, Qt::AlignVCenter | Qt::AlignRight, "Pkts"); tx += cPkts;
+        painter.drawText(tx, tvc, cBytes - pad, hrH, Qt::AlignVCenter | Qt::AlignRight, "Bytes");
+        ly += hrH;
+
+        /* Data rows */
+        painter.setFont(tf);
+        int rowCount = 0;
+        int maxRows  = (lh - hrH) / rowH;
+        for (int i = 0; i < m_pairListWidget->count() && rowCount < maxRows; i++) {
+            QListWidgetItem *item = m_pairListWidget->item(i);
+            if (!item) continue;
+            comm_pair_t *pair = (comm_pair_t *)item->data(Qt::UserRole).value<void*>();
+            if (!pair) continue;
+
+            if (rowCount % 2 == 0) {
+                painter.setPen(Qt::NoPen);
+                painter.setBrush(QColor(242, 242, 242));
+                painter.drawRect(lx, ly, lw, rowH);
+            }
+            painter.setPen(Qt::black);
+            tx = lx + pad;
+            QString src = pair->resolved_src ? QString::fromUtf8(pair->resolved_src)
+                                              : QString::fromUtf8(pair->src_addr);
+            QString dst = pair->resolved_dst ? QString::fromUtf8(pair->resolved_dst)
+                                              : QString::fromUtf8(pair->dst_addr);
+            painter.drawText(tx, ly, cSrc,         rowH, Qt::AlignVCenter, src);  tx += cSrc;
+            painter.drawText(tx, ly, cDst,         rowH, Qt::AlignVCenter, dst);  tx += cDst;
+            painter.drawText(tx, ly, cPkts - pad,  rowH, Qt::AlignVCenter | Qt::AlignRight,
+                             QString::number(pair->packet_count)); tx += cPkts;
+            painter.drawText(tx, ly, cBytes - pad, rowH, Qt::AlignVCenter | Qt::AlignRight,
+                             QString::number(pair->byte_count));
+            ly += rowH;
+            rowCount++;
+        }
+        /* Border */
+        int tableEndY = ly;
+        int tableStartY = ly - rowCount * rowH - hrH;
+        painter.setPen(QPen(QColor(180, 180, 180), mm(0.2)));
+        painter.setBrush(Qt::NoBrush);
+        painter.drawRect(lx, tableStartY, lw, tableEndY - tableStartY);
+    };
+
+    /* ─────────────────────────────────────────────────────────────────
+     * Helper: collect unique protocol set from visible pairs
+     * ───────────────────────────────────────────────────────────────── */
+    auto collectProtocols = [&]() -> QList<QPair<QString, QColor>> {
+        QList<QPair<QString, QColor>> list;
+        QSet<QString> seen;
+        for (int i = 0; i < m_pairListWidget->count(); i++) {
+            QListWidgetItem *it = m_pairListWidget->item(i);
+            if (!it) continue;
+            comm_pair_t *pair = (comm_pair_t *)it->data(Qt::UserRole).value<void*>();
+            if (!pair || !pair->top_protocol) continue;
+            QString proto = QString::fromUtf8(pair->top_protocol);
+            if (!seen.contains(proto)) {
+                seen.insert(proto);
+                guint32 rgb = packet_analyzer_get_protocol_color(pair->top_protocol);
+                /* In PDF mode darken pastel colors for readability */
+                QColor c = QColor((rgb >> 16) & 0xFF, (rgb >> 8) & 0xFF, rgb & 0xFF).darker(140);
+                list.append({proto, c});
+            }
+        }
+        return list;
+    };
+
+    /* ─────────────────────────────────────────────────────────────────
+     * Helper: draw protocol legend row(s) at (lx, ly) within width lw
+     * Returns the y coordinate after the legend.
+     * ───────────────────────────────────────────────────────────────── */
+    auto drawProtocolLegend = [&](int lx, int ly, int lw) -> int {
+        QList<QPair<QString, QColor>> protos = collectProtocols();
+        if (protos.isEmpty()) return ly;
+
+        QFont lf("Helvetica", 8);
+        painter.setFont(lf);
+        QFontMetrics lfm(lf, &writer);
+        int swatchSz = lfm.height();
+        int itemW    = mm(22);
+        int itemH    = swatchSz + mm(1.5);
+        int x = lx;
+        int y = ly;
+
+        for (const auto &pr : protos) {
+            if (x + itemW > lx + lw) { x = lx; y += itemH + mm(1); }
+            /* Colour swatch */
+            painter.setPen(QPen(QColor(120, 120, 120), mm(0.2)));
+            painter.setBrush(pr.second);
+            painter.drawRect(x, y + (itemH - swatchSz) / 2, swatchSz, swatchSz);
+            /* Label */
+            painter.setPen(Qt::black);
+            painter.drawText(x + swatchSz + mm(1), y, itemW - swatchSz - mm(1), itemH,
+                             Qt::AlignVCenter, pr.first);
+            x += itemW;
+        }
+        return y + itemH + mm(1);
+    };
+
+    /* ═══════════════════════════════════════════════════════════════════
+     * PAGE 1 — COVER
+     * ═══════════════════════════════════════════════════════════════════ */
+    painter.fillRect(0, 0, pageW, pageH, Qt::white);
+
+    {
+        /* Logo — large, centered, upper-mid area */
+        int logoH = mm(52);
+        int logoY = pageH / 5;
+        if (!logo.isNull()) {
+            QPixmap sl = logo.scaledToHeight(logoH, Qt::SmoothTransformation);
+            int logoX = (pageW - sl.width()) / 2;
+            painter.drawPixmap(logoX, logoY, sl);
+            logoY += logoH + mm(10);
+        } else {
+            logoY += mm(10);
+        }
+
+        /* Title */
+        QFont titleFont("Helvetica", 40, QFont::Bold);
+        painter.setFont(titleFont);
+        painter.setPen(QColor(25, 25, 25));
+        QFontMetrics tifm(titleFont, &writer);
+        painter.drawText(0, logoY, pageW, tifm.height() + mm(2), Qt::AlignCenter, "PacketCircle Report");
+        logoY += tifm.height() + mm(14);
+
+        /* Separator */
+        painter.setPen(QPen(QColor(90, 90, 90), mm(0.5)));
+        int lx1 = pageW / 4, lx2 = pageW * 3 / 4;
+        painter.drawLine(lx1, logoY, lx2, logoY);
+        logoY += mm(12);
+
+        /* Metadata block */
+        QFont lblFont("Helvetica", 12, QFont::Bold);
+        QFont valFont("Helvetica", 12);
+        QFontMetrics lblfm(lblFont, &writer);
+        int metaBlockW = pageW / 2;
+        int metaX      = (pageW - metaBlockW) / 2;
+        int lblColW    = mm(38);
+        int rowH2      = lblfm.height() + mm(5);
+
+        auto addMetaRow = [&](const QString &label, const QString &value) {
+            if (value.isEmpty()) return;
+            painter.setFont(lblFont);
+            painter.setPen(QColor(80, 80, 80));
+            painter.drawText(metaX, logoY, lblColW, rowH2, Qt::AlignVCenter | Qt::AlignRight, label + ":");
+            painter.setFont(valFont);
+            painter.setPen(Qt::black);
+            painter.drawText(metaX + lblColW + mm(5), logoY, metaBlockW - lblColW - mm(5), rowH2,
+                             Qt::AlignVCenter, value);
+            logoY += rowH2;
+        };
+
+        addMetaRow("Company Name", m_reportCompany);
+        addMetaRow("Prepared by",  m_reportPreparedBy);
+        addMetaRow("Project",      m_reportProject);
+        addMetaRow("Comments",     m_reportComments);
+        addMetaRow("Date",         nowStr);
+
+        /* GitHub URL at the very bottom */
+        QFont urlFont("Helvetica", 9);
+        painter.setFont(urlFont);
+        painter.setPen(QColor(50, 90, 180));
+        QFontMetrics ufm(urlFont, &writer);
+        painter.drawText(0, pageH - ufm.height() - mm(6), pageW, ufm.height(),
+                         Qt::AlignCenter, "https://github.com/netwho/PacketCircle");
     }
+    drawFooter(1);
 
-    /* --- Render IP Pair List as a table --- */
-    QFont tableHeaderFont("Helvetica", 9, QFont::Bold);
-    QFont tableFont("Courier", 8);
-    QFontMetrics thfm(tableHeaderFont, &writer);
-    QFontMetrics tfm(tableFont, &writer);
-    int rowH = tfm.height() + mm(1.5);
-    int tableY = headerY;
+    /* ═══════════════════════════════════════════════════════════════════
+     * PAGE 2 — REPORT
+     * ═══════════════════════════════════════════════════════════════════ */
+    writer.newPage();
+    painter.fillRect(0, 0, pageW, pageH, Qt::white);
+    {
+        int headerY = drawPageHeader();
+        int footerH = mm(10);
+        int contentH = pageH - headerY - footerH;
 
-    /* Column widths — account for left padding mm(1) so columns fit within listW */
-    int tablePad = mm(1);
-    int usableW = listW - tablePad - mm(1);  /* left pad + right pad */
-    int colSrc = (int)(usableW * 0.28);
-    int colDst = (int)(usableW * 0.28);
-    int colPkts = (int)(usableW * 0.20);
-    int colBytes = usableW - colSrc - colDst - colPkts;
+        /* Layout: left = visualization (62%), right = pair list (36%), gap 2% */
+        int listW = (int)(pageW * 0.35);
+        int vizW  = pageW - listW - mm(5);
+        int listX = vizW + mm(5);
 
-    /* Draw table header background */
-    painter.setPen(Qt::NoPen);
-    painter.setBrush(QColor(60, 60, 60));
-    int headerRowH = thfm.height() + mm(2);
-    painter.drawRect(listX, tableY, listW, headerRowH);
+        /* ── Visualization ── */
+        if (currentView == 0 && m_circleWidget) {
+            /* Circle view */
+            int renderSz = 2000;
+            QPixmap pix = m_circleWidget->renderForPDF(renderSz, renderSz);
+            if (!pix.isNull()) {
+                /* Reserve bottom strip for legend */
+                int legendH = mm(14);
+                int vizAreaH = contentH - legendH - mm(3);
+                QPixmap scaled = pix.scaled(vizW, vizAreaH, Qt::KeepAspectRatio, Qt::SmoothTransformation);
+                int cy = headerY + (vizAreaH - scaled.height()) / 2;
+                painter.drawPixmap(0, cy, scaled);
+                /* Protocol legend below circle */
+                drawProtocolLegend(0, headerY + vizAreaH + mm(3), vizW);
+            }
+        } else if (currentView == 2 && m_graphWidget) {
+            /* Graph view */
+            int legendH = mm(50);  /* enough for node + edge legend rows */
+            int vizAreaH = contentH - legendH - mm(3);
+            QPixmap pix = m_graphWidget->renderForPDF(vizW, vizAreaH);
+            if (!pix.isNull()) {
+                painter.drawPixmap(0, headerY, pix);
+            }
 
-    /* Draw table header text */
-    painter.setPen(Qt::white);
-    painter.setFont(tableHeaderFont);
-    int tx = listX + mm(1);
-    int textVCenter = tableY + (headerRowH - thfm.height()) / 2;
-    painter.drawText(tx, textVCenter, colSrc, headerRowH, Qt::AlignVCenter, "Source");
-    tx += colSrc;
-    painter.drawText(tx, textVCenter, colDst, headerRowH, Qt::AlignVCenter, "Destination");
-    tx += colDst;
-    painter.drawText(tx, textVCenter, colPkts, headerRowH, Qt::AlignVCenter | Qt::AlignRight, "Packets");
-    tx += colPkts;
-    painter.drawText(tx, textVCenter, colBytes, headerRowH, Qt::AlignVCenter | Qt::AlignRight, "Bytes");
+            GraphWidget::EdgeColorMode edgeCM = m_graphWidget->edgeColorMode();
+            GraphWidget::NodeColorMode nodeCM = m_graphWidget->nodeColorMode();
 
-    tableY += headerRowH;
+            int ly = headerY + vizAreaH + mm(3);
+            QFont lgBold("Helvetica", 7, QFont::Bold);
+            QFont lgFont("Helvetica", 7);
+            QFontMetrics lgfm(lgFont, &writer);
+            int lrH  = lgfm.height() + mm(1.2);
+            int swSz = lgfm.height();
+            int swGap = mm(1);
 
-    /* Draw data rows from pair list */
-    painter.setFont(tableFont);
-    int rowCount = 0;
-    int tableBottom = headerY + contentH;  /* Don't grow past the footer area */
-    int maxRows = (tableBottom - tableY) / rowH;
+            /* Helper: draw a row of (label, colour) swatches, wrapping if needed.
+             * Returns the y position after the last row drawn. */
+            auto drawSwatches = [&](int lx, int startY, int lw,
+                                    const QList<QPair<QString,QColor>> &items,
+                                    int itemW) -> int {
+                int x = lx, y = startY;
+                painter.setFont(lgFont);
+                for (const auto &item : items) {
+                    if (x + itemW > lx + lw) { x = lx; y += lrH; }
+                    painter.setPen(QPen(QColor(110,110,110), mm(0.2)));
+                    painter.setBrush(item.second);
+                    painter.drawRect(x, y + (lrH - swSz) / 2, swSz, swSz);
+                    painter.setPen(Qt::black);
+                    painter.drawText(x + swSz + swGap, y, itemW - swSz - swGap, lrH,
+                                     Qt::AlignVCenter, item.first);
+                    x += itemW;
+                }
+                return y + lrH;
+            };
 
-    for (int i = 0; i < m_pairListWidget->count() && rowCount < maxRows; i++) {
-        QListWidgetItem *item = m_pairListWidget->item(i);
-        if (!item)
-            continue;
+            if (m_wifiMode) {
+                /* ── Wi-Fi mode: cluster categories + RSSI signal quality ── */
 
-        comm_pair_t *pair = (comm_pair_t *)item->data(Qt::UserRole).value<void*>();
-        if (!pair)
-            continue;
+                /* Cluster groupings (802.11 frame type) */
+                painter.setFont(lgBold);
+                painter.setPen(QColor(50, 50, 50));
+                painter.drawText(0, ly, vizW, lrH, Qt::AlignVCenter,
+                                 "Cluster — 802.11 node category:");
+                ly += lrH;
+                ly = drawSwatches(0, ly, vizW, {
+                    {"Access Points",       QColor( 52, 152, 219)},
+                    {"Management",          QColor(230, 126,  34)},
+                    {"Data Stations",       QColor( 39, 174,  96)},
+                    {"Broadcast/Multicast", QColor(200, 160,  64)},
+                }, mm(38));
 
-        /* Alternating row background */
-        if (rowCount % 2 == 0) {
+                ly += mm(2);
+
+                /* RSSI signal quality (node + edge colour) */
+                painter.setFont(lgBold);
+                painter.setPen(QColor(50, 50, 50));
+                painter.drawText(0, ly, vizW, lrH, Qt::AlignVCenter,
+                                 "Node & edge colour — Signal quality (RSSI):");
+                ly += lrH;
+                ly = drawSwatches(0, ly, vizW, {
+                    {"Excellent (≥ -55 dBm)", QColor(  0, 200,   0)},
+                    {"Good      (-65..-56)",  QColor(160, 220,   0)},
+                    {"Fair      (-75..-66)",  QColor(255, 165,   0)},
+                    {"Poor      (< -75 dBm)", QColor(220,  50,  50)},
+                    {"No signal",             QColor(160, 160, 160)},
+                }, mm(40));
+
+            } else {
+                /* ── Normal mode: node colour + edge colour sections ── */
+
+                /* Node colour section */
+                {
+                    QString modeLabel;
+                    switch (nodeCM) {
+                        case GraphWidget::NODECOLOR_SERVICE:  modeLabel = "Node colour — Service / Port:"; break;
+                        case GraphWidget::NODECOLOR_ROLE:     modeLabel = "Node colour — Host Role:";      break;
+                        case GraphWidget::NODECOLOR_PROTOCOL: modeLabel = "Node colour — Protocol:";       break;
+                        case GraphWidget::NODECOLOR_FUNCTION: modeLabel = "Node colour — Function:";       break;
+                    }
+                    painter.setFont(lgBold);
+                    painter.setPen(QColor(50, 50, 50));
+                    painter.drawText(0, ly, vizW, lrH, Qt::AlignVCenter, modeLabel);
+                    ly += lrH;
+
+                    switch (nodeCM) {
+                        case GraphWidget::NODECOLOR_SERVICE: {
+                            auto services = m_graphWidget->legendServicesForPDF();
+                            if (services.isEmpty()) {
+                                painter.setFont(lgFont); painter.setPen(Qt::black);
+                                painter.drawText(0, ly, vizW, lrH, Qt::AlignVCenter, "(no named services in current data)");
+                                ly += lrH;
+                            } else {
+                                ly = drawSwatches(0, ly, vizW, services, mm(22));
+                            }
+                            break;
+                        }
+                        case GraphWidget::NODECOLOR_ROLE: {
+                            QList<QPair<QString,QColor>> roles = {
+                                {"Internal (RFC1918)", QColor(41,  98, 163)},
+                                {"External (Public)",  QColor(180, 55,  35)},
+                                {"Broadcast/Multicast",QColor(160,110,  10)},
+                                {"MAC address",        QColor(110, 55, 155)},
+                            };
+                            ly = drawSwatches(0, ly, vizW, roles, mm(34));
+                            break;
+                        }
+                        case GraphWidget::NODECOLOR_PROTOCOL: {
+                            ly = drawSwatches(0, ly, vizW, collectProtocols(), mm(22));
+                            break;
+                        }
+                        case GraphWidget::NODECOLOR_FUNCTION: {
+                            QList<QPair<QString,QColor>> fns = {
+                                {"Remote (RDP/VNC/Citrix)",    QColor(180, 30, 30)},
+                                {"Interactive (SSH/Telnet)",   QColor(210,100, 10)},
+                                {"Messaging (SIP/XMPP/IRC)",   QColor( 15,155,130)},
+                                {"Filetransfer (SMB/NFS/FTP)", QColor( 30,155, 65)},
+                                {"Other / uncategorised",      QColor(150,150,150)},
+                            };
+                            ly = drawSwatches(0, ly, vizW, fns, mm(34));
+                            break;
+                        }
+                    }
+                }
+
+                ly += mm(2);
+
+                /* Edge colour section */
+                {
+                    QString modeLabel;
+                    switch (edgeCM) {
+                        case GraphWidget::COLOR_PROTOCOL:
+                            modeLabel = "Edge colour — Protocol:"; break;
+                        case GraphWidget::COLOR_TCP_HEALTH:
+                            modeLabel = "Edge colour — TCP Health Score:"; break;
+                        case GraphWidget::COLOR_ANOMALY:
+                            modeLabel = "Edge colour — Anomaly Score:"; break;
+                        case GraphWidget::COLOR_RESPONSE_TIME:
+                            modeLabel = "Edge colour — Response Time:"; break;
+                        case GraphWidget::COLOR_THROUGHPUT:
+                            modeLabel = "Edge colour — Throughput:"; break;
+                        case GraphWidget::COLOR_HIGH_RISK:
+                            modeLabel = "Edge colour — High Risk:"; break;
+                        case GraphWidget::COLOR_TCP_WINDOW:
+                            modeLabel = "Edge colour — TCP Window:"; break;
+                    }
+                    painter.setFont(lgBold);
+                    painter.setPen(QColor(50, 50, 50));
+                    painter.drawText(0, ly, vizW, lrH, Qt::AlignVCenter, modeLabel);
+                    ly += lrH;
+
+                    switch (edgeCM) {
+                        case GraphWidget::COLOR_PROTOCOL:
+                            ly = drawSwatches(0, ly, vizW, collectProtocols(), mm(22));
+                            break;
+                        case GraphWidget::COLOR_TCP_HEALTH:
+                            ly = drawSwatches(0, ly, vizW, {
+                                {"Healthy (≥0.75)",   QColor( 39,174, 96)},
+                                {"Moderate (≥0.50)",  QColor(241,196, 15)},
+                                {"Degraded (≥0.28)",  QColor(230,126, 34)},
+                                {"Unhealthy (<0.28)", QColor(231, 76, 60)},
+                            }, mm(30));
+                            break;
+                        case GraphWidget::COLOR_ANOMALY:
+                            ly = drawSwatches(0, ly, vizW, {
+                                {"Clean (≤0.12)",       QColor( 39,174, 96)},
+                                {"Noteworthy (≤0.30)",  QColor(241,196, 15)},
+                                {"Suspicious (≤0.55)",  QColor(230,126, 34)},
+                                {"Anomalous (>0.55)",   QColor(231, 76, 60)},
+                            }, mm(32));
+                            break;
+                        case GraphWidget::COLOR_RESPONSE_TIME:
+                            ly = drawSwatches(0, ly, vizW, {
+                                {"Unavailable",    QColor(160,160,160)},
+                                {"Fast",           QColor( 39,174, 96)},
+                                {"Moderate",       QColor(130,200, 60)},
+                                {"Slow",           QColor(241,196, 15)},
+                                {"Very slow",      QColor(230,126, 34)},
+                                {"Unacceptable",   QColor(231, 76, 60)},
+                            }, mm(26));
+                            break;
+                        case GraphWidget::COLOR_THROUGHPUT:
+                            ly = drawSwatches(0, ly, vizW, {
+                                {"Unknown",        QColor(160,160,160)},
+                                {"<10 KB/s",       QColor( 52,152,219)},
+                                {"10–100 KB/s",    QColor( 39,174, 96)},
+                                {"100 KB–1 MB/s",  QColor(241,196, 15)},
+                                {"1–10 MB/s",      QColor(230,126, 34)},
+                                {">10 MB/s",       QColor(231, 76, 60)},
+                            }, mm(26));
+                            break;
+                        case GraphWidget::COLOR_HIGH_RISK:
+                            ly = drawSwatches(0, ly, vizW, {
+                                {"Critical (Telnet/VNC/FTP/X11)", QColor(185, 20, 20)},
+                                {"VPN / TOR",                     QColor(120, 50,175)},
+                                {"High (RDP / WinRM)",            QColor(205, 80, 10)},
+                                {"Elevated (SSH / SNMP)",         QColor(185,150, 10)},
+                                {"Normal",                        QColor(140,140,140)},
+                            }, mm(26));
+                            break;
+                        case GraphWidget::COLOR_TCP_WINDOW:
+                            ly = drawSwatches(0, ly, vizW, {
+                                {"No stall  (>= 32 KB)", QColor( 39,174, 96)},
+                                {"Mild      (8-32 KB)",  QColor(130,200, 60)},
+                                {"Moderate  (4-8 KB)",   QColor(241,196, 15)},
+                                {"Constrained (< 4 KB)", QColor(230,126, 34)},
+                                {"Zero-window stall",    QColor(231, 76, 60)},
+                            }, mm(30));
+                            break;
+                    }
+                }
+            }
+
+            ly += mm(2);
+
+            /* ── Edge thickness (always) ── */
+            painter.setFont(lgFont);
+            painter.setPen(QPen(QColor(80,80,80), mm(0.4)));
+            painter.drawLine(0,     ly + lrH/2, mm(10), ly + lrH/2);
+            painter.setPen(QPen(QColor(80,80,80), mm(2.0)));
+            painter.drawLine(mm(12),ly + lrH/2, mm(26), ly + lrH/2);
+            painter.setPen(Qt::black);
+            painter.drawText(mm(28), ly, vizW - mm(28), lrH, Qt::AlignVCenter,
+                             "Edge thickness: relative traffic volume");
+            ly += lrH;
+            Q_UNUSED(ly);
+        } else {
+            /* Table view — render the connection table in the left area */
+            int legendH = mm(14);
+            int vizAreaH = contentH - legendH - mm(3);
+
+            QFont thf("Helvetica", 8, QFont::Bold);
+            QFont tf("Courier", 7);
+            QFontMetrics thfm(thf, &writer);
+            QFontMetrics tfm(tf, &writer);
+            int rowH = tfm.height() + mm(1.2);
+
+            int pad = mm(1);
+            int uw  = vizW - 2 * pad;
+            int cSrc  = (int)(uw * 0.25);
+            int cDst  = (int)(uw * 0.25);
+            int cProto = mm(20);
+            int cTrans = mm(16);
+            int cPkts = (int)(uw * 0.14);
+            int cBytes = uw - cSrc - cDst - cProto - cTrans - cPkts;
+
+            int ty = headerY;
+            /* Header */
+            int hrH = thfm.height() + mm(1.8);
             painter.setPen(Qt::NoPen);
-            painter.setBrush(QColor(240, 240, 240));
-            painter.drawRect(listX, tableY, listW, rowH);
+            painter.setBrush(QColor(55, 55, 55));
+            painter.drawRect(0, ty, vizW, hrH);
+            painter.setFont(thf);
+            painter.setPen(Qt::white);
+            int tx = pad;
+            int tvc = ty + (hrH - thfm.height()) / 2;
+            painter.drawText(tx, tvc, cSrc,  hrH, Qt::AlignVCenter, "Source");   tx += cSrc;
+            painter.drawText(tx, tvc, cDst,  hrH, Qt::AlignVCenter, "Destination"); tx += cDst;
+            painter.drawText(tx, tvc, cProto,hrH, Qt::AlignVCenter, "Protocol"); tx += cProto;
+            painter.drawText(tx, tvc, cTrans,hrH, Qt::AlignVCenter, "Transport"); tx += cTrans;
+            painter.drawText(tx, tvc, cPkts - pad, hrH, Qt::AlignVCenter | Qt::AlignRight, "Packets"); tx += cPkts;
+            painter.drawText(tx, tvc, cBytes - pad,hrH, Qt::AlignVCenter | Qt::AlignRight, "Bytes");
+            ty += hrH;
+
+            /* Data rows */
+            painter.setFont(tf);
+            int rowCount = 0;
+            int maxRows  = (vizAreaH - hrH) / rowH;
+            for (int i = 0; i < m_pairListWidget->count() && rowCount < maxRows; i++) {
+                QListWidgetItem *it = m_pairListWidget->item(i);
+                if (!it) continue;
+                comm_pair_t *pair = (comm_pair_t *)it->data(Qt::UserRole).value<void*>();
+                if (!pair) continue;
+
+                if (rowCount % 2 == 0) {
+                    painter.setPen(Qt::NoPen);
+                    painter.setBrush(QColor(242, 242, 242));
+                    painter.drawRect(0, ty, vizW, rowH);
+                }
+                painter.setPen(Qt::black);
+                tx = pad;
+                QString src = pair->resolved_src ? QString::fromUtf8(pair->resolved_src)
+                                                  : QString::fromUtf8(pair->src_addr);
+                QString dst = pair->resolved_dst ? QString::fromUtf8(pair->resolved_dst)
+                                                  : QString::fromUtf8(pair->dst_addr);
+                QString proto = pair->top_protocol ? QString::fromUtf8(pair->top_protocol) : "—";
+                bool hasTcp = false, hasUdp = false;
+                if (pair->dst_ports) {
+                    GHashTableIter it2; gpointer k, v;
+                    g_hash_table_iter_init(&it2, pair->dst_ports);
+                    while (g_hash_table_iter_next(&it2, &k, &v)) {
+                        port_stats_t *ps = (port_stats_t *)v;
+                        if (ps) { hasTcp |= (ps->is_tcp == TRUE); hasUdp |= (ps->is_udp == TRUE); }
+                    }
+                }
+                QString transport = hasTcp && hasUdp ? "TCP+UDP" : hasTcp ? "TCP" : hasUdp ? "UDP" : "—";
+                painter.drawText(tx, ty, cSrc,         rowH, Qt::AlignVCenter, src);    tx += cSrc;
+                painter.drawText(tx, ty, cDst,         rowH, Qt::AlignVCenter, dst);    tx += cDst;
+                painter.drawText(tx, ty, cProto,       rowH, Qt::AlignVCenter, proto);  tx += cProto;
+                painter.drawText(tx, ty, cTrans,       rowH, Qt::AlignVCenter, transport); tx += cTrans;
+                painter.drawText(tx, ty, cPkts - pad,  rowH, Qt::AlignVCenter | Qt::AlignRight,
+                                 QString::number(pair->packet_count)); tx += cPkts;
+                painter.drawText(tx, ty, cBytes - pad, rowH, Qt::AlignVCenter | Qt::AlignRight,
+                                 QString::number(pair->byte_count));
+                ty += rowH;
+                rowCount++;
+            }
+            painter.setPen(QPen(QColor(180, 180, 180), mm(0.2)));
+            painter.setBrush(Qt::NoBrush);
+            painter.drawRect(0, headerY, vizW, ty - headerY);
+
+            /* Protocol legend */
+            drawProtocolLegend(0, headerY + vizAreaH + mm(3), vizW);
         }
 
-        painter.setPen(Qt::black);
-        tx = listX + mm(1);
-        /* Use resolved names in the PDF table for display */
-        QString src = pair->resolved_src ? QString::fromUtf8(pair->resolved_src) : QString::fromUtf8(pair->src_addr);
-        QString dst = pair->resolved_dst ? QString::fromUtf8(pair->resolved_dst) : QString::fromUtf8(pair->dst_addr);
-        painter.drawText(tx, tableY, colSrc, rowH, Qt::AlignVCenter, src);
-        tx += colSrc;
-        painter.drawText(tx, tableY, colDst, rowH, Qt::AlignVCenter, dst);
-        tx += colDst;
-        painter.drawText(tx, tableY, colPkts - mm(1), rowH, Qt::AlignVCenter | Qt::AlignRight,
-                         QString::number(pair->packet_count));
-        tx += colPkts;
-        painter.drawText(tx, tableY, colBytes - mm(1), rowH, Qt::AlignVCenter | Qt::AlignRight,
-                         QString::number(pair->byte_count));
+        /* ── Pair list (right column) ── */
+        drawPairList(listX, headerY, listW, contentH);
 
-        tableY += rowH;
-        rowCount++;
+        /* ── "Comm Pair List" label above the pair list ── */
+        {
+            QFont lblFont("Helvetica", 8, QFont::Bold);
+            painter.setFont(lblFont);
+            painter.setPen(QColor(70, 70, 70));
+            QFontMetrics lblfm(lblFont, &writer);
+            /* Draw it just above the list — headerY is where the list starts, label fits in the small gap */
+            painter.drawText(listX, headerY - lblfm.height() - mm(1), listW, lblfm.height(),
+                             Qt::AlignHCenter, "Communication Pairs");
+        }
     }
+    drawFooter(2);
 
-    /* Table border */
-    painter.setPen(QPen(QColor(180, 180, 180), mm(0.2)));
-    painter.setBrush(Qt::NoBrush);
-    painter.drawRect(listX, headerY, listW, tableY - headerY);
+    /* ═══════════════════════════════════════════════════════════════════
+     * PAGE 3 — EXPLANATION
+     * ═══════════════════════════════════════════════════════════════════ */
+    writer.newPage();
+    painter.fillRect(0, 0, pageW, pageH, Qt::white);
+    {
+        int y = drawPageHeader();
 
-    /* ===== FOOTER ===== */
-    QFont footerFont("Helvetica", 7);
-    painter.setFont(footerFont);
-    painter.setPen(QColor(140, 140, 140));
-    QFontMetrics ffm(footerFont, &writer);
-    int footerTextH = ffm.height();
-    painter.drawText(0, pageH - footerTextH - mm(1), pageW, footerTextH, Qt::AlignCenter,
-QString("Generated by PacketCircle v.0.4.7 — %1") /* WH: version bump */
-                         .arg(QDateTime::currentDateTime().toString("yyyy-MM-dd HH:mm:ss")));
+        QFont h1Font("Helvetica", 14, QFont::Bold);
+        QFont h2Font("Helvetica", 10, QFont::Bold);
+        QFont bodyFont("Helvetica", 9);
+
+        auto drawH1 = [&](const QString &text) {
+            painter.setFont(h1Font);
+            painter.setPen(QColor(30, 30, 30));
+            QFontMetrics fm(h1Font, &writer);
+            painter.drawText(0, y, pageW, fm.height() + mm(1), Qt::AlignLeft, text);
+            y += fm.height() + mm(3);
+            painter.setPen(QPen(QColor(160, 160, 160), mm(0.3)));
+            painter.drawLine(0, y - mm(1), pageW, y - mm(1));
+            y += mm(2);
+        };
+
+        auto drawH2 = [&](const QString &text) {
+            painter.setFont(h2Font);
+            painter.setPen(QColor(40, 80, 130));
+            QFontMetrics fm(h2Font, &writer);
+            y += mm(3);
+            painter.drawText(0, y, pageW, fm.height(), Qt::AlignLeft, text);
+            y += fm.height() + mm(2);
+        };
+
+        auto drawBody = [&](const QString &text) {
+            painter.setFont(bodyFont);
+            painter.setPen(Qt::black);
+            QRect r(0, y, pageW, pageH - y - mm(15));
+            QRect bound;
+            painter.drawText(r, Qt::AlignLeft | Qt::TextWordWrap, text, &bound);
+            y = bound.bottom() + mm(2);
+        };
+
+        auto drawBullet = [&](const QString &text) {
+            drawBody("\u2022  " + text);
+        };
+
+        /* ─── General section ─── */
+        drawH1("About This Report");
+
+        drawBody(QString(
+            "This PacketCircle report was generated on %1 and captures the state of the "
+            "analysis at the time the PDF button was clicked. It shows the top %2 communication "
+            "pairs ranked by %3, extracted from the currently active Wireshark capture. "
+            "Any Wireshark display filter in effect at the time of generation is reflected in the data.")
+            .arg(nowStr)
+            .arg(m_topN)
+            .arg(m_useBytes ? "byte volume" : "packet count"));
+
+        /* ─── View-specific section ─── */
+        if (currentView == 0) {
+            /* Circle view */
+            drawH2("Circle View — How to Read It");
+            drawBody("The circle diagram on page 2 places each network endpoint (host or MAC address) "
+                     "as a node on a circle. A line between two nodes indicates that communication was "
+                     "observed between those hosts in the captured traffic.");
+            drawBullet("Line colour indicates the dominant application-layer protocol of that flow "
+                       "(e.g. TCP = light green, UDP = pastel orange, ARP = sky blue, ICMP = pale turquoise). "
+                       "When both TCP and UDP are present on the same pair the line is drawn with a "
+                       "dashed alternating pattern.");
+            drawBullet("Line thickness (when enabled) is proportional to the traffic volume — "
+                       "thicker lines carry more packets or bytes relative to the other pairs shown.");
+            drawBullet("Node colour reflects the dominant protocol of all connections for that host.");
+            drawBullet("Node labels show the IP address or resolved hostname. Hover in the live UI "
+                       "to highlight all connections for that host.");
+        } else if (currentView == 2) {
+            /* Graph view */
+            drawH2("Graph View — How to Read It");
+            drawBody("The force-directed graph on page 2 arranges hosts as nodes with edges "
+                     "representing observed communication. Unlike the circle view the layout is "
+                     "computed by a physics simulation that pulls heavily connected nodes together "
+                     "and pushes unrelated nodes apart, revealing clusters of related infrastructure.");
+            drawBullet("Node colour encodes the selected node colour mode: Service / Port assigns "
+                       "a distinct colour per well-known service (HTTPS, SSH, DNS, …); Role "
+                       "distinguishes internal RFC1918 hosts from external public addresses; "
+                       "Protocol uses the same palette as the Circle view.");
+            drawBullet("Edge thickness reflects the relative volume of traffic on that link. "
+                       "Thin edges carry little traffic; thick edges are high-volume flows.");
+            drawBullet("Anomaly scoring evaluates each connection against configurable thresholds "
+                       "for packet rate, byte volume, connection duration, protocol mix, and port "
+                       "count. High anomaly scores (warmer colours) may indicate port scans, "
+                       "data exfiltration, or malfunctioning applications.");
+
+            drawH2("Graph Threshold Groups");
+            drawBody("Three built-in threshold profiles are provided: Default (balanced), "
+                     "Strict (flags more connections as anomalous), and Tolerant (only flags "
+                     "extreme outliers). Custom groups can be created in Settings → Graph Thresholds. "
+                     "The active group at report time was: " +
+                     (m_activeThresholdGroup >= 0 && m_activeThresholdGroup < m_thresholdGroups.size()
+                         ? m_thresholdGroups[m_activeThresholdGroup].name
+                         : QString("Default")) + ".");
+        } else {
+            /* Table view */
+            drawH2("Table View — How to Read It");
+            drawBody("The connection table on page 2 lists each directional communication pair "
+                     "as a separate row, sorted by the selected metric (packets or bytes). "
+                     "Each row represents all traffic observed from one host to another.");
+            drawBullet("Source / Destination: the IP address or resolved hostname of each endpoint. "
+                       "Resolved names come from Wireshark's name resolution settings.");
+            drawBullet("Protocol: the dominant application-layer protocol for that pair, "
+                       "determined by the highest-frequency port and the Wireshark dissector match.");
+            drawBullet("Transport: TCP, UDP, or TCP+UDP when both were seen on the same host pair.");
+            drawBullet("Packets / Bytes: total counts in the direction Source → Destination.");
+            drawBullet("Right-click any row in the live UI to apply a Wireshark display filter, "
+                       "follow a TCP stream, open protocol info dialogs, or view transport statistics.");
+        }
+
+        /* ─── Common section ─── */
+        drawH2("Communication Pair List (Right Column)");
+        drawBody("The pair list on the right side of page 2 shows all pairs in the same order "
+                 "as the main view. Each entry is labelled src \u2192 dst with the top protocol "
+                 "and total packet count. Use this as a quick reference index when correlating "
+                 "the visual with specific host pairs.");
+
+        drawH2("Filters and Scope");
+        drawBullet(QString("Top-N setting at report time: Top %1 pairs.").arg(m_topN));
+        drawBullet(QString("Metric: ranked by %1.").arg(m_useBytes ? "byte volume" : "packet count"));
+        drawBullet(QString("Mode: %1.").arg(m_useMAC ? "MAC / Layer-2 mode" : "IP / Layer-3 mode"));
+        drawBody("If a Wireshark display filter was active when the PDF was generated, only packets "
+                 "matching that filter are reflected in the counts shown. To regenerate with the "
+                 "full capture, clear the filter, click Reload, then click PDF again.");
+
+        /* ─── Footer note ─── */
+        QFont noteFont("Helvetica", 7);
+        painter.setFont(noteFont);
+        painter.setPen(QColor(130, 130, 130));
+        painter.drawText(0, pageH - mm(20), pageW, mm(10), Qt::AlignCenter | Qt::TextWordWrap,
+                         "PacketCircle is a free open-source Wireshark plugin. "
+                         "Source code and latest release: https://github.com/netwho/PacketCircle");
+    }
+    drawFooter(3);
 
     painter.end();
 
@@ -2905,13 +4137,86 @@ void MainWindow::showCaCertConfigDialog()
     settings.sync();
 }
 
+/* ── Report configuration dialog ────────────────────────────────────────── */
+void MainWindow::showReportConfigDialog()
+{
+    bool dark = isDarkTheme();
+    QDialog dlg(this);
+    dlg.setWindowTitle("Configure Reports");
+    dlg.setMinimumWidth(420);
+
+    if (dark) {
+        dlg.setStyleSheet(
+            "QDialog { background:#1e1e1e; color:#e0e0e0; }"
+            "QLabel  { color:#e0e0e0; }"
+            "QLineEdit { background:#2a2a2a; color:#e0e0e0; border:1px solid #555; padding:3px; border-radius:3px; }"
+            "QComboBox { background:#2a2a2a; color:#e0e0e0; border:1px solid #555; padding:3px; border-radius:3px; }"
+            "QPushButton { background:#333; color:#e0e0e0; border:1px solid #555; padding:4px 14px; border-radius:3px; }"
+            "QPushButton:hover { background:#444; }"
+        );
+    }
+
+    QVBoxLayout *main = new QVBoxLayout(&dlg);
+    main->setSpacing(10);
+    main->setContentsMargins(14, 12, 14, 12);
+
+    QFormLayout *form = new QFormLayout;
+    form->setLabelAlignment(Qt::AlignRight | Qt::AlignVCenter);
+    form->setHorizontalSpacing(12);
+    form->setVerticalSpacing(8);
+
+    QLineEdit *companyEdit     = new QLineEdit(m_reportCompany);
+    QLineEdit *preparedByEdit  = new QLineEdit(m_reportPreparedBy);
+    QLineEdit *projectEdit     = new QLineEdit(m_reportProject);
+    QLineEdit *commentsEdit    = new QLineEdit(m_reportComments);
+    companyEdit->setPlaceholderText("e.g. Acme Corp");
+    preparedByEdit->setPlaceholderText("e.g. Jane Smith");
+    projectEdit->setPlaceholderText("e.g. Q2 Security Audit (optional)");
+    commentsEdit->setPlaceholderText("e.g. Demo Segment Analysis");
+
+    QComboBox *paperCombo = new QComboBox;
+    paperCombo->addItem("A4  (210 \u00d7 297 mm)");
+    paperCombo->addItem("Legal  (8.5 \u00d7 14 in)");
+    paperCombo->setCurrentIndex(m_reportPaperSize);
+
+    form->addRow("Company Name:", companyEdit);
+    form->addRow("Prepared by:", preparedByEdit);
+    form->addRow("Project:", projectEdit);
+    form->addRow("Comments:", commentsEdit);
+    form->addRow("Paper Size:", paperCombo);
+
+    main->addLayout(form);
+    main->addStretch();
+
+    QDialogButtonBox *buttons = new QDialogButtonBox(QDialogButtonBox::Ok | QDialogButtonBox::Cancel);
+    connect(buttons, &QDialogButtonBox::accepted, &dlg, &QDialog::accept);
+    connect(buttons, &QDialogButtonBox::rejected, &dlg, &QDialog::reject);
+    main->addWidget(buttons);
+
+    if (dlg.exec() == QDialog::Accepted) {
+        m_reportCompany    = companyEdit->text().trimmed();
+        m_reportPreparedBy = preparedByEdit->text().trimmed();
+        m_reportProject    = projectEdit->text().trimmed();
+        m_reportComments   = commentsEdit->text().trimmed();
+        m_reportPaperSize  = paperCombo->currentIndex();
+        savePreferences();
+    }
+}
+
 /* ── Settings dialog ────────────────────────────────────────────────────── */
 void MainWindow::showSettingsDialog()
 {
     bool dark = isDarkTheme();
     QDialog dlg(this);
     dlg.setWindowTitle("PacketCircle Settings");
-    dlg.setMinimumWidth(420);
+    dlg.setMinimumWidth(440);
+    dlg.setSizeGripEnabled(true);
+
+    /* Cap height so the dialog stays usable on smaller screens */
+    {
+        int screenH = QGuiApplication::primaryScreen()->availableGeometry().height();
+        dlg.setMaximumHeight(qMin(760, screenH - 60));
+    }
 
     if (dark) {
         dlg.setStyleSheet(
@@ -2927,9 +4232,24 @@ void MainWindow::showSettingsDialog()
         );
     }
 
-    QVBoxLayout *main = new QVBoxLayout(&dlg);
-    main->setSpacing(12);
-    main->setContentsMargins(14, 12, 14, 12);
+    /* Outer layout: scroll area fills the top, Close button is always visible */
+    QVBoxLayout *outerLayout = new QVBoxLayout(&dlg);
+    outerLayout->setSpacing(0);
+    outerLayout->setContentsMargins(0, 6, 0, 8);
+
+    QScrollArea *scrollArea = new QScrollArea;
+    scrollArea->setWidgetResizable(true);
+    scrollArea->setFrameShape(QFrame::NoFrame);
+    scrollArea->setHorizontalScrollBarPolicy(Qt::ScrollBarAlwaysOff);
+    if (dark)
+        scrollArea->setStyleSheet("QScrollArea { background:#1e1e1e; }");
+
+    QWidget *scrollContent = new QWidget;
+    QVBoxLayout *main = new QVBoxLayout(scrollContent);
+    main->setSpacing(8);
+    main->setContentsMargins(14, 6, 14, 6);
+    scrollArea->setWidget(scrollContent);
+    outerLayout->addWidget(scrollArea, 1);
 
     /* ── Reset ──────────────────────────────────────────────────────── */
     QGroupBox *resetGrp = new QGroupBox("Reset");
@@ -2944,52 +4264,310 @@ void MainWindow::showSettingsDialog()
     QVBoxLayout *intBox = new QVBoxLayout(intGrp);
     intBox->setSpacing(6);
 
-    /* ntopng row */
-    QCheckBox *ntopChk = new QCheckBox("Enable ntopng");
+    /* ntopng — checkbox + configure on one row */
+    QCheckBox *ntopChk = new QCheckBox("ntopng");
     ntopChk->setChecked(m_ntopEnabled);
-    QPushButton *cfgNtopBtn = new QPushButton("Configure ntopng\u2026");
+    QPushButton *cfgNtopBtn = new QPushButton("Configure\u2026");
     cfgNtopBtn->setEnabled(m_ntopEnabled);
+    QPushButton *cfgCertBtn = new QPushButton("CA Cert\u2026");
+    cfgCertBtn->setToolTip("Set a custom CA certificate for TLS connections to ntopng");
 
     QHBoxLayout *ntopRow = new QHBoxLayout;
-    ntopRow->addSpacing(20);
+    ntopRow->addWidget(ntopChk, 1);
     ntopRow->addWidget(cfgNtopBtn);
-    ntopRow->addStretch();
-
-    intBox->addWidget(ntopChk);
+    ntopRow->addWidget(cfgCertBtn);
     intBox->addLayout(ntopRow);
-    intBox->addSpacing(6);
 
-    /* Malcolm / Arkime row */
-    QCheckBox *malcolmChk = new QCheckBox("Enable Malcolm / Arkime");
+    /* Malcolm / Arkime — checkbox + configure on one row */
+    QCheckBox *malcolmChk = new QCheckBox("Malcolm / Arkime");
     malcolmChk->setChecked(m_malcolmEnabled);
-    QPushButton *cfgMalcolmBtn = new QPushButton("Configure Malcolm / Arkime\u2026");
+    QPushButton *cfgMalcolmBtn = new QPushButton("Configure\u2026");
     cfgMalcolmBtn->setEnabled(m_malcolmEnabled);
 
     QHBoxLayout *malcolmRow = new QHBoxLayout;
-    malcolmRow->addSpacing(20);
+    malcolmRow->addWidget(malcolmChk, 1);
     malcolmRow->addWidget(cfgMalcolmBtn);
-    malcolmRow->addStretch();
-
-    intBox->addWidget(malcolmChk);
     intBox->addLayout(malcolmRow);
 
     main->addWidget(intGrp);
 
-    /* ── Security / Certificates ────────────────────────────────────── */
-    QGroupBox *certGrp = new QGroupBox("Security / Certificates");
-    QVBoxLayout *certBox = new QVBoxLayout(certGrp);
-    QPushButton *cfgCertBtn = new QPushButton("Configure Local CA Certificate\u2026");
-    cfgCertBtn->setToolTip("Set a custom CA certificate for TLS connections to ntopng");
-    certBox->addWidget(cfgCertBtn);
-    main->addWidget(certGrp);
+    /* ── Performance ────────────────────────────────────────────────── */
+    QGroupBox *perfGrp = new QGroupBox("Performance");
+    QVBoxLayout *perfBox = new QVBoxLayout(perfGrp);
+    perfBox->setSpacing(6);
 
-    /* ── Close ──────────────────────────────────────────────────────── */
+    QCheckBox *l2Chk = new QCheckBox("Enable Layer-2 / LLC analysis");
+    l2Chk->setToolTip("Scans the full capture for MAC-layer protocol breakdown (EtherType, LLC DSAP/SSAP).\n"
+                      "Disable if clicking MAC connections is slow on large captures.");
+    l2Chk->setChecked(m_enableL2Analysis);
+
+    QCheckBox *transportChk = new QCheckBox("Enable TCP / UDP transport statistics");
+    transportChk->setToolTip("Scans the full capture for per-flow TCP/UDP metrics (window size, RTT, payload stats).\n"
+                             "Disable if Transport Details dialogs are slow on large captures.");
+    transportChk->setChecked(m_enableTransportStats);
+
+    QCheckBox *deepChk = new QCheckBox("Enable protocol deep inspection");
+    deepChk->setToolTip("Scans the full capture for protocol-specific information (TLS, HTTP, SMB, DNS, \u2026).\n"
+                        "Disable to suppress per-protocol info dialogs on large captures.");
+    deepChk->setChecked(m_enableDeepInspection);
+
+    perfBox->addWidget(l2Chk);
+    perfBox->addWidget(transportChk);
+    perfBox->addWidget(deepChk);
+    main->addWidget(perfGrp);
+
+    /* ── Internal Networks (Graph) ─────────────────────────────────── */
+    QGroupBox *netGrp = new QGroupBox("Internal Networks (Graph)");
+    QVBoxLayout *netBox = new QVBoxLayout(netGrp);
+    netBox->setSpacing(6);
+
+    QLabel *netNote = new QLabel("Subnets treated as Internal in cluster view. Change /bits to adjust granularity.");
+    netNote->setWordWrap(true);
+    netBox->addWidget(netNote);
+
+    QListWidget *snList = new QListWidget;
+    snList->setFixedHeight(100);
+    snList->setSelectionMode(QAbstractItemView::SingleSelection);
+    auto rebuildSnList = [&]() {
+        snList->clear();
+        for (const auto &sn : m_internalSubnets)
+            snList->addItem(QString("%1/%2%3").arg(sn.prefix).arg(sn.bits)
+                            .arg(sn.builtIn ? " (built-in)" : ""));
+    };
+    rebuildSnList();
+    netBox->addWidget(snList);
+
+    QHBoxLayout *snAddRow = new QHBoxLayout;
+    QLineEdit *snIpEdit = new QLineEdit;
+    snIpEdit->setPlaceholderText("IP prefix (e.g. 10.5.0.0)");
+    QLabel *snSlash = new QLabel("/");
+    QSpinBox *snBits = new QSpinBox;
+    snBits->setRange(1, 32);
+    snBits->setValue(24);
+    QPushButton *snAddBtn = new QPushButton("Add");
+    snAddRow->addWidget(snIpEdit, 1);
+    snAddRow->addWidget(snSlash);
+    snAddRow->addWidget(snBits);
+    snAddRow->addWidget(snAddBtn);
+    netBox->addLayout(snAddRow);
+
+    QPushButton *snRemoveBtn  = new QPushButton("Remove Selected");
+    QPushButton *snSetBitsBtn = new QPushButton("Set /bits for selected");
+    snRemoveBtn->setEnabled(false);
+    snSetBitsBtn->setEnabled(false);
+    snSetBitsBtn->setToolTip("Update the clustering prefix length for the selected subnet");
+    QHBoxLayout *snBtnRow = new QHBoxLayout;
+    snBtnRow->addWidget(snRemoveBtn);
+    snBtnRow->addWidget(snSetBitsBtn);
+    netBox->addLayout(snBtnRow);
+
+    QObject::connect(snList, &QListWidget::currentRowChanged, [&](int row) {
+        bool valid = (row >= 0 && row < (int)m_internalSubnets.size());
+        snRemoveBtn->setEnabled(valid && !m_internalSubnets[row].builtIn);
+        snSetBitsBtn->setEnabled(valid);
+        if (valid) snBits->setValue(m_internalSubnets[row].bits);
+    });
+
+    QObject::connect(snSetBitsBtn, &QPushButton::clicked, [&]() {
+        int row = snList->currentRow();
+        if (row < 0 || row >= (int)m_internalSubnets.size()) return;
+        m_internalSubnets[row].bits = snBits->value();
+        rebuildSnList();
+        snList->setCurrentRow(row);
+        if (m_graphWidget) m_graphWidget->setInternalSubnets(m_internalSubnets);
+    });
+
+    QObject::connect(snAddBtn, &QPushButton::clicked, [&]() {
+        QString prefix = snIpEdit->text().trimmed();
+        int bits = snBits->value();
+        if (prefix.isEmpty()) return;
+        GraphWidget::InternalSubnet sn;
+        sn.prefix  = prefix;
+        sn.bits    = bits;
+        sn.builtIn = false;
+        m_internalSubnets.append(sn);
+        rebuildSnList();
+        snIpEdit->clear();
+        if (m_graphWidget) m_graphWidget->setInternalSubnets(m_internalSubnets);
+    });
+
+    QObject::connect(snRemoveBtn, &QPushButton::clicked, [&]() {
+        int row = snList->currentRow();
+        if (row < 0 || row >= (int)m_internalSubnets.size()) return;
+        if (m_internalSubnets[row].builtIn) return;
+        m_internalSubnets.removeAt(row);
+        rebuildSnList();
+        snRemoveBtn->setEnabled(false);
+        snSetBitsBtn->setEnabled(false);
+        if (m_graphWidget) m_graphWidget->setInternalSubnets(m_internalSubnets);
+    });
+
+    main->addWidget(netGrp);
+
+    /* ── Graph Thresholds ───────────────────────────────────────────── */
+    QGroupBox *threshGrp = new QGroupBox("Graph Thresholds");
+    QVBoxLayout *threshBox = new QVBoxLayout(threshGrp);
+    threshBox->setSpacing(6);
+
+    /* Active group selector */
+    QHBoxLayout *activeRow = new QHBoxLayout;
+    QLabel *activeLabel = new QLabel("Active group:");
+    QComboBox *activeCombo = new QComboBox;
+    for (const auto &g : m_thresholdGroups)
+        activeCombo->addItem(g.name);
+    activeCombo->setCurrentIndex(m_activeThresholdGroup);
+    activeRow->addWidget(activeLabel);
+    activeRow->addWidget(activeCombo, 1);
+    threshBox->addLayout(activeRow);
+
+    /* Buttons row */
+    QHBoxLayout *threshBtnRow = new QHBoxLayout;
+    QPushButton *editGroupBtn  = new QPushButton("Edit\u2026");
+    QPushButton *addGroupBtn   = new QPushButton("+ Add Group");
+    QPushButton *delGroupBtn   = new QPushButton("Delete");
+    delGroupBtn->setToolTip("Delete selected group (built-in profiles cannot be deleted)");
+    delGroupBtn->setEnabled(activeCombo->currentIndex() >= 3);
+    threshBtnRow->addWidget(editGroupBtn);
+    threshBtnRow->addWidget(addGroupBtn);
+    threshBtnRow->addWidget(delGroupBtn);
+    threshBtnRow->addStretch();
+    threshBox->addLayout(threshBtnRow);
+    main->addWidget(threshGrp);
+
+    /* Wiring */
+    QObject::connect(activeCombo, QOverload<int>::of(&QComboBox::currentIndexChanged), [&](int idx) {
+        delGroupBtn->setEnabled(idx >= 3);
+        m_activeThresholdGroup = idx;
+        if (m_graphWidget && idx >= 0 && idx < m_thresholdGroups.size())
+            m_graphWidget->setThresholds(m_thresholdGroups[idx]);
+    });
+
+    QObject::connect(editGroupBtn, &QPushButton::clicked, [&]() {
+        int idx = activeCombo->currentIndex();
+        if (idx < 0 || idx >= m_thresholdGroups.size()) return;
+        showThresholdGroupEditor(m_thresholdGroups[idx].name);
+        /* Refresh combo text (name may have changed for non-default groups) */
+        for (int i = 0; i < m_thresholdGroups.size(); i++)
+            activeCombo->setItemText(i, m_thresholdGroups[i].name);
+    });
+
+    QObject::connect(addGroupBtn, &QPushButton::clicked, [&]() {
+        showThresholdGroupEditor(QString());  /* empty = create new */
+        /* Rebuild combo */
+        activeCombo->blockSignals(true);
+        activeCombo->clear();
+        for (const auto &g : m_thresholdGroups)
+            activeCombo->addItem(g.name);
+        activeCombo->setCurrentIndex(m_activeThresholdGroup);
+        activeCombo->blockSignals(false);
+        delGroupBtn->setEnabled(m_activeThresholdGroup > 0);
+    });
+
+    QObject::connect(delGroupBtn, &QPushButton::clicked, [&]() {
+        int idx = activeCombo->currentIndex();
+        if (idx < 3 || idx >= m_thresholdGroups.size()) return;
+        auto reply = QMessageBox::question(&dlg,
+            "Delete Threshold Group",
+            QString("Delete group \"%1\"?").arg(m_thresholdGroups[idx].name),
+            QMessageBox::Yes | QMessageBox::Cancel, QMessageBox::Cancel);
+        if (reply != QMessageBox::Yes) return;
+        m_thresholdGroups.removeAt(idx);
+        m_activeThresholdGroup = 0;
+        activeCombo->blockSignals(true);
+        activeCombo->clear();
+        for (const auto &g : m_thresholdGroups)
+            activeCombo->addItem(g.name);
+        activeCombo->setCurrentIndex(0);
+        activeCombo->blockSignals(false);
+        delGroupBtn->setEnabled(activeCombo->currentIndex() >= 3);
+        if (m_graphWidget) m_graphWidget->setThresholds(m_thresholdGroups[0]);
+    });
+
+    /* ── Reports ────────────────────────────────────────────────────── */
+    QGroupBox *reportGrp = new QGroupBox("Reports");
+    QVBoxLayout *reportBox = new QVBoxLayout(reportGrp);
+    QPushButton *cfgReportBtn = new QPushButton("Configure Reports\u2026");
+    cfgReportBtn->setToolTip("Set cover page metadata: company name, author, project, comments, and paper size");
+    reportBox->addWidget(cfgReportBtn);
+    main->addWidget(reportGrp);
+
+    /* ── About ─────────────────────────────────────────────────────── */
+    static const char *PC_VERSION = "v.0.5.1";
+
+    QGroupBox *aboutGrp = new QGroupBox("About");
+    QVBoxLayout *aboutBox = new QVBoxLayout(aboutGrp);
+    aboutBox->setSpacing(5);
+
+    /* Version / platform / Qt */
+    const QString platform =
+#if defined(Q_OS_MACOS)
+        "macOS Universal";
+#elif defined(Q_OS_LINUX)
+        "Linux x86_64";
+#elif defined(Q_OS_WIN)
+        "Windows x86_64";
+#else
+        "Unknown platform";
+#endif
+    QLabel *verLabel = new QLabel(
+        QString("<b>PacketCircle %1</b> &nbsp;&middot;&nbsp; %2 &nbsp;&middot;&nbsp; Qt %3")
+        .arg(QLatin1String(PC_VERSION), platform, QLatin1String(QT_VERSION_STR)));
+    verLabel->setTextFormat(Qt::RichText);
+    aboutBox->addWidget(verLabel);
+
+    /* Plugin file installation check */
+    QStringList pluginSearchPaths = {
+        QDir::homePath() + "/.local/lib/wireshark/plugins/4-6/epan/packetcircle.so",
+        QDir::homePath() + "/.local/lib/wireshark/plugins/4.6/epan/packetcircle.so",
+#if defined(Q_OS_WIN)
+        QDir::fromNativeSeparators(qEnvironmentVariable("APPDATA"))
+            + "/Wireshark/plugins/4.6/epan/packetcircle.dll",
+        QDir::fromNativeSeparators(qEnvironmentVariable("APPDATA"))
+            + "/Wireshark/plugins/4-6/epan/packetcircle.dll",
+        QDir::fromNativeSeparators(qEnvironmentVariable("LOCALAPPDATA"))
+            + "/Wireshark/plugins/4.6/epan/packetcircle.dll",
+        QDir::fromNativeSeparators(qEnvironmentVariable("LOCALAPPDATA"))
+            + "/Wireshark/plugins/4-6/epan/packetcircle.dll",
+        "C:/Program Files/Wireshark/plugins/4.6/epan/packetcircle.dll",
+        "C:/Program Files/Wireshark/plugins/4-6/epan/packetcircle.dll",
+#endif
+    };
+    QString foundPluginPath;
+    for (const QString &pp : pluginSearchPaths)
+        if (QFile::exists(pp)) { foundPluginPath = pp; break; }
+
+    QLabel *pathLabel = new QLabel(
+        foundPluginPath.isEmpty()
+        ? QString("<span style='color:%1;'>&#9888; Plugin file not found at expected location</span>")
+            .arg(dark ? "#f0c040" : "#b07800")
+        : QString("<span style='color:%1;'>&#10003; %2</span>")
+            .arg(dark ? "#6ec96e" : "#27ae60",
+                 foundPluginPath.toHtmlEscaped()));
+    pathLabel->setTextFormat(Qt::RichText);
+    pathLabel->setWordWrap(true);
+    aboutBox->addWidget(pathLabel);
+
+    /* GitHub update check */
+    QHBoxLayout *updateRow = new QHBoxLayout;
+    QPushButton *checkUpdateBtn  = new QPushButton("Check for Updates");
+    QLabel      *updateStatusLbl = new QLabel("");
+    updateStatusLbl->setTextFormat(Qt::RichText);
+    updateStatusLbl->setOpenExternalLinks(true);
+    updateRow->addWidget(checkUpdateBtn);
+    updateRow->addWidget(updateStatusLbl, 1);
+    aboutBox->addLayout(updateRow);
+
+    main->addWidget(aboutGrp);
+
     main->addStretch();
+
+    /* ── Close — outside the scroll area so it is always visible ─── */
     QHBoxLayout *btnRow = new QHBoxLayout;
+    btnRow->setContentsMargins(14, 4, 14, 0);
     btnRow->addStretch();
     QPushButton *closeBtn = new QPushButton("Close");
     btnRow->addWidget(closeBtn);
-    main->addLayout(btnRow);
+    outerLayout->addLayout(btnRow);
 
     /* ── Wiring ─────────────────────────────────────────────────────── */
 
@@ -3013,6 +4591,10 @@ void MainWindow::showSettingsDialog()
 
     QObject::connect(cfgMalcolmBtn, &QPushButton::clicked, [&]() {
         showMalcolmConfigDialog();
+    });
+
+    QObject::connect(cfgReportBtn, &QPushButton::clicked, [&]() {
+        showReportConfigDialog();
     });
 
     QObject::connect(cfgCertBtn, &QPushButton::clicked, [&]() {
@@ -3060,11 +4642,118 @@ void MainWindow::showSettingsDialog()
         malcolmChk->setChecked(false);
         cfgMalcolmBtn->setEnabled(false);
 
+        /* Reset performance */
+        m_enableL2Analysis     = true;
+        m_enableTransportStats = true;
+        m_enableDeepInspection = true;
+        l2Chk->setChecked(true);
+        transportChk->setChecked(true);
+        deepChk->setChecked(true);
+
         /* Reset window size */
         resize(1280, 780);
 
+        /* Reset threshold groups to built-in profiles only */
+        m_thresholdGroups.clear();
+        m_thresholdGroups.append(GraphWidget::GraphThresholds::defaults());
+        m_thresholdGroups.append(GraphWidget::GraphThresholds::strict());
+        m_thresholdGroups.append(GraphWidget::GraphThresholds::tolerant());
+        m_activeThresholdGroup = 0;
+        activeCombo->clear();
+        activeCombo->addItem("Default");
+        if (m_graphWidget) m_graphWidget->setThresholds(m_thresholdGroups[0]);
+
         QMessageBox::information(&dlg, "Reset Complete",
             "Settings have been reset to defaults.");
+    });
+
+    /* Performance checkboxes update flags immediately */
+    QObject::connect(l2Chk,        &QCheckBox::toggled, [&](bool on) { m_enableL2Analysis     = on; });
+    QObject::connect(transportChk, &QCheckBox::toggled, [&](bool on) { m_enableTransportStats = on; });
+    QObject::connect(deepChk,      &QCheckBox::toggled, [&](bool on) { m_enableDeepInspection = on; });
+
+    /* GitHub update check — async, safe against dialog close before reply */
+    QObject::connect(checkUpdateBtn, &QPushButton::clicked,
+                     [this, checkUpdateBtn, updateStatusLbl]() {
+        QPointer<QPushButton> safeBtn(checkUpdateBtn);
+        QPointer<QLabel>      safeLbl(updateStatusLbl);
+
+        if (safeBtn) safeBtn->setEnabled(false);
+        if (safeLbl) safeLbl->setText("Checking\u2026");
+
+        if (!m_networkManager)
+            m_networkManager = new QNetworkAccessManager(this);
+
+        QNetworkRequest req(QUrl("https://api.github.com/repos/netwho/PacketCircle/releases/latest"));
+        req.setHeader(QNetworkRequest::UserAgentHeader, "PacketCircle/0.5.1");
+        req.setRawHeader("Accept", "application/vnd.github.v3+json");
+
+        QNetworkReply *reply = m_networkManager->get(req);
+        QObject::connect(reply, &QNetworkReply::finished,
+                         [reply, safeBtn, safeLbl]() mutable {
+            reply->deleteLater();
+            if (safeBtn) safeBtn->setEnabled(true);
+            if (!safeLbl) return; /* dialog was closed before reply arrived */
+
+            if (reply->error() != QNetworkReply::NoError) {
+                safeLbl->setText(
+                    QString("<span style='color:#e07070;'>Could not reach GitHub (%1)</span>")
+                    .arg(reply->errorString().toHtmlEscaped()));
+                return;
+            }
+
+            QString tag = QJsonDocument::fromJson(reply->readAll())
+                              .object().value("tag_name").toString();
+            if (tag.isEmpty()) {
+                safeLbl->setText("<span style='color:#e07070;'>No release info found</span>");
+                return;
+            }
+
+            /* Normalise "v.0.5.1" / "v0.5.1" → "0.5.1" */
+            auto strip = [](const QString &s) {
+                QString r = s.toLower();
+                if (r.startsWith("v.")) return r.mid(2);
+                if (r.startsWith("v"))  return r.mid(1);
+                return r;
+            };
+            /* Numeric semver comparison — returns true if remote > current */
+            auto isNewer = [&](const QString &remote, const QString &current) {
+                auto parts = [](const QString &v) {
+                    QList<int> out;
+                    for (const QString &p : v.split('.'))
+                        out.append(p.toInt());
+                    while (out.size() < 3) out.append(0);
+                    return out;
+                };
+                QList<int> r = parts(remote), c = parts(current);
+                for (int i = 0; i < 3; i++) {
+                    if (r[i] > c[i]) return true;
+                    if (r[i] < c[i]) return false;
+                }
+                return false;
+            };
+
+            if (!isNewer(strip(tag), strip(QString(PC_VERSION)))) {
+                safeLbl->setText("<span style='color:#6ec96e;'>&#10003; Up to date</span>");
+            } else {
+                /* Newer version on GitHub — offer installer.zip download */
+                static const QString dlUrl =
+                    "https://raw.githubusercontent.com/netwho/PacketCircle/main/installer.zip";
+                auto reply2 = QMessageBox::question(
+                    nullptr,
+                    "Update Available",
+                    QString("PacketCircle %1 is available (you have %2).\n\n"
+                            "Download installer.zip now?")
+                    .arg(tag, QLatin1String(PC_VERSION)),
+                    QMessageBox::Yes | QMessageBox::No,
+                    QMessageBox::Yes);
+                if (reply2 == QMessageBox::Yes)
+                    QDesktopServices::openUrl(QUrl(dlUrl));
+                safeLbl->setText(
+                    QString("<span style='color:#f0c040;'>%1 available</span>")
+                    .arg(tag.toHtmlEscaped()));
+            }
+        });
     });
 
     QObject::connect(closeBtn, &QPushButton::clicked, &dlg, &QDialog::reject);
@@ -3073,6 +4762,255 @@ void MainWindow::showSettingsDialog()
 
     /* Persist whatever state the checkboxes were left in */
     savePreferences();
+}
+
+/* ── Graph threshold group persistence ──────────────────────────────────────
+ * Groups are stored in the same INI file.
+ * Keys: thresholds/count, thresholds/N/name, thresholds/N/hs_pkt_large, …   */
+void MainWindow::saveThresholdGroups()
+{
+    QSettings settings(preferencesFilePath(), QSettings::IniFormat);
+    /* Start at 3 — indices 0-2 (Default/Strict/Tolerant) are built-in, never written */
+    settings.beginWriteArray("thresholds");
+    int writeIdx = 0;
+    for (int i = 3; i < m_thresholdGroups.size(); i++) {
+        settings.setArrayIndex(writeIdx++);
+        const auto &t = m_thresholdGroups[i];
+        settings.setValue("name",                   t.name);
+        settings.setValue("hs_pkt_large",           t.hs_pkt_large);
+        settings.setValue("hs_pkt_moderate",        t.hs_pkt_moderate);
+        settings.setValue("hs_pkt_small",           t.hs_pkt_small);
+        settings.setValue("hs_pkt_tiny",            t.hs_pkt_tiny);
+        settings.setValue("hs_pkt_very_few",        t.hs_pkt_very_few);
+        settings.setValue("hs_pkt_few",             t.hs_pkt_few);
+        settings.setValue("hs_pkt_sustained",       t.hs_pkt_sustained);
+        settings.setValue("hs_ports_high",          t.hs_ports_high);
+        settings.setValue("hs_ports_elevated",      t.hs_ports_elevated);
+        settings.setValue("rt_fast_ms",             t.rt_fast_ms);
+        settings.setValue("rt_moderate_ms",         t.rt_moderate_ms);
+        settings.setValue("rt_slow_ms",             t.rt_slow_ms);
+        settings.setValue("rt_very_slow_ms",        t.rt_very_slow_ms);
+        settings.setValue("an_ports_critical",      t.an_ports_critical);
+        settings.setValue("an_ports_high",          t.an_ports_high);
+        settings.setValue("an_ports_elevated",      t.an_ports_elevated);
+        settings.setValue("an_ports_slight",        t.an_ports_slight);
+        settings.setValue("an_scan_min_ports",      t.an_scan_min_ports);
+        settings.setValue("an_scan_ppp",            t.an_scan_ppp);
+        settings.setValue("an_flood_tiny_pkt",      t.an_flood_tiny_pkt);
+        settings.setValue("an_flood_tiny_count",    t.an_flood_tiny_count);
+        settings.setValue("an_flood_small_pkt",     t.an_flood_small_pkt);
+        settings.setValue("an_flood_small_count",   t.an_flood_small_count);
+        settings.setValue("an_oneway_count",        t.an_oneway_count);
+    }
+    settings.endArray();
+}
+
+void MainWindow::loadThresholdGroups()
+{
+    QSettings settings(preferencesFilePath(), QSettings::IniFormat);
+    /* Always keep built-in profiles at indices 0-2 */
+    m_thresholdGroups.clear();
+    m_thresholdGroups.append(GraphWidget::GraphThresholds::defaults());
+    m_thresholdGroups.append(GraphWidget::GraphThresholds::strict());
+    m_thresholdGroups.append(GraphWidget::GraphThresholds::tolerant());
+
+    int count = settings.beginReadArray("thresholds");
+    for (int i = 0; i < count; i++) {
+        settings.setArrayIndex(i);
+        GraphWidget::GraphThresholds t = GraphWidget::GraphThresholds::defaults();
+        t.name                 = settings.value("name", QString("Group %1").arg(i+1)).toString();
+        t.hs_pkt_large         = settings.value("hs_pkt_large",         t.hs_pkt_large).toInt();
+        t.hs_pkt_moderate      = settings.value("hs_pkt_moderate",      t.hs_pkt_moderate).toInt();
+        t.hs_pkt_small         = settings.value("hs_pkt_small",         t.hs_pkt_small).toInt();
+        t.hs_pkt_tiny          = settings.value("hs_pkt_tiny",          t.hs_pkt_tiny).toInt();
+        t.hs_pkt_very_few      = settings.value("hs_pkt_very_few",      t.hs_pkt_very_few).toInt();
+        t.hs_pkt_few           = settings.value("hs_pkt_few",           t.hs_pkt_few).toInt();
+        t.hs_pkt_sustained     = settings.value("hs_pkt_sustained",     t.hs_pkt_sustained).toInt();
+        t.hs_ports_high        = settings.value("hs_ports_high",        t.hs_ports_high).toInt();
+        t.hs_ports_elevated    = settings.value("hs_ports_elevated",    t.hs_ports_elevated).toInt();
+        t.rt_fast_ms           = settings.value("rt_fast_ms",           t.rt_fast_ms).toInt();
+        t.rt_moderate_ms       = settings.value("rt_moderate_ms",       t.rt_moderate_ms).toInt();
+        t.rt_slow_ms           = settings.value("rt_slow_ms",           t.rt_slow_ms).toInt();
+        t.rt_very_slow_ms      = settings.value("rt_very_slow_ms",      t.rt_very_slow_ms).toInt();
+        t.an_ports_critical    = settings.value("an_ports_critical",    t.an_ports_critical).toInt();
+        t.an_ports_high        = settings.value("an_ports_high",        t.an_ports_high).toInt();
+        t.an_ports_elevated    = settings.value("an_ports_elevated",    t.an_ports_elevated).toInt();
+        t.an_ports_slight      = settings.value("an_ports_slight",      t.an_ports_slight).toInt();
+        t.an_scan_min_ports    = settings.value("an_scan_min_ports",    t.an_scan_min_ports).toInt();
+        t.an_scan_ppp          = settings.value("an_scan_ppp",          t.an_scan_ppp).toDouble();
+        t.an_flood_tiny_pkt    = settings.value("an_flood_tiny_pkt",    t.an_flood_tiny_pkt).toInt();
+        t.an_flood_tiny_count  = settings.value("an_flood_tiny_count",  t.an_flood_tiny_count).toInt();
+        t.an_flood_small_pkt   = settings.value("an_flood_small_pkt",   t.an_flood_small_pkt).toInt();
+        t.an_flood_small_count = settings.value("an_flood_small_count", t.an_flood_small_count).toInt();
+        t.an_oneway_count      = settings.value("an_oneway_count",      t.an_oneway_count).toInt();
+        m_thresholdGroups.append(t);
+    }
+    settings.endArray();
+}
+
+/* ── Threshold group editor dialog ──────────────────────────────────────────
+ * groupName.isEmpty() → create new group (cloned from Default).
+ * Otherwise, edit the existing group with that name.                         */
+void MainWindow::showThresholdGroupEditor(const QString &groupName)
+{
+    /* Find the group to edit (or prepare a new one) */
+    int editIdx = -1;
+    GraphWidget::GraphThresholds working = GraphWidget::GraphThresholds::defaults();
+    bool isNew = groupName.isEmpty();
+
+    if (!isNew) {
+        for (int i = 0; i < m_thresholdGroups.size(); i++) {
+            if (m_thresholdGroups[i].name == groupName) { editIdx = i; working = m_thresholdGroups[i]; break; }
+        }
+        if (editIdx < 0) return;
+    } else {
+        working.name = "New Group";
+        working.builtIn = false;
+    }
+
+    bool isBuiltIn = (!isNew && working.builtIn);
+
+    QDialog dlg(this);
+    dlg.setWindowTitle(isNew ? "Add Threshold Group" : (isBuiltIn ? QString("View — %1 (read-only)").arg(working.name) : "Edit Threshold Group"));
+    dlg.setMinimumWidth(480);
+    dlg.setSizeGripEnabled(true);
+
+    QVBoxLayout *main = new QVBoxLayout(&dlg);
+    main->setSpacing(8);
+    main->setContentsMargins(12, 12, 12, 12);
+
+    /* Group name */
+    QHBoxLayout *nameRow = new QHBoxLayout;
+    QLineEdit *nameEdit = new QLineEdit(working.name);
+    nameEdit->setReadOnly(isBuiltIn);
+    nameRow->addWidget(new QLabel("Group name:"));
+    nameRow->addWidget(nameEdit, 1);
+    main->addLayout(nameRow);
+
+    /* Helper: add a labelled int spinbox row */
+    auto addInt = [&](QFormLayout *form, const QString &label, int val, int lo, int hi, bool readOnly) -> QSpinBox* {
+        QSpinBox *sb = new QSpinBox;
+        sb->setRange(lo, hi);
+        sb->setValue(val);
+        sb->setReadOnly(readOnly);
+        sb->setButtonSymbols(readOnly ? QAbstractSpinBox::NoButtons : QAbstractSpinBox::UpDownArrows);
+        form->addRow(label, sb);
+        return sb;
+    };
+    auto addDbl = [&](QFormLayout *form, const QString &label, double val, double lo, double hi, bool readOnly) -> QDoubleSpinBox* {
+        QDoubleSpinBox *sb = new QDoubleSpinBox;
+        sb->setRange(lo, hi);
+        sb->setDecimals(1);
+        sb->setSingleStep(0.5);
+        sb->setValue(val);
+        sb->setReadOnly(readOnly);
+        sb->setButtonSymbols(readOnly ? QAbstractSpinBox::NoButtons : QAbstractSpinBox::UpDownArrows);
+        form->addRow(label, sb);
+        return sb;
+    };
+
+    /* ── TCP Health section ── */
+    QGroupBox *hsGrp = new QGroupBox("TCP Health Signals");
+    QFormLayout *hsForm = new QFormLayout(hsGrp);
+    hsForm->setSpacing(4);
+    auto *sb_hs_pkt_large      = addInt(hsForm, "Large packet size (B) — threshold for +25%:", working.hs_pkt_large,     50, 9999, isBuiltIn);
+    auto *sb_hs_pkt_moderate   = addInt(hsForm, "Moderate packet size (B) — +15%:",             working.hs_pkt_moderate,  20, 9999, isBuiltIn);
+    auto *sb_hs_pkt_small      = addInt(hsForm, "Small packet size (B) — +5%:",                 working.hs_pkt_small,     10, 9999, isBuiltIn);
+    auto *sb_hs_pkt_tiny       = addInt(hsForm, "Tiny packet size (B) — -30%:",                 working.hs_pkt_tiny,       1,  500, isBuiltIn);
+    auto *sb_hs_pkt_very_few   = addInt(hsForm, "Very few packets — -20%:",                     working.hs_pkt_very_few,   1,  100, isBuiltIn);
+    auto *sb_hs_pkt_few        = addInt(hsForm, "Few packets — -10%:",                          working.hs_pkt_few,        1,  100, isBuiltIn);
+    auto *sb_hs_pkt_sustained  = addInt(hsForm, "Sustained packets — +10%:",                    working.hs_pkt_sustained,  5, 9999, isBuiltIn);
+    auto *sb_hs_ports_high     = addInt(hsForm, "High port diversity — -25%:",                  working.hs_ports_high,     1,  100, isBuiltIn);
+    auto *sb_hs_ports_elevated = addInt(hsForm, "Elevated port diversity — -10%:",              working.hs_ports_elevated, 1,   50, isBuiltIn);
+    main->addWidget(hsGrp);
+
+    /* ── Response Time section ── */
+    QGroupBox *rtGrp = new QGroupBox("Response Time Bins (ms)");
+    QFormLayout *rtForm = new QFormLayout(rtGrp);
+    rtForm->setSpacing(4);
+    auto *sb_rt_fast_ms       = addInt(rtForm, "Fast — green threshold (ms):",       working.rt_fast_ms,      1, 9999, isBuiltIn);
+    auto *sb_rt_moderate_ms   = addInt(rtForm, "Moderate — yellow-green limit (ms):", working.rt_moderate_ms,  1, 9999, isBuiltIn);
+    auto *sb_rt_slow_ms       = addInt(rtForm, "Slow — yellow limit (ms):",           working.rt_slow_ms,      1, 9999, isBuiltIn);
+    auto *sb_rt_very_slow_ms  = addInt(rtForm, "Very slow — orange limit (ms):",      working.rt_very_slow_ms, 1, 9999, isBuiltIn);
+    rtForm->addRow(new QLabel("Above orange limit → red (unacceptable)"));
+    main->addWidget(rtGrp);
+
+    /* ── Anomaly Score section ── */
+    QGroupBox *anGrp = new QGroupBox("Anomaly Score Signals");
+    QFormLayout *anForm = new QFormLayout(anGrp);
+    anForm->setSpacing(4);
+    auto *sb_an_ports_critical   = addInt(anForm, "Critical port diversity — +50%:",    working.an_ports_critical,   1,  500, isBuiltIn);
+    auto *sb_an_ports_high       = addInt(anForm, "High port diversity — +35%:",        working.an_ports_high,       1,  200, isBuiltIn);
+    auto *sb_an_ports_elevated   = addInt(anForm, "Elevated port diversity — +20%:",    working.an_ports_elevated,   1,  100, isBuiltIn);
+    auto *sb_an_ports_slight     = addInt(anForm, "Slight port diversity — +8%:",       working.an_ports_slight,     1,   50, isBuiltIn);
+    auto *sb_an_scan_min_ports   = addInt(anForm, "Min ports to check scan rate:",      working.an_scan_min_ports,   1,   50, isBuiltIn);
+    auto *sb_an_scan_ppp         = addDbl(anForm, "Scan: max pkts/port ratio — +20%:",  working.an_scan_ppp,       0.1, 50.0, isBuiltIn);
+    auto *sb_an_flood_tiny_pkt   = addInt(anForm, "Flood: tiny packet size (B) — +25%:",working.an_flood_tiny_pkt,   1,  500, isBuiltIn);
+    auto *sb_an_flood_tiny_count = addInt(anForm, "Flood: min packets (tiny) — +25%:", working.an_flood_tiny_count,  1, 9999, isBuiltIn);
+    auto *sb_an_flood_small_pkt  = addInt(anForm, "Flood: small packet size (B) — +10%:",working.an_flood_small_pkt, 1,  500, isBuiltIn);
+    auto *sb_an_flood_small_count= addInt(anForm, "Flood: min packets (small) — +10%:",working.an_flood_small_count, 1, 9999, isBuiltIn);
+    auto *sb_an_oneway_count     = addInt(anForm, "One-way exfil min packets — +15%:",  working.an_oneway_count,     1, 9999, isBuiltIn);
+    main->addWidget(anGrp);
+
+    /* Buttons */
+    QDialogButtonBox *bbx;
+    if (isBuiltIn)
+        bbx = new QDialogButtonBox(QDialogButtonBox::Close);
+    else
+        bbx = new QDialogButtonBox(QDialogButtonBox::Save | QDialogButtonBox::Cancel);
+    main->addWidget(bbx);
+
+    if (!isBuiltIn) {
+        QObject::connect(bbx, &QDialogButtonBox::accepted, [&]() {
+            /* Collect values */
+            working.name                  = nameEdit->text().trimmed();
+            if (working.name.isEmpty()) working.name = "Unnamed";
+            if (working.name == "Default" || working.name == "Strict" || working.name == "Tolerant")
+                working.name += " (copy)";
+            working.builtIn               = false;
+            working.hs_pkt_large          = sb_hs_pkt_large->value();
+            working.hs_pkt_moderate       = sb_hs_pkt_moderate->value();
+            working.hs_pkt_small          = sb_hs_pkt_small->value();
+            working.hs_pkt_tiny           = sb_hs_pkt_tiny->value();
+            working.hs_pkt_very_few       = sb_hs_pkt_very_few->value();
+            working.hs_pkt_few            = sb_hs_pkt_few->value();
+            working.hs_pkt_sustained      = sb_hs_pkt_sustained->value();
+            working.hs_ports_high         = sb_hs_ports_high->value();
+            working.hs_ports_elevated     = sb_hs_ports_elevated->value();
+            working.rt_fast_ms            = sb_rt_fast_ms->value();
+            working.rt_moderate_ms        = sb_rt_moderate_ms->value();
+            working.rt_slow_ms            = sb_rt_slow_ms->value();
+            working.rt_very_slow_ms       = sb_rt_very_slow_ms->value();
+            working.an_ports_critical     = sb_an_ports_critical->value();
+            working.an_ports_high         = sb_an_ports_high->value();
+            working.an_ports_elevated     = sb_an_ports_elevated->value();
+            working.an_ports_slight       = sb_an_ports_slight->value();
+            working.an_scan_min_ports     = sb_an_scan_min_ports->value();
+            working.an_scan_ppp           = sb_an_scan_ppp->value();
+            working.an_flood_tiny_pkt     = sb_an_flood_tiny_pkt->value();
+            working.an_flood_tiny_count   = sb_an_flood_tiny_count->value();
+            working.an_flood_small_pkt    = sb_an_flood_small_pkt->value();
+            working.an_flood_small_count  = sb_an_flood_small_count->value();
+            working.an_oneway_count       = sb_an_oneway_count->value();
+
+            if (isNew) {
+                m_thresholdGroups.append(working);
+                m_activeThresholdGroup = m_thresholdGroups.size() - 1;
+            } else {
+                m_thresholdGroups[editIdx] = working;
+            }
+            /* Apply immediately if this is the active group */
+            if (!isNew && editIdx == m_activeThresholdGroup && m_graphWidget)
+                m_graphWidget->setThresholds(working);
+            if (isNew && m_graphWidget)
+                m_graphWidget->setThresholds(working);
+
+            dlg.accept();
+        });
+    }
+
+    QObject::connect(bbx, &QDialogButtonBox::rejected, &dlg, &QDialog::reject);
+    dlg.exec();
 }
 
 void MainWindow::onSendToNtopClicked()
@@ -4169,13 +6107,11 @@ void MainWindow::onReloadDataClicked()
 
 void MainWindow::updateSearchBarForMode()
 {
-    if (!m_searchLabel || !m_searchLineEdit) return;
+    if (!m_searchLineEdit) return;
 
     if (m_useMAC) {
-        m_searchLabel->setText("Search MAC");
         m_searchLineEdit->setPlaceholderText("Protocol or address  —  ? for help");
     } else {
-        m_searchLabel->setText("Search");
         m_searchLineEdit->setPlaceholderText("Protocol, IP, CIDR, or port (TCP 443)  —  ? for help");
     }
     /* Clear current search when switching modes */
@@ -4214,8 +6150,8 @@ void MainWindow::refreshPairListText()
     int listWidth = m_pairListWidget->viewport()->width();
     QFontMetrics fm(m_pairListWidget->font());
 
-    /* Reserve space for checkbox (~30px) + arrow (5 chars "  ⇔  ") + safety margin */
-    int reservedPx = fm.horizontalAdvance("  \xE2\x87\x94  ") + 50;
+    /* Reserve space for checkbox (~30px) + arrow (5 chars " <-> ") + safety margin */
+    int reservedPx = fm.horizontalAdvance(" <-> ") + 50;
     int availablePx = listWidth - reservedPx;
     if (availablePx < 100) availablePx = 100;
 
@@ -4265,9 +6201,9 @@ void MainWindow::refreshPairListText()
         QString src = entries[i].src.leftJustified(max_src_len, ' ');
         QString dst = entries[i].dst.leftJustified(max_dst_len, ' ');
         int dir = item->data(Qt::UserRole + 2).toInt();
-        const char *arrow = (dir == 1) ? "  \xE2\x87\x94  "   /* ⇔ */
-                          : (dir == 2) ? "  \xE2\x87\x90  "   /* ⇐ */
-                          :              "  \xE2\x87\x92  ";   /* ⇒ */
+        const char *arrow = (dir == 1) ? " <-> "
+                          : (dir == 2) ? " <-- "
+                          :              " --> ";
         item->setText(src + QString::fromUtf8(arrow) + dst);
     }
 }
@@ -4672,8 +6608,6 @@ void MainWindow::enterSearchOverrideMode(const QList<comm_pair_t*> &matches,
     }
     if (m_pairListBlinkTimer && !m_highlightedPairItems.isEmpty())
         m_pairListBlinkTimer->start(500);
-    if (m_selectSearchBtn)
-        m_selectSearchBtn->setEnabled(!m_highlightedPairItems.isEmpty());
 }
 
 /* Restore Top-N mode: re-enable the saved Top-N button, clear tints, rebuild views. */
@@ -4718,9 +6652,8 @@ void MainWindow::applySearchFilter(const QString &query)
             updateViews();
             updateLegend();   /* restore legend to full Top-N set */
         }
-        if (m_circleWidget) {
-            m_circleWidget->setHighlightedLabels(highlighted_labels);
-        }
+        if (m_circleWidget) m_circleWidget->setHighlightedLabels(highlighted_labels);
+        if (m_graphWidget)  m_graphWidget->setHighlightedLabels(highlighted_labels);
         if (m_pairListWidget) {
             for (int i = 0; i < m_pairListWidget->count(); i++) {
                 QListWidgetItem *list_item = m_pairListWidget->item(i);
@@ -5302,12 +7235,10 @@ void MainWindow::applySearchFilter(const QString &query)
         }
     }
 
-    /* Start blink timer if we have matches; enable/disable Select Results */
+    /* Start blink timer if we have matches */
     if (!m_highlightedPairItems.isEmpty()) {
         m_pairListBlinkTimer->start(500);
-        m_selectSearchBtn->setEnabled(true);
     } else {
-        m_selectSearchBtn->setEnabled(false);
 
         /* ── Full-buffer fallback ──────────────────────────────────────────────
          * Nothing matched in the current Top-N view.  Before telling the user
@@ -5482,9 +7413,8 @@ void MainWindow::applySearchFilter(const QString &query)
         }
     }
 
-    if (m_circleWidget) {
-        m_circleWidget->setHighlightedLabels(highlighted_labels);
-    }
+    if (m_circleWidget) m_circleWidget->setHighlightedLabels(highlighted_labels);
+    if (m_graphWidget)  m_graphWidget->setHighlightedLabels(highlighted_labels);
 }
 
 /* ─────────────────────────────────────────────────────────────────────────── *
@@ -5590,10 +7520,9 @@ void MainWindow::updateVisiblePairsFromWidgets()
             visible_pairs.insert(secondary);
     }
 
-    /* Update circle widget with visible pairs */
-    if (m_circleWidget) {
-        m_circleWidget->setVisiblePairs(visible_pairs);
-    }
+    /* Update circle and graph widgets with visible pairs */
+    if (m_circleWidget) m_circleWidget->setVisiblePairs(visible_pairs);
+    if (m_graphWidget)  m_graphWidget->setVisiblePairs(visible_pairs);
 }
 
 void MainWindow::onPairListItemChanged(QListWidgetItem *item)
@@ -5698,10 +7627,9 @@ void MainWindow::onProtocolCheckboxToggled(const QString &protocol, bool checked
         enabled_protocols.clear();  /* Empty set = show all */
     }
     
-    /* Update circle widget filter */
-    if (m_circleWidget) {
-        m_circleWidget->setProtocolFilter(enabled_protocols);
-    }
+    /* Update circle and graph widget filters */
+    if (m_circleWidget) m_circleWidget->setProtocolFilter(enabled_protocols);
+    if (m_graphWidget)  m_graphWidget->setProtocolFilter(enabled_protocols);
 }
 
 void MainWindow::onProtocolCategoryToggled(const QString &category, const QStringList &protocols, bool checked)
@@ -5769,10 +7697,9 @@ void MainWindow::onProtocolCategoryToggled(const QString &category, const QStrin
         enabled_protocols.clear();  /* Empty set = show all */
     }
     
-    /* Update circle widget filter */
-    if (m_circleWidget) {
-        m_circleWidget->setProtocolFilter(enabled_protocols);
-    }
+    /* Update circle and graph widget filters */
+    if (m_circleWidget) m_circleWidget->setProtocolFilter(enabled_protocols);
+    if (m_graphWidget)  m_graphWidget->setProtocolFilter(enabled_protocols);
 
     /* Also sync pair list checkboxes to match the protocol filter.
      * This lets the user select/deselect pairs by protocol category
@@ -5928,6 +7855,11 @@ ConnectionPopup::ConnectionPopup(comm_pair_t *pair, comm_pair_t *reversePair, gb
     , m_autoCloseTimer(nullptr)
     , m_headerLabel(nullptr)
     , m_contextMenuActive(false)
+    , m_scoreBtn(nullptr)
+    , m_graphHealthScore(0.5)
+    , m_graphAnomalyScore(0.0)
+    , m_graphResponseTimeMs(-1.0)
+    , m_graphThroughputBps(0.0)
 {
     /* NOTE: Do NOT use WA_DeleteOnClose here.  QMenu::exec() runs a nested
      * event loop; if the auto-close timer fires during that loop and triggers
@@ -5960,7 +7892,7 @@ ConnectionPopup::ConnectionPopup(comm_pair_t *pair, comm_pair_t *reversePair, gb
     layout->setContentsMargins(8, 8, 8, 8);
     layout->setSpacing(6);
 
-    /* Header: Source <-> Destination */
+    /* Header row: Source ↔ Destination label  +  (optional) Score button */
     QString srcDisplay = pair->resolved_src ? QString::fromUtf8(pair->resolved_src) : QString::fromUtf8(pair->src_addr);
     QString dstDisplay = pair->resolved_dst ? QString::fromUtf8(pair->resolved_dst) : QString::fromUtf8(pair->dst_addr);
     if (dark) {
@@ -5985,7 +7917,31 @@ ConnectionPopup::ConnectionPopup(comm_pair_t *pair, comm_pair_t *reversePair, gb
         m_headerLabel->setStyleSheet("QLabel { color: #222; font-size: 12px; padding: 2px 0; }");
     }
     m_headerLabel->setTextFormat(Qt::RichText);
-    layout->addWidget(m_headerLabel);
+
+    m_scoreBtn = new QPushButton("Calculating\u2026", this);
+    m_scoreBtn->setFixedHeight(22);
+    m_scoreBtn->setEnabled(false);
+    m_scoreBtn->setToolTip("Show TCP Health and Anomaly score breakdown for this connection");
+    m_scoreBtn->setVisible(false);  /* shown only in graph view — made visible by onLineClicked */
+    if (dark) {
+        m_scoreBtn->setStyleSheet(
+            "QPushButton { background:#3a5a3a; color:#8eff8e; border:1px solid #4a7a4a;"
+            " border-radius:3px; padding:2px 8px; font-size:11px; font-weight:bold; }"
+            "QPushButton:hover { background:#4a6a4a; }");
+    } else {
+        m_scoreBtn->setStyleSheet(
+            "QPushButton { background:#e8f5e9; color:#2e7d32; border:1px solid #a5d6a7;"
+            " border-radius:3px; padding:2px 8px; font-size:11px; font-weight:bold; }"
+            "QPushButton:hover { background:#c8e6c9; }");
+    }
+
+    QWidget *headerRow = new QWidget(this);
+    QHBoxLayout *headerRowLayout = new QHBoxLayout(headerRow);
+    headerRowLayout->setContentsMargins(0, 0, 0, 0);
+    headerRowLayout->setSpacing(6);
+    headerRowLayout->addWidget(m_headerLabel, 1);
+    headerRowLayout->addWidget(m_scoreBtn, 0);
+    layout->addWidget(headerRow);
 
     if (pair->is_wifi) {
         /* ---- Wi-Fi mode: rich HTML info card instead of port table ---- */
@@ -6206,6 +8162,348 @@ ConnectionPopup::ConnectionPopup(comm_pair_t *pair, comm_pair_t *reversePair, gb
 
 ConnectionPopup::~ConnectionPopup()
 {
+}
+
+/* ── Score breakdown dialog (opened by the Score button) ───────────────────
+ * Shows a human-readable table of every signal that contributed to the TCP
+ * Health score and the Anomaly score for this specific connection.           */
+void ConnectionPopup::showScoreBtnCalculating()
+{
+    if (!m_scoreBtn) return;
+    m_scoreBtn->setText("Calculating\u2026");
+    m_scoreBtn->setEnabled(false);
+    m_scoreBtn->setVisible(true);
+}
+
+void ConnectionPopup::setGraphScores(qreal healthScore, qreal anomalyScore,
+                                      const QList<GraphWidget::ScoreFactor> &healthFactors,
+                                      const QList<GraphWidget::ScoreFactor> &anomalyFactors,
+                                      qreal responseTimeMs,
+                                      qreal throughputBps,
+                                      guint32 winMin,
+                                      guint32 winMax,
+                                      gdouble winAvg,
+                                      guint32 zeroWinCount,
+                                      gdouble zeroWinMaxDurMs)
+{
+    m_graphHealthScore    = healthScore;
+    m_graphAnomalyScore   = anomalyScore;
+    m_graphResponseTimeMs = responseTimeMs;
+    m_graphThroughputBps  = throughputBps;
+    m_healthFactors  = healthFactors;
+    m_anomalyFactors = anomalyFactors;
+
+    /* Pre-compute stats from m_pair while it is guaranteed valid.
+     * The button lambda must not access m_pair — it can become dangling
+     * by the time the user clicks (new capture file, pair refresh, etc.). */
+    m_hasTcpData = m_pair && m_pair->has_tcp;
+    m_rttMin = m_rttAvg = m_rttMax = -1.0;
+    m_fwdBps = m_revBps = 0.0;
+
+    if (m_pair && m_pair->has_tcp && m_pair->dst_ports) {
+        capture_file *cfm = (capture_file *)plugin_if_get_capture_file(
+            extract_capture_file, NULL);
+        if (cfm) {
+            quint16 topTcpPort = 0;
+            guint64 topTcpCount = 0;
+            GHashTableIter rpit; gpointer rpk, rpv;
+            g_hash_table_iter_init(&rpit, m_pair->dst_ports);
+            while (g_hash_table_iter_next(&rpit, &rpk, &rpv)) {
+                port_stats_t *ps = (port_stats_t *)rpv;
+                if (ps && ps->is_tcp && ps->count > topTcpCount) {
+                    topTcpCount = ps->count;
+                    topTcpPort  = (quint16)GPOINTER_TO_UINT(rpk);
+                }
+            }
+            if (topTcpPort > 0) {
+                tcp_stat_info_t *ti = packet_analyzer_extract_tcp_stat_info(
+                    cfm, m_pair->src_addr, m_pair->dst_addr, topTcpPort,
+                    m_pair->is_mac ? TRUE : FALSE);
+                if (ti && ti->found && ti->rtt_count > 0) {
+                    m_rttMin = ti->rtt_min_ms;
+                    m_rttAvg = ti->rtt_sum_ms / (qreal)ti->rtt_count;
+                    m_rttMax = ti->rtt_max_ms;
+                }
+                packet_analyzer_free_tcp_stat_info(ti);
+            }
+        }
+    }
+    if (m_rttAvg < 0.0 && responseTimeMs >= 0.0)
+        m_rttAvg = responseTimeMs;
+
+    /* TCP window stats — use pre-computed edge values passed from GraphWidget.
+     * These are the same values used for edge colouring, so the score dialog
+     * and the edge colour always agree. */
+    m_winMin          = winMin;
+    m_winMax          = winMax;
+    m_winAvg          = winAvg;
+    m_zeroWinCount    = zeroWinCount;
+    m_zeroWinMaxDurMs = zeroWinMaxDurMs;
+
+    if (m_pair && m_pair->first_ts > 0.0) {
+        qreal dur = m_pair->last_ts - m_pair->first_ts;
+        if (dur > 0.001) m_fwdBps = (qreal)m_pair->byte_count / dur;
+    }
+    if (m_reversePair && m_reversePair->first_ts > 0.0) {
+        qreal dur = m_reversePair->last_ts - m_reversePair->first_ts;
+        if (dur > 0.001) m_revBps = (qreal)m_reversePair->byte_count / dur;
+    }
+
+    if (m_scoreBtn) {
+        m_scoreBtn->setText("Score");
+        m_scoreBtn->setEnabled(true);
+        m_scoreBtn->setVisible(true);
+    }
+
+    /* Disconnect any previous connection before wiring up the new lambda.
+     * Without this, each call to setGraphScores() stacks another slot, so
+     * clicking the button fires the old lambda(s) too — potentially with
+     * stale m_pair state from earlier connections. */
+    disconnect(m_scoreBtn, &QPushButton::clicked, nullptr, nullptr);
+    connect(m_scoreBtn, &QPushButton::clicked, this, [this]() {
+        bool dark = isDarkTheme();
+
+        auto *dlg = new QDialog(this);
+        dlg->setAttribute(Qt::WA_DeleteOnClose);
+        dlg->setWindowTitle("Score Breakdown");
+        dlg->setMinimumSize(420, 300);
+        dlg->resize(520, 420);
+        dlg->setSizeGripEnabled(true);
+
+        QVBoxLayout *dlgLayout = new QVBoxLayout(dlg);
+
+        auto *browser = new QTextEdit(dlg);
+        browser->setReadOnly(true);
+        if (dark) {
+            browser->setStyleSheet("QTextEdit { background:#2b2b2b; color:#e0e0e0; border:none; font-size:12px; }");
+        } else {
+            browser->setStyleSheet("QTextEdit { background:#fff; color:#222; border:none; font-size:12px; }");
+        }
+
+        /* Helper: health label + colour */
+        auto healthLabel = [](qreal hs) -> QString {
+            if      (hs >= 0.75) return "<span style='color:#27ae60;'>&#9646; Healthy</span>";
+            else if (hs >= 0.50) return "<span style='color:#f1c40f;'>&#9646; Moderate</span>";
+            else if (hs >= 0.28) return "<span style='color:#e67e22;'>&#9646; Degraded</span>";
+            else                 return "<span style='color:#e74c3c;'>&#9646; Unhealthy</span>";
+        };
+        auto anomalyLabel = [](qreal as) -> QString {
+            if      (as <= 0.12) return "<span style='color:#27ae60;'>&#9646; Clean</span>";
+            else if (as <= 0.30) return "<span style='color:#f1c40f;'>&#9646; Noteworthy</span>";
+            else if (as <= 0.55) return "<span style='color:#e67e22;'>&#9646; Suspicious</span>";
+            else                 return "<span style='color:#e74c3c;'>&#9646; Anomalous</span>";
+        };
+
+        auto buildTable = [dark](const QList<GraphWidget::ScoreFactor> &factors, bool isHealth) -> QString {
+            QString html;
+            html += "<table width='100%' cellspacing='0' cellpadding='4' "
+                    "style='border-collapse:collapse; font-size:12px;'>";
+            html += QString("<tr style='background:%1;'>"
+                            "<th align='left' style='border-bottom:1px solid %2; padding:4px 6px;'>Signal</th>"
+                            "<th align='right' style='border-bottom:1px solid %2; padding:4px 6px; width:80px;'>Change</th>"
+                            "</tr>")
+                    .arg(dark ? "#3a3a3a" : "#f0f0f0")
+                    .arg(dark ? "#555"    : "#ccc");
+
+            for (const GraphWidget::ScoreFactor &f : factors) {
+                if (f.delta == 0.0) {
+                    /* Separator / note row */
+                    html += QString("<tr><td colspan='2' style='color:%1; font-style:italic; "
+                                    "padding:4px 6px; border-bottom:1px solid %2;'>%3</td></tr>")
+                            .arg(dark ? "#888" : "#666")
+                            .arg(dark ? "#444" : "#ddd")
+                            .arg(f.description.toHtmlEscaped());
+                    continue;
+                }
+                /* For health: positive delta = green, negative = red.
+                 * For anomaly: positive delta = red (more anomalous).    */
+                bool isGood = isHealth ? (f.delta > 0) : (f.delta < 0);
+                QString deltaStr = (f.delta > 0 ? "+" : "") +
+                                   QString::number((int)qRound(f.delta * 100)) + "%";
+                QString color = isGood ? (dark ? "#6edd6e" : "#27ae60")
+                                       : (dark ? "#ff7070" : "#c0392b");
+                html += QString("<tr><td style='padding:3px 6px; border-bottom:1px solid %1;'>%2</td>"
+                                "<td align='right' style='padding:3px 6px; border-bottom:1px solid %1;"
+                                " color:%3; font-weight:bold;'>%4</td></tr>")
+                        .arg(dark ? "#3a3a3a" : "#eeeeee")
+                        .arg(f.description.toHtmlEscaped())
+                        .arg(color)
+                        .arg(deltaStr);
+            }
+            html += "</table>";
+            return html;
+        };
+
+        QString headingStyle = QString("font-size:13px; font-weight:bold; color:%1; "
+                                       "margin-top:10px; margin-bottom:4px;")
+                               .arg(dark ? "#e0e0e0" : "#222");
+        QString baselineNote = QString("<p style='color:%1; font-size:11px; margin:4px 0;'>"
+                                       "Baseline: 50% (adjusted by signals below)</p>")
+                               .arg(dark ? "#888" : "#777");
+
+        /* ── Format helpers for metrics ── */
+        auto fmtRtt = [](qreal ms) -> QString {
+            if (ms < 0) return "<i style='color:#888;'>N/A</i>";
+            if (ms < 1.0)  return QString("<b>%1 ms</b>").arg(ms, 0, 'f', 2);
+            if (ms < 10.0) return QString("<b>%1 ms</b>").arg(ms, 0, 'f', 1);
+            return QString("<b>%1 ms</b>").arg(qRound(ms));
+        };
+        auto fmtTp = [](qreal bps) -> QString {
+            if (bps <= 0) return "<i style='color:#888;'>N/A</i>";
+            if (bps >= 1e9)  return QString("<b>%1 GB/s</b>").arg(bps / 1e9, 0, 'f', 2);
+            if (bps >= 1e6)  return QString("<b>%1 MB/s</b>").arg(bps / 1e6, 0, 'f', 2);
+            if (bps >= 1000) return QString("<b>%1 KB/s</b>").arg(bps / 1000.0, 0, 'f', 1);
+            return QString("<b>%1 B/s</b>").arg((int)bps);
+        };
+        auto rttQual = [](qreal ms) -> const char* {
+            if (ms < 0)   return "";
+            if (ms <   5) return " &nbsp;<small>(Very Fast)</small>";
+            if (ms <  50) return " &nbsp;<small>(Fast)</small>";
+            if (ms < 200) return " &nbsp;<small>(Moderate)</small>";
+            if (ms < 500) return " &nbsp;<small>(Slow)</small>";
+            return " &nbsp;<small>(Very Slow)</small>";
+        };
+        auto tpQual = [](qreal bps) -> const char* {
+            if (bps <= 0)       return "";
+            if (bps <   10000)  return " &nbsp;<small>(Minimal)</small>";
+            if (bps <  100000)  return " &nbsp;<small>(Low)</small>";
+            if (bps < 1000000)  return " &nbsp;<small>(Moderate)</small>";
+            if (bps < 10000000) return " &nbsp;<small>(High)</small>";
+            return " &nbsp;<small>(Very High)</small>";
+        };
+
+        QString html;
+        html += "<html><body style='font-family:sans-serif; margin:8px;'>";
+
+        /* ── Connection Metrics section ── */
+        QString labelColor = dark ? "#aaa" : "#555";
+
+        /* RTT and throughput were pre-computed in setGraphScores() while
+         * m_pair was valid — use the stored members directly. */
+        qreal rttMin = m_rttMin, rttAvg = m_rttAvg, rttMax = m_rttMax;
+        qreal fwdBps = m_fwdBps, revBps = m_revBps;
+
+        auto cell = [&](const QString &subLabel, const QString &value) -> QString {
+            return QString("<td style='text-align:center; padding:2px 4px;'>"
+                           "<span style='font-size:10px; color:%1;'>%2</span><br/>%3</td>")
+                   .arg(labelColor, subLabel, value);
+        };
+
+        html += QString("<p style='%1'>Connection Metrics</p>").arg(headingStyle);
+        html += "<table width='100%' cellspacing='0' cellpadding='0'>";
+
+        /* Response Time row */
+        html += QString("<tr>"
+                        "<td width='26%' style='color:%1; font-size:11px; vertical-align:middle;'"
+                        ">Response Time</td>")
+                .arg(labelColor);
+        html += cell("Min", rttMin >= 0.0 ? fmtRtt(rttMin) : "<i style='color:#888;'>N/A</i>");
+        html += cell("Avg", fmtRtt(rttAvg) + QLatin1String(rttQual(rttAvg)));
+        html += cell("Max", rttMax >= 0.0 ? fmtRtt(rttMax) : "<i style='color:#888;'>N/A</i>");
+        html += "</tr>";
+
+        /* Throughput row */
+        html += QString("<tr style='margin-top:4px;'>"
+                        "<td style='color:%1; font-size:11px; vertical-align:middle;'>Throughput</td>")
+                .arg(labelColor);
+        html += cell("&#8594;&nbsp;fwd", fwdBps > 0.0
+                     ? fmtTp(fwdBps) : "<i style='color:#888;'>N/A</i>");
+        html += cell("&#8644;&nbsp;combined", m_graphThroughputBps > 0.0
+                     ? fmtTp(m_graphThroughputBps) + QLatin1String(tpQual(m_graphThroughputBps))
+                     : "<i style='color:#888;'>N/A</i>");
+        html += cell("&#8592;&nbsp;rev", revBps > 0.0
+                     ? fmtTp(revBps) : "<i style='color:#888;'>N/A</i>");
+        html += "</tr>";
+
+        /* TCP Window row — only when window data was collected */
+        if (m_winMin != G_MAXUINT32) {
+            auto fmtWin = [](guint32 b) -> QString {
+                if (b == G_MAXUINT32) return "<i style='color:#888;'>N/A</i>";
+                if (b >= 1024u*1024u) return QString("<b>%1 MB</b>").arg(b / (1024*1024));
+                if (b >= 1024u)       return QString("<b>%1 KB</b>").arg(b / 1024.0, 0, 'f', 1);
+                return QString("<b>%1 B</b>").arg(b);
+            };
+            html += QString("<tr style='margin-top:4px;'>"
+                            "<td style='color:%1; font-size:11px; vertical-align:middle;'>TCP Window</td>")
+                    .arg(labelColor);
+            html += cell("Min", fmtWin(m_winMin));
+            html += cell("Avg", m_winAvg > 0.0 ? fmtWin((guint32)m_winAvg)
+                                               : "<i style='color:#888;'>N/A</i>");
+            html += cell("Max", fmtWin(m_winMax));
+            html += "</tr>";
+
+            if (m_zeroWinCount > 0) {
+                QString alertColor = dark ? "#ff7070" : "#c0392b";
+                html += QString("<tr><td colspan='4' style='padding:4px 6px;'>"
+                                "<span style='color:%1; font-weight:bold;'>&#9888; Zero-window: "
+                                "%2 event(s)")
+                        .arg(alertColor)
+                        .arg(m_zeroWinCount);
+                if (m_zeroWinMaxDurMs > 0.0) {
+                    QString durStr = m_zeroWinMaxDurMs < 10.0
+                        ? QString::number(m_zeroWinMaxDurMs, 'f', 1)
+                        : QString::number(qRound(m_zeroWinMaxDurMs));
+                    html += QString(" &mdash; max stall <b>%1 ms</b>").arg(durStr);
+                }
+                html += " (receiver overwhelmed; sender was stalled)</span></td></tr>";
+            }
+        }
+
+        html += "</table>";
+        html += "<hr style='margin:12px 0; border:0; border-top:1px solid ";
+        html += (dark ? "#444" : "#ddd");
+        html += ";'/>";
+
+        /* ── TCP Health section ── */
+        html += QString("<p style='%1'>TCP Health Score: %2%  &nbsp; %3</p>")
+                .arg(headingStyle)
+                .arg(qRound(m_graphHealthScore * 100))
+                .arg(healthLabel(m_graphHealthScore));
+        if (!m_hasTcpData) {
+            html += QString("<p style='color:%1; font-style:italic;'>"
+                            "No TCP traffic observed on this pair — score is neutral (50%).</p>")
+                    .arg(dark ? "#888" : "#666");
+        } else {
+            html += baselineNote;
+            html += buildTable(m_healthFactors, true);
+        }
+
+        html += "<hr style='margin:12px 0; border:0; border-top:1px solid ";
+        html += (dark ? "#444" : "#ddd");
+        html += ";'/>";
+
+        /* ── Anomaly Score section ── */
+        html += QString("<p style='%1'>Anomaly Score: %2%  &nbsp; %3</p>")
+                .arg(headingStyle)
+                .arg(qRound(m_graphAnomalyScore * 100))
+                .arg(anomalyLabel(m_graphAnomalyScore));
+        if (m_anomalyFactors.isEmpty()) {
+            html += QString("<p style='color:%1; font-style:italic;'>"
+                            "No anomaly signals detected — connection appears normal.</p>")
+                    .arg(dark ? "#888" : "#666");
+        } else {
+            html += QString("<p style='color:%1; font-size:11px; margin:4px 0;'>"
+                            "Baseline: 0% (each signal adds to the score)</p>")
+                    .arg(dark ? "#888" : "#777");
+            html += buildTable(m_anomalyFactors, false);
+        }
+
+        html += QString("<p style='color:%1; font-size:10px; margin-top:12px;'>"
+                        "Note: Scores are inferred from aggregate statistics (bytes, packets, ports).<br/>"
+                        "TCP flag-level data (SYN/RST/FIN counts) is not available in this view.</p>")
+                .arg(dark ? "#666" : "#999");
+
+        html += "</body></html>";
+
+        browser->setHtml(html);
+        dlgLayout->addWidget(browser);
+
+        auto *bbx = new QDialogButtonBox(QDialogButtonBox::Close, dlg);
+        connect(bbx, &QDialogButtonBox::rejected, dlg, &QDialog::reject);
+        dlgLayout->addWidget(bbx);
+
+        dlg->exec();
+    });
 }
 
 void ConnectionPopup::enterEvent(QEnterEvent *event)
@@ -6718,12 +9016,31 @@ void ConnectionPopup::populateMacTable()
     m_macTable->clearSpans();
     m_macTable->setRowCount(0);
 
+    /* Tier 2: honour performance setting */
+    if (!m_enableL2Analysis) {
+        auto *item = new QTableWidgetItem(
+            "\u26a0  Layer-2 / LLC analysis is disabled in Settings \u2192 Performance.");
+        item->setTextAlignment(Qt::AlignCenter);
+        item->setFlags(Qt::ItemIsEnabled);
+        m_macTable->setColumnCount(1);
+        m_macTable->setRowCount(1);
+        m_macTable->setItem(0, 0, item);
+        if (m_macProgressBar) m_macProgressBar->hide();
+        return;
+    }
+
     capture_file *cf = (capture_file *)plugin_if_get_capture_file(
         extract_capture_file, NULL);
     if (!cf) return;
 
-    l2_info_t *li = packet_analyzer_extract_l2_info(
-        cf, m_pair->src_addr, m_pair->dst_addr, TRUE);
+    /* Tier 3: check cache before running a full scan */
+    QString cacheKey = AnalysisCache::l2Key(m_pair->src_addr, m_pair->dst_addr);
+    l2_info_t *li = s_analysisCache.l2.value(cacheKey, nullptr);
+    bool fromCache = (li != nullptr);
+    if (!li) {
+        li = packet_analyzer_extract_l2_info(cf, m_pair->src_addr, m_pair->dst_addr, TRUE);
+        if (li) s_analysisCache.l2.insert(cacheKey, li);  /* store; cache owns from here */
+    }
     if (!li) return;
 
     if (li->found) {
@@ -6826,7 +9143,7 @@ void ConnectionPopup::populateMacTable()
         m_macTable->resizeRowsToContents();
     }
 
-    packet_analyzer_free_l2_info(li);
+    /* li is owned by the cache — never free here */
 
     /* Hide the busy-bar now that data has arrived */
     if (m_macProgressBar) {
@@ -7394,16 +9711,29 @@ void ConnectionPopup::showContextMenu(const QPoint &pos)
 
     /* Protocol info action (port-specific, optional) */
     QAction *protoDirectAction = nullptr;
-    if (pm.id > 0)
+    if (pm.id > 0) {
         protoDirectAction = menu.addAction(pm.label + " Protocol Information");
+        if (!m_enableDeepInspection) {
+            protoDirectAction->setEnabled(false);
+            protoDirectAction->setText(pm.label + " Protocol Information (disabled in Settings)");
+        }
+    }
 
     /* Generic TCP/UDP transport info */
     QAction *tcpStatAction = nullptr;
     QAction *udpStatAction = nullptr;
     if (isTCP) {
         tcpStatAction = menu.addAction("TCP Transport Details\u2026");
+        if (!m_enableTransportStats) {
+            tcpStatAction->setEnabled(false);
+            tcpStatAction->setText("TCP Transport Details\u2026 (disabled in Settings)");
+        }
     } else if (!isTCP && rd.isUdp) {
         udpStatAction = menu.addAction("UDP Transport Details\u2026");
+        if (!m_enableTransportStats) {
+            udpStatAction->setEnabled(false);
+            udpStatAction->setText("UDP Transport Details\u2026 (disabled in Settings)");
+        }
     }
 
     QAction *supportedProtosAction = menu.addAction("Supported Protocols\u2026");
@@ -7413,8 +9743,15 @@ void ConnectionPopup::showContextMenu(const QPoint &pos)
     m_autoCloseTimer->stop();
 
     QAction *selected = menu.exec(m_table->viewport()->mapToGlobal(pos));
+
+    if (!selected) {
+        /* User dismissed without selecting; reset guard and restart auto-close */
+        m_contextMenuActive = false;
+        m_autoCloseTimer->start();
+        return;
+    }
     /* NOTE: Do NOT reset m_contextMenuActive here.  All action branches call
-     * deleteLater() themselves.  Only the dismiss branch resets it.          */
+     * deleteLater() themselves.                                               */
 
     if (selected == filterAction) {
         applyFilterForRow(row);
@@ -7452,10 +9789,6 @@ void ConnectionPopup::showContextMenu(const QPoint &pos)
         showUdpStatInfoForRow(row);
     } else if (selected == supportedProtosAction) {
         showProtocolInfoBrowserForRow(row);
-    } else {
-        /* User dismissed without selecting; reset guard and restart auto-close */
-        m_contextMenuActive = false;
-        m_autoCloseTimer->start();
     }
 }
 
@@ -9600,7 +11933,7 @@ static QString renderHashCountTable(GHashTable *ht, const QString &headingColor,
 }
 
 /* Helper: create a standard info dialog shell (returns mainLayout) */
-static QDialog* createInfoDialog(const QString &title, bool dark __attribute__((unused)), QVBoxLayout **outLayout)
+static QDialog* createInfoDialog(const QString &title, [[maybe_unused]] bool dark, QVBoxLayout **outLayout)
 {
     QDialog *dlg = new QDialog(nullptr);
     dlg->setWindowTitle(title);
@@ -13437,6 +15770,23 @@ void ConnectionPopup::showNbssInfoForRow(int row)
 void ConnectionPopup::showTcpStatInfoForRow(int row)
 {
     if (row < 0 || row >= m_rowData.size() || !m_pair) return;
+    if (!m_enableTransportStats) {
+        /* Tier 2: transport stats disabled — show informational dialog */
+        bool dark = isDarkTheme();
+        QVBoxLayout *lay = nullptr;
+        QDialog *dlg = createInfoDialog("TCP Transport Details", dark, &lay);
+        addHtmlTextEdit(lay, dlg, dark,
+            "<p style='color:#888;font-style:italic;'>"
+            "\u26a0&nbsp; TCP/UDP transport statistics are disabled.<br>"
+            "Re-enable via <b>Settings \u2192 Performance</b>.</p>");
+        addCloseButton(lay, dlg, dark);
+        if (m_autoCloseTimer) m_autoCloseTimer->stop();
+        m_contextMenuActive = true;
+        hide();
+        dlg->exec();
+        deleteLater();
+        return;
+    }
     const RowData &rd = m_rowData[row];
 
     capture_file *cf = (capture_file *)plugin_if_get_capture_file(extract_capture_file, NULL);
@@ -13444,9 +15794,16 @@ void ConnectionPopup::showTcpStatInfoForRow(int row)
     QString dst = QString::fromUtf8(m_pair->dst_addr);
     bool looksLikeMAC = (src.count(':') == 5 && dst.count(':') == 5);
 
-    tcp_stat_info_t *ti = packet_analyzer_extract_tcp_stat_info(
-        cf, m_pair->src_addr, m_pair->dst_addr, rd.port,
-        looksLikeMAC ? TRUE : FALSE);
+    /* Tier 3: check cache before full scan */
+    QString tcacheKey = AnalysisCache::tcpKey(m_pair->src_addr, m_pair->dst_addr, rd.port);
+    tcp_stat_info_t *ti = s_analysisCache.tcpStat.value(tcacheKey, nullptr);
+    bool tiFromCache = (ti != nullptr);
+    if (!ti) {
+        ti = packet_analyzer_extract_tcp_stat_info(
+            cf, m_pair->src_addr, m_pair->dst_addr, rd.port,
+            looksLikeMAC ? TRUE : FALSE);
+        if (ti) s_analysisCache.tcpStat.insert(tcacheKey, ti);
+    }
 
     bool dark = isDarkTheme();
     QString dlgTitle = QString("TCP Transport Details \u2014 %1 \u2194 %2  (port %3)")
@@ -13589,7 +15946,7 @@ void ConnectionPopup::showTcpStatInfoForRow(int row)
 
     addHtmlTextEdit(mainLayout, dlg, dark, html);
     addCloseButton(mainLayout, dlg, dark);
-    if (ti) packet_analyzer_free_tcp_stat_info(ti);
+    /* ti is owned by the cache — never free here */
 
     if (m_autoCloseTimer) m_autoCloseTimer->stop();
     m_contextMenuActive = true;
@@ -13603,6 +15960,22 @@ void ConnectionPopup::showTcpStatInfoForRow(int row)
 void ConnectionPopup::showUdpStatInfoForRow(int row)
 {
     if (row < 0 || row >= m_rowData.size() || !m_pair) return;
+    if (!m_enableTransportStats) {
+        bool dark = isDarkTheme();
+        QVBoxLayout *lay = nullptr;
+        QDialog *dlg = createInfoDialog("UDP Transport Details", dark, &lay);
+        addHtmlTextEdit(lay, dlg, dark,
+            "<p style='color:#888;font-style:italic;'>"
+            "\u26a0&nbsp; TCP/UDP transport statistics are disabled.<br>"
+            "Re-enable via <b>Settings \u2192 Performance</b>.</p>");
+        addCloseButton(lay, dlg, dark);
+        if (m_autoCloseTimer) m_autoCloseTimer->stop();
+        m_contextMenuActive = true;
+        hide();
+        dlg->exec();
+        deleteLater();
+        return;
+    }
     const RowData &rd = m_rowData[row];
 
     capture_file *cf = (capture_file *)plugin_if_get_capture_file(extract_capture_file, NULL);
@@ -13610,9 +15983,16 @@ void ConnectionPopup::showUdpStatInfoForRow(int row)
     QString dst = QString::fromUtf8(m_pair->dst_addr);
     bool looksLikeMAC = (src.count(':') == 5 && dst.count(':') == 5);
 
-    udp_stat_info_t *ui = packet_analyzer_extract_udp_stat_info(
-        cf, m_pair->src_addr, m_pair->dst_addr, rd.port,
-        looksLikeMAC ? TRUE : FALSE);
+    /* Tier 3: check cache before full scan */
+    QString ucacheKey = AnalysisCache::udpKey(m_pair->src_addr, m_pair->dst_addr, rd.port);
+    udp_stat_info_t *ui = s_analysisCache.udpStat.value(ucacheKey, nullptr);
+    bool uiFromCache = (ui != nullptr);
+    if (!ui) {
+        ui = packet_analyzer_extract_udp_stat_info(
+            cf, m_pair->src_addr, m_pair->dst_addr, rd.port,
+            looksLikeMAC ? TRUE : FALSE);
+        if (ui) s_analysisCache.udpStat.insert(ucacheKey, ui);
+    }
 
     bool dark = isDarkTheme();
     QString dlgTitle = QString("UDP Transport Details \u2014 %1 \u2194 %2  (port %3)")
@@ -13715,7 +16095,7 @@ void ConnectionPopup::showUdpStatInfoForRow(int row)
 
     addHtmlTextEdit(mainLayout, dlg, dark, html);
     addCloseButton(mainLayout, dlg, dark);
-    if (ui) packet_analyzer_free_udp_stat_info(ui);
+    /* ui is owned by the cache — never free here */
 
     if (m_autoCloseTimer) m_autoCloseTimer->stop();
     m_contextMenuActive = true;

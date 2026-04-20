@@ -98,6 +98,7 @@ CircleWidget::CircleWidget(QWidget *parent)
     , m_pdfMode(false)
     , m_darkTheme(true)
     , m_wifiMode(false)
+    , m_hoveredLinePair(nullptr)
 {
     setMinimumSize(300, 300);
     setMouseTracking(true);
@@ -339,8 +340,8 @@ QPointF CircleWidget::getLineHexagonIntersection(const QPointF &lineStart, const
     return lineStart + unitDir * t;
 }
 
-void CircleWidget::drawConnection(QPainter &painter, const NodePosition &src, 
-                                  const NodePosition &dst, comm_pair_t *pair, guint64 max_volume, bool is_emphasized)
+void CircleWidget::drawConnection(QPainter &painter, const NodePosition &src,
+                                  const NodePosition &dst, comm_pair_t *pair, guint64 max_volume, bool is_emphasized, bool isOneway)
 {
     if (!pair || max_volume == 0)
         return;
@@ -438,6 +439,13 @@ void CircleWidget::drawConnection(QPainter &painter, const NodePosition &src,
             pen.setCapStyle(Qt::RoundCap);
             painter.setPen(pen);
         }
+    } else if (isOneway) {
+        /* One-way connection: short-dash pattern to indicate single direction */
+        QPen pen(color, thickness);
+        pen.setStyle(Qt::DashLine);
+        pen.setDashPattern(QVector<qreal>() << 4 << 4);
+        pen.setCapStyle(Qt::RoundCap);
+        painter.setPen(pen);
     } else {
         QPen pen(color, thickness);
         pen.setCapStyle(Qt::RoundCap);
@@ -447,7 +455,7 @@ void CircleWidget::drawConnection(QPainter &painter, const NodePosition &src,
     /* Calculate intersection points with hexagon boundaries */
     QPointF srcIntersect = getLineHexagonIntersection(src.position, dst.position, src.position, m_node_radius);
     QPointF dstIntersect = getLineHexagonIntersection(dst.position, src.position, dst.position, m_node_radius);
-    
+
     /* Draw line from intersection point to intersection point */
     painter.drawLine(srcIntersect, dstIntersect);
 }
@@ -624,7 +632,16 @@ void CircleWidget::paintEvent(QPaintEvent *event)
 
     /* Track which nodes have been drawn to avoid duplicates */
     QSet<QString> drawn_nodes;
-    
+
+    /* Build set of visible (src→dst) keys so we can detect one-way connections */
+    QSet<QString> visibleDirKeys;
+    for (GList *it2 = m_pairs; it2; it2 = it2->next) {
+        comm_pair_t *p2 = (comm_pair_t *)it2->data;
+        if (!p2 || !m_visible_pairs.contains(p2)) continue;
+        visibleDirKeys.insert(QString::fromUtf8(p2->src_addr) + QChar('\x01') +
+                              QString::fromUtf8(p2->dst_addr));
+    }
+
     /* Draw connections and nodes together - nodes colored to match connection */
     for (iter = m_pairs; iter; iter = iter->next) {
         comm_pair_t *pair = (comm_pair_t *)iter->data;
@@ -670,8 +687,12 @@ void CircleWidget::paintEvent(QPaintEvent *event)
         }
 
         if (src_node && dst_node) {
+            /* One-way if no reverse pair is visible */
+            QString revKey = QString::fromUtf8(pair->dst_addr) + QChar('\x01') +
+                             QString::fromUtf8(pair->src_addr);
+            bool isOneway = !visibleDirKeys.contains(revKey);
             /* Draw connection */
-            drawConnection(painter, *src_node, *dst_node, pair, max_volume, is_emphasized);
+            drawConnection(painter, *src_node, *dst_node, pair, max_volume, is_emphasized, isOneway);
             
             /* Get color for this connection — RSSI for Wi-Fi, protocol otherwise */
             QColor connection_color = (m_wifiMode && pair->is_wifi)
@@ -761,9 +782,22 @@ void CircleWidget::mouseMoveEvent(QMouseEvent *event)
             showTooltipForNode(node, event->globalPosition().toPoint());
             m_last_hovered_label = node->label;
         }
-    } else if (!m_last_hovered_label.isEmpty()) {
-        QToolTip::hideText();
-        m_last_hovered_label.clear();
+        /* Left a line when entering a node */
+        if (m_hoveredLinePair) {
+            m_hoveredLinePair = nullptr;
+            emit lineHovered(nullptr);
+        }
+    } else {
+        if (!m_last_hovered_label.isEmpty()) {
+            QToolTip::hideText();
+            m_last_hovered_label.clear();
+        }
+        /* Check if hovering over a connection line */
+        comm_pair_t *linePair = findLineAt(event->pos());
+        if (linePair != m_hoveredLinePair) {
+            m_hoveredLinePair = linePair;
+            emit lineHovered(linePair);
+        }
     }
 }
 

@@ -50,6 +50,9 @@
 #include <QProgressBar>
 #include <QFormLayout>
 #include <QDialogButtonBox>
+#include <QSpinBox>
+#include <QDoubleSpinBox>
+#include <QComboBox>
 #include <QDesktopServices>
 #include <QUrl>
 #include <QNetworkAccessManager>
@@ -61,6 +64,7 @@
 #include <QJsonDocument>
 #include <QJsonObject>
 #include "circle_widget.h"
+#include "graph_widget.h"
 #include "packet_analyzer.h"
 
 /* Connection popup - shown when clicking a line in the circle view */
@@ -76,6 +80,29 @@ public:
      * dialog directly without first displaying the popup window itself.   */
     void triggerInfoForPort(quint16 port, int protoId);
     void triggerTransportDetails(bool forTcp);
+
+    /* Performance flags — call after construction, before show() */
+    void setPerformanceFlags(bool enableL2, bool enableTransport, bool enableDeep) {
+        m_enableL2Analysis     = enableL2;
+        m_enableTransportStats = enableTransport;
+        m_enableDeepInspection = enableDeep;
+    }
+
+    /** Attach graph-view health/anomaly scores and connection metrics to the popup.
+     *  Shows a "Score" button in the header that opens a breakdown dialog.
+     *  responseTimeMs: first-packet RTT in ms (−1 = unavailable).
+     *  throughputBps:  combined bytes/sec (0 = unavailable). */
+    void setGraphScores(qreal healthScore, qreal anomalyScore,
+                        const QList<GraphWidget::ScoreFactor> &healthFactors,
+                        const QList<GraphWidget::ScoreFactor> &anomalyFactors,
+                        qreal responseTimeMs    = -1.0,
+                        qreal throughputBps     =  0.0,
+                        guint32 winMin          = G_MAXUINT32,
+                        guint32 winMax          = 0,
+                        gdouble winAvg          = 0.0,
+                        guint32 zeroWinCount    = 0,
+                        gdouble zeroWinMaxDurMs = 0.0);
+    void showScoreBtnCalculating(); /**< Show button as disabled "Calculating…" before scores arrive */
 
 protected:
     void enterEvent(QEnterEvent *event) override;
@@ -133,6 +160,9 @@ private:
     comm_pair_t *m_pair;        /* Primary pair (clicked direction) */
     comm_pair_t *m_reversePair; /* Reverse direction (may be NULL) */
     gboolean m_useMAC;
+    bool m_enableL2Analysis     = true;
+    bool m_enableTransportStats = true;
+    bool m_enableDeepInspection = true;
     QTableWidget *m_table;
     QTableWidget  *m_macTable;        /* Protocol breakdown table for MAC/L2 mode */
     QProgressBar  *m_macProgressBar;  /* Indeterminate busy bar shown while scanning */
@@ -141,6 +171,27 @@ private:
     QTimer *m_autoCloseTimer;
     QLabel *m_headerLabel;
     bool m_contextMenuActive;
+
+    /* Graph-view score breakdown (optional — shown when coming from Graph view) */
+    QPushButton                    *m_scoreBtn;
+    qreal                           m_graphHealthScore;
+    qreal                           m_graphAnomalyScore;
+    qreal                           m_graphResponseTimeMs; /* −1 = unavailable */
+    qreal                           m_graphThroughputBps;  /*  0 = unavailable */
+    QList<GraphWidget::ScoreFactor> m_healthFactors;
+    QList<GraphWidget::ScoreFactor> m_anomalyFactors;
+    /* Pre-computed from m_pair at setGraphScores() time — safe to read in the lambda */
+    qreal   m_rttMin          = -1.0;
+    qreal   m_rttAvg          = -1.0;
+    qreal   m_rttMax          = -1.0;
+    qreal   m_fwdBps          =  0.0;
+    qreal   m_revBps          =  0.0;
+    bool    m_hasTcpData      = false;
+    guint32 m_winMin          = G_MAXUINT32;
+    guint32 m_winMax          = 0;
+    gdouble m_winAvg          = 0.0;
+    guint32 m_zeroWinCount    = 0;
+    gdouble m_zeroWinMaxDurMs = 0.0;
 
     /* Per-row data (with per-port protocol information) — IP mode */
     struct RowData {
@@ -191,6 +242,7 @@ public slots:
     void onSelectAllClicked();
     void onSelectSearchResultsClicked();
     void onSelectNoneClicked();
+    void onInvertPairSelection();
     void onApplyFilterClicked();
     void onClearFilterClicked();
     void onReloadDataClicked();
@@ -207,9 +259,17 @@ public slots:
     void onSendToNtopClicked();
     void onSendToMalcolmClicked();
     void onLineClicked(comm_pair_t *pair, const QPoint &globalPos);
+    void onLineHovered(comm_pair_t *pair);
     void onPairListBlinkTimer();
     void onTableCellClicked(int row, int col);
     void onTableContextMenu(const QPoint &pos);
+    void onGraphViewToggled(bool checked);
+    void onGraphEdgeColorChanged(int index);
+    void onGraphNodeColorChanged(int index);
+    void onGraphLayoutChanged(int index);
+    void onGraphRelayout();
+    void onGraphLegendFilter(QList<comm_pair_t*> matchingPairs, bool active);
+    void onPairListContextMenu(const QPoint &pos);
 
 protected:
     void resizeEvent(QResizeEvent *event) override;
@@ -239,9 +299,13 @@ private:
     void savePreferences();
     void loadPreferences();
     QString preferencesFilePath() const;
+    void saveThresholdGroups();
+    void loadThresholdGroups();
+    void showThresholdGroupEditor(const QString &groupName = QString());
     bool showNtopngConfigDialog();
     bool showMalcolmConfigDialog();
     void showSettingsDialog();
+    void showReportConfigDialog();
     void showCaCertConfigDialog();
     void uploadToNtopng(const QString &filePath, const QString &host, int port,
                         bool useHttps, const QString &username, const QString &password,
@@ -268,11 +332,9 @@ private:
     QPushButton *m_bytesBtn;
     QPushButton *m_circleBtn;
     QPushButton *m_tableBtn;
+    QPushButton *m_graphBtn;
     QPushButton *m_macBtn;
     QPushButton *m_ipBtn;
-    QPushButton *m_selectAllBtn;
-    QPushButton *m_selectSearchBtn;
-    QPushButton *m_selectNoneBtn;
     QPushButton *m_applyFilterBtn;
     QPushButton *m_clearFilterBtn;
     QPushButton *m_reloadDataBtn;
@@ -287,12 +349,18 @@ private:
     QSplitter *m_splitter;
     bool m_splitterSizesRestored;  /* true if user had saved splitter sizes */
 
+    /* Graph controls row (Row 3, shown only in Graph mode) */
+    QWidget   *m_graphControlsRow;
+    QComboBox *m_graphEdgeColorCombo;
+    QComboBox *m_graphNodeColorCombo;
+    QComboBox *m_graphLayoutCombo;
+
     /* Views */
     QStackedWidget *m_viewStack;
     CircleWidget *m_circleWidget;
     QWidget *m_circleContainer;
+    GraphWidget *m_graphWidget;
     QLineEdit *m_searchLineEdit;
-    QLabel *m_searchLabel;
     QTableWidget *m_tableWidget;
     QListWidget *m_pairListWidget;
     QWidget *m_pairListContainer;  /* Container for pair list and legend */
@@ -310,6 +378,7 @@ private:
     QTimer *m_pairListBlinkTimer;
     bool m_pairListBlinkState;
     QList<int> m_highlightedPairItems;  /* Indices of highlighted items in pair list */
+    QListWidgetItem *m_hoveredPairListItem;  /* Item currently highlighted by hover */
 
     /* Connection popup */
     QPointer<ConnectionPopup> m_connectionPopup;
@@ -331,7 +400,27 @@ private:
     gboolean m_useMAC;
     bool m_darkTheme;
     bool m_wifiMode;
+
+    /* Beta features */
+    bool m_betaGraphEnabled;     /* Graph view unlocked via [Beta] EnableGraphView=true in settings.ini */
+
+    /* Performance settings (Tier 2) */
+    bool m_enableL2Analysis;     /* Layer-2/LLC deep scan enabled (default: true) */
+    bool m_enableTransportStats; /* TCP/UDP Transport Details scan enabled (default: true) */
+    bool m_enableDeepInspection; /* Protocol info dialogs (TLS/HTTP/SMB/…) enabled (default: true) */
     QList<comm_pair_t*> m_selectedPairs;
+
+    /* Graph threshold groups */
+    QList<GraphWidget::GraphThresholds> m_thresholdGroups; /* index 0 = Default (read-only) */
+    int                                 m_activeThresholdGroup; /* index into m_thresholdGroups */
+    QList<GraphWidget::InternalSubnet>  m_internalSubnets;
+
+    /* Report configuration */
+    QString m_reportCompany;
+    QString m_reportPreparedBy;
+    QString m_reportProject;
+    QString m_reportComments;
+    int     m_reportPaperSize; /* 0 = A4, 1 = Legal */
 };
 
 #endif /* UI_MAIN_WINDOW_H */

@@ -95,6 +95,19 @@ typedef struct _comm_pair {
 
     /* PHY type for Wi-Fi standard identification */
     guint8   wifi_phy;  /* wlan_radio.phy: 4=b, 5=a, 6=g, 7=n, 8=ac, 9=ax, 10=be */
+
+    /* Frame timing (seconds since epoch from frame_data.abs_ts) */
+    gdouble  first_ts;  /* Timestamp of the first packet in this direction (0 = not set) */
+    gdouble  last_ts;   /* Timestamp of the most recent packet in this direction          */
+
+    /* TCP receive-window stats (populated during dissection; G_MAXUINT32 win_min = no data) */
+    guint32  tcp_win_min;             /* minimum advertised receive window (bytes)           */
+    guint32  tcp_win_max;             /* maximum advertised receive window (bytes)           */
+    gdouble  tcp_win_sum;             /* running sum for average calculation                 */
+    guint32  tcp_win_count;           /* number of window samples collected                 */
+    guint32  tcp_zero_win_count;      /* frames with window == 0 (flow stalls)              */
+    gdouble  tcp_zero_win_start;      /* abs timestamp (s) when zero-win period began; 0 = not active */
+    gdouble  tcp_zero_win_max_dur_ms; /* longest single zero-window stall in milliseconds   */
 } comm_pair_t;
 
 /* Per-port statistics: tracks packet count and which transport protocols use this port */
