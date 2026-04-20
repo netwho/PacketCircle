@@ -6,24 +6,26 @@ Everything you need to install, update, or remove PacketCircle on any supported 
 
 ## Getting the Files
 
-### No git? Download the zip (recommended for most users)
+### No git? Download the zip (macOS and Windows)
 
-**[⬇ Download installer.zip](https://github.com/netwho/PacketCircle/raw/main/installer.zip)**
+**[⬇ Download installer.zip](https://github.com/netwho/PacketCircle/raw/main/installer.zip)** — contains macOS and Windows installers only
+
+> **Linux users:** the zip does not include Linux binaries (too large to distribute this way). Use git clone below — it is the preferred path for Linux.
 
 1. Click the link above and save `installer.zip`
-2. Unzip it — you get an `installer/` folder containing all platforms and both plugin versions
+2. Unzip it — you get an `installer/` folder containing macOS and Windows installers for both plugin versions
 3. Jump to the section for your platform below and run the installer from there
 
-> The zip includes everything: installer scripts, all platform binaries, and troubleshooting tools. No account, no git, no command-line tools needed to download it.
+> The zip includes installer scripts, macOS and Windows binaries, and troubleshooting tools. No account, no git needed to download it.
 
-### git users
+### git users (all platforms — required for Linux)
 
 ```bash
 git clone https://github.com/netwho/PacketCircle.git
 cd PacketCircle
 ```
 
-The `installer/` directory is included in the repository at the root level.
+The `installer/` directory is included in the repository at the root level, with all platforms and both plugin versions.
 
 ---
 
@@ -42,12 +44,12 @@ The `installer/` directory is included in the repository at the root level.
 
 ## Which Version to Install?
 
-The installer offers **v.0.4.7** (latest) and **v.0.3.2** (legacy). **Always choose v.0.4.7** unless you have a specific reason to stay on v.0.3.2.
+The installer offers **v.0.5.1** (latest) and **v.0.4.7** (last v0.4.x). **Always choose v.0.5.1** unless you have a specific reason to stay on v.0.4.7.
 
 | Version | Highlights |
 |---|---|
-| **v.0.4.7** (recommended) | 20+ protocol info dialogs, ntopng & Malcolm/Arkime integration, settings menu, TCP/UDP transport details, Connection Details popup & context menu |
-| **v.0.3.2** (legacy) | TCP stream stats, Select Results, theme-aware UI |
+| **v.0.5.1** (recommended) | 3-page PDF report with cover page & logo, Graph View with 8 layouts, streamlined toolbar with right-click pair-list menu, Configure Reports dialog |
+| **v.0.4.7** (legacy) | 20+ protocol info dialogs, ntopng & Malcolm/Arkime integration, settings menu, TCP/UDP transport details, Connection Details popup & context menu |
 
 You can switch versions at any time by re-running the installer.
 
@@ -78,12 +80,12 @@ Find your exact plugin path in Wireshark under **Help → About Wireshark → Fo
 # Create the plugin directory (macOS uses dashes: 4-6)
 mkdir -p ~/.local/lib/wireshark/plugins/4-6/epan/
 
-# Install v.0.4.7 (latest):
-cp installer/macos-universal/v.0.4.7/packetcircle.so \
+# Install v.0.5.1 (latest):
+cp installer/macos-universal/v.0.5.1/packetcircle.so \
    ~/.local/lib/wireshark/plugins/4-6/epan/packetcircle.so
 
-# Or install v.0.3.2 (legacy):
-cp installer/macos-universal/v.0.3.2/packetcircle.so \
+# Or install v.0.4.7 (legacy):
+cp installer/macos-universal/v.0.4.7/packetcircle.so \
    ~/.local/lib/wireshark/plugins/4-6/epan/packetcircle.so
 ```
 
@@ -108,7 +110,7 @@ The installer:
 - Searches for the correct plugin directory (dots vs dashes)
 - Checks Qt6 runtime availability and offers to install it if missing
 - Pauses for you to review the prerequisites summary before proceeding
-- Recommends v.0.4.7 and warns if you select v.0.3.2
+- Recommends v.0.5.1 and warns if you select v.0.4.7
 
 > **Note:** Run with `bash install.sh` or `chmod +x install.sh && ./install.sh`. Do not use `sh install.sh` — the script requires bash.
 
@@ -131,24 +133,24 @@ sudo zypper install libQt6Widgets6       # openSUSE
 #   packetcircle-ws42.so  →  Wireshark 4.2.x
 #   packetcircle-ws44.so  →  Wireshark 4.4.x
 #   packetcircle-ws46.so  →  Wireshark 4.6.x
-# (v.0.3.2 has ws42/ws44/ws46 only — no 4.0.x support)
+# (v.0.4.7 has ws40/ws42/ws44/ws46; v.0.5.1 has the same set)
 
-# Example: Wireshark 4.6.x, v.0.4.7:
+# Example: Wireshark 4.6.x, v.0.5.1:
 mkdir -p ~/.local/lib/wireshark/plugins/4.6/epan/
-cp installer/linux-x86_64/v.0.4.7/packetcircle-ws46.so \
+cp installer/linux-x86_64/v.0.5.1/packetcircle-ws46.so \
    ~/.local/lib/wireshark/plugins/4.6/epan/packetcircle.so
 
-# Example: Wireshark 4.2.x, v.0.4.7:
+# Example: Wireshark 4.2.x, v.0.5.1:
 mkdir -p ~/.local/lib/wireshark/plugins/4.2/epan/
-cp installer/linux-x86_64/v.0.4.7/packetcircle-ws42.so \
+cp installer/linux-x86_64/v.0.5.1/packetcircle-ws42.so \
    ~/.local/lib/wireshark/plugins/4.2/epan/packetcircle.so
 ```
 
 ### Supported Wireshark × Plugin Version Matrix (Linux)
 
-| Wireshark | v.0.4.7 binary | v.0.3.2 binary |
+| Wireshark | v.0.5.1 binary | v.0.4.7 binary |
 |---|---|---|
-| 4.0.x | `packetcircle-ws40.so` | — (not supported) |
+| 4.0.x | `packetcircle-ws40.so` | `packetcircle-ws40.so` |
 | 4.2.x | `packetcircle-ws42.so` | `packetcircle-ws42.so` |
 | 4.4.x | `packetcircle-ws44.so` | `packetcircle-ws44.so` |
 | 4.6.x | `packetcircle-ws46.so` | `packetcircle-ws46.so` |
@@ -177,7 +179,7 @@ The installer:
 - Shows which plugin binaries are present (with file sizes)
 - Detects any existing PacketCircle installation and its version
 - Prints a prerequisites summary before prompting
-- Recommends v.0.4.7; warns if you choose v.0.3.2
+- Recommends v.0.5.1; warns if you choose v.0.4.7
 
 <details>
 <summary>Run the PowerShell script directly</summary>
@@ -198,12 +200,12 @@ Set-ExecutionPolicy -Scope CurrentUser -ExecutionPolicy RemoteSigned
 ```powershell
 # Check your exact path: Help → About Wireshark → Folders → Personal Plugins
 
-# Install v.0.4.7 (latest):
-Copy-Item installer\windows-x86_64\v.0.4.7\packetcircle.dll `
+# Install v.0.5.1 (latest):
+Copy-Item installer\windows-x86_64\v.0.5.1\packetcircle.dll `
           "$env:APPDATA\Wireshark\plugins\4.6\epan\"
 
-# Or install v.0.3.2 (legacy):
-Copy-Item installer\windows-x86_64\v.0.3.2\packetcircle.dll `
+# Or install v.0.4.7 (legacy):
+Copy-Item installer\windows-x86_64\v.0.4.7\packetcircle.dll `
           "$env:APPDATA\Wireshark\plugins\4.6\epan\"
 ```
 
@@ -250,7 +252,7 @@ For unsupported platforms or Wireshark versions, or to develop PacketCircle itse
 
 ```bash
 # Place src/ contents into the Wireshark plugin directory
-cp -r src/v.0.4.7/* /path/to/wireshark-source/plugins/epan/packetcircle/
+cp -r src/* /path/to/wireshark-source/plugins/epan/packetcircle/
 
 cd /path/to/wireshark-source
 mkdir build && cd build

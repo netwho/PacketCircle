@@ -18,6 +18,84 @@ Hosts appear as labeled nodes arranged around a circle. Each connection arc betw
 
 **Use case:** Quickly spot which hosts generate the most traffic, which are talking to unexpected destinations, and which protocols dominate a capture.
 
+### Graph View
+
+An interactive node-link diagram where each host is a hexagonal node and each connection is an edge. Complements the Circle View by making topology and anomalies visible — node position carries meaning depending on the chosen layout.
+
+**Switching to Graph View** reveals a second toolbar row with Edge color, Node color, Layout, Re-layout, and Zoom controls. All other controls (Top N, search, pair list, protocol filters) remain active and are shared with the Circle View.
+
+#### Node encoding
+
+- **Size** — scales with total traffic volume (log scale); busier hosts are visually larger
+- **Double-hexagon symbol** — same as Circle View; outer ring highlights on hover or search match
+- **Color** — determined by the **Node** color mode selector:
+
+| Node Mode | Colors | Best for |
+|---|---|---|
+| **Service / Port** | Each known TCP/UDP service has a distinct color (same legend as the service port legend) | Seeing what role each host plays — server, client, DNS resolver, etc. |
+| **Role (Int/Ext)** | Blue = Internal (RFC-1918) · Red = External · Purple = MAC/Unknown · Amber = Broadcast | Spotting traffic crossing network boundaries |
+| **Protocol** | Dominant L7 protocol, same palette as Circle View | Finding which application protocol drives each host |
+| **Function** | Crimson = Remote Access (RDP/VNC/Citrix/AnyDesk) · Orange = Interactive Shell (SSH/Telnet) · Teal = Messaging (SIP/XMPP/IRC/MQTT) · Green = File Transfer (SMB/NFS/FTP/rsync) · Grey = Other | Grouping hosts by the type of service they provide; pairs naturally with Cluster layout |
+
+#### Edge encoding
+
+- **Thickness** — proportional to traffic volume (when Line Thickness is on)
+- **Style** — solid line = bidirectional traffic; dashed line = one-way only
+- **Opacity** — fades for low-confidence connections (very few packets)
+- **Color** — determined by the **Edge** color mode selector:
+
+| Edge Mode | Color scale | Best for |
+|---|---|---|
+| **Protocol** | Application protocol palette (same as Circle View) | Protocol overview — consistent with Circle View |
+| **TCP Health** | Green ≥75% · Yellow 50–74% · Orange 28–49% · Red <28% | Finding broken, refused, or half-open TCP connections |
+| **Anomaly Score** | Green ≤12% · Yellow 13–30% · Orange 31–55% · Red >55% | Detecting port scans, floods, exfiltration, legacy insecure protocols |
+| **Response Time** | Green <5 ms · Yellow-green 5–50 ms · Yellow 50–200 ms · Orange 200–500 ms · Red >500 ms | Identifying slow servers or high-latency paths |
+| **Throughput** | Blue <10 KB/s · Green 10–100 KB/s · Yellow 100 KB–1 MB/s · Orange 1–10 MB/s · Red >10 MB/s | Spotting bulk transfers or bandwidth hogs |
+| **TCP Window** | Green = healthy · Yellow = mild pressure · Orange = constrained · Red = zero-window stall | Diagnosing receiver-side bottlenecks and TCP buffer exhaustion |
+| **High Risk** | Grey = safe · Yellow = elevated (SSH, MQTT, SNMP) · Orange = high (RDP, WinRM, AnyDesk) · Red = critical (Telnet, FTP, VNC, raw X11) · Violet = VPN/TOR | Instant risk audit — hover an edge for a tooltip listing detected risk signals by name |
+
+See **[graph-scores.md](graph-scores.md)** for the full scoring algorithm reference.
+
+#### Legend click-to-filter
+
+Both the node legend (bottom-left) and the edge legend (bottom-right) are clickable:
+
+- **Click a legend row** to fade everything that doesn't match — only edges carrying that service/protocol (or nodes of that role) remain fully visible
+- **Click the same row again** to clear the filter
+- In **Service / Port** node mode, the filter is port-based: all connections that carry traffic on that port are highlighted, regardless of whether that port is the node's single dominant port
+
+#### Layouts
+
+Choose a layout from the **Layout** dropdown. Click **↺ Re-layout** to re-run from scratch (useful for Force-directed after dragging nodes).
+
+| Layout | Best for |
+|---|---|
+| **Force-directed** | General-purpose starting point. Nodes that communicate heavily pull together; isolated ones push apart. Reveals organic clusters without prior knowledge of topology. Nodes can be dragged freely. |
+| **Star** | Identifying the dominant talker. The busiest node anchors the centre; every other node radiates from it. Good for spotting a central server, DNS resolver, or scanning host. |
+| **Circular** | Quick overview — all nodes and edges at a glance, with no positional bias. Equivalent to the Circle View layout; useful for direct comparison. |
+| **Grid** | Large node counts where other layouts become crowded. Deterministic, sorted by traffic volume. Position has no semantic meaning; useful mainly when you need to read every label. |
+| **Cluster** | Grouping adapts to the active Node colour mode: **Role** → by subnet/network role; **Function** → by service category (Remote Access / Shell / Messaging / File Transfer); **Service or Protocol** → by dominant port or protocol; Wi-Fi mode → by 802.11 frame type. Nodes in the same group share a coloured background blob; edges crossing blobs reveal inter-group traffic. Hold **Ctrl and drag** a blob to reposition the whole cluster group. |
+| **Concentric** | Finding the most-connected nodes quickly. Inner ring = highest degree (most peers); outer rings = increasingly peripheral hosts. Useful for spotting hubs, multicast sources, or overly chatty clients. |
+| **Hierarchical** | Validating expected network topology. Places hosts in tiers top-to-bottom: External → Gateway → Server → Client. Traffic flowing the wrong way (e.g. a client talking directly to the internet bypassing the gateway) stands out immediately. |
+| **Radial** | Tracing propagation or reach from one host. BFS rings expand outward from the most-connected node — each ring is one hop further away, making it easy to see how far a host's influence extends. |
+
+#### Navigation
+
+| Action | How |
+|---|---|
+| Zoom in / out | Scroll wheel, or **+** / **−** buttons |
+| Reset zoom | **1:1** button |
+| Pan canvas | Middle-mouse drag, or **Space + left-drag** on empty canvas |
+| Drag a node | Left-click and drag any node (Force-directed only) |
+| Move cluster group | **Ctrl + left-drag** inside any cluster blob (Cluster layout only) |
+
+#### Interaction
+
+- **Hover an edge** — highlights the corresponding pair row in the pair list
+- **Click an edge** — opens the Connection Details popup (same as Circle View)
+- **Click a node** — selects all pairs involving that host
+- **Search** — same search bar as Circle View; matching nodes get a gold highlight ring in the graph
+
 ### Table View
 
 Toggle to a flat list of all communication pairs with source, destination, protocol, packet count, and byte count columns. Sortable. Useful for exporting or reviewing large captures where the circle becomes crowded.
@@ -194,13 +272,13 @@ The gear icon in the toolbar opens the consolidated settings dialog:
 
 ### PDF Report
 
-Click **PDF** to generate a one-page report:
+Click **PDF** to generate a 3-page report:
 
-- Header with PacketCircle logo and report title
-- Summary text: packet count, unique hosts, time range
-- Circle visualization rendered with white background and high-contrast labels (print-optimized)
-- IP pair table: source, destination, packets, bytes
-- Footer with generation timestamp
+- **Page 1 — Cover page:** PacketCircle logo, report title, and configurable metadata fields (Company Name, Prepared by, Project, Comments, Date)
+- **Page 2 — Report page:** The currently active view (Circle, Table, or Graph) at high resolution; the full communication pair list; a protocol legend (Circle/Table) or graph legend (Graph) below the visualization
+- **Page 3 — Explanation page:** Plain-language interpretation guidance for the active view, plus common sections covering the pair list, active filters, Top-N setting, and metric
+
+Paper size (A4 or Legal, landscape) and all cover page fields are configured in **Settings → Configure Reports…**. Settings are saved in `~/.PacketCircle/settings.ini`.
 
 ---
 
@@ -216,9 +294,15 @@ Click **PDF** to generate a one-page report:
 | **Select Results** | Select only the pairs matching the current search |
 | **Filter** | Apply Wireshark display filter for selected pairs |
 | **Clear Filter** | Remove display filter and show all traffic |
-| **PDF** | Export one-page PDF report |
+| **PDF** | Export 3-page PDF report (cover, visualization + pair list, explanation) |
 | **Line Thickness** | Toggle proportional line weight on/off |
+| **Edge** (Graph) | Select edge color encoding: Protocol / TCP Health / Anomaly Score / Response Time / Throughput / TCP Window / High Risk |
+| **Node** (Graph) | Select node color encoding: Service/Port / Role (Int/Ext) / Protocol / Function |
+| **Layout** (Graph) | Select graph layout: Force-directed / Star / Circular / Grid / Cluster / Concentric / Hierarchical / Radial |
+| **↺ Re-layout** (Graph) | Re-run the selected layout from scratch |
+| **Zoom − / 1:1 / +** (Graph) | Zoom out, reset to 100%, zoom in (scroll wheel also works) |
 | **⚙ Settings** | Configure ntopng, Malcolm/Arkime, CA cert, reset defaults |
+| **Configure Reports…** (Settings) | Set paper size (A4/Legal), Company Name, Prepared by, Project, Comments for PDF cover page |
 | **Protocol checkboxes** | Show/hide pairs by protocol category |
 | **Directional arrow** | Click pair row to cycle → ↔ ← filter direction |
 | **Search bar** | IP / CIDR / port / keyword / Wireshark filter fallback |
@@ -236,4 +320,5 @@ User preferences are saved to `~/.PacketCircle/settings.ini` (Linux/macOS) or th
 ---
 
 *→ See [PROTOCOL-INFO.md](PROTOCOL-INFO.md) for the full protocol info dialog reference*
+*→ See [graph-scores.md](graph-scores.md) for the TCP Health and Anomaly Score algorithm details*
 *→ See [TROUBLESHOOTING.md](TROUBLESHOOTING.md) if something isn't working*

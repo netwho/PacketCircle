@@ -2,6 +2,59 @@
 
 All notable changes to PacketCircle will be documented in this file.
 
+## [0.5.2] - 2026-04-17
+
+### Added
+- **Graph view: beta opt-in toggle** — Graph view is now hidden by default. QA volunteers can unlock it by adding `EnableGraphView=true` under `[Beta]` in `~/.PacketCircle/settings.ini`. No UI changes for standard users; the Graph button is simply absent until opted in.
+- **Graph node colour: Function mode** — New `Node: Function` colour mode classifies each node by the service category it provides (based on destination ports only — i.e. ports the host *receives* connections on). Categories and colours:
+  - **Remote Access** (crimson) — RDP (3389), VNC (5900–5902), SPICE (5930), Citrix ICA (1494/2598), AnyDesk (7070)
+  - **Interactive Shell** (orange) — SSH (22), Telnet (23), rsh/rexec/rlogin (512–514)
+  - **Messaging** (teal) — SIP (5060/5061), XMPP (5222/5223), IRC (6667/6697), STUN/TURN (3478/3479), MQTT (1883/8883)
+  - **File Transfer** (green) — SMB (445/139), NFS (2049), FTP (21/20), TFTP (69), rsync (873)
+  - **Other** (grey) — nodes that do not match any category above
+  - This is a separate mode from `Node: Role (Int/Ext)`; the Role mode continues to colour nodes purely by network role (internal/external/broadcast/Layer-2).
+- **Graph edge colour: High Risk mode** — New `Edge: High Risk` option colours connections by the highest-risk port observed:
+  - **Critical (deep red)** — Telnet, FTP/FTP-Data, rsh/rexec/rlogin, TFTP, native X11 (6000–6063), VNC
+  - **High (orange)** — RDP (3389), WinRM (5985/5986), AnyDesk (7070)
+  - **Elevated (yellow)** — SSH (22), MQTT unencrypted (1883), SNMP (161/162)
+  - **VPN/TOR (violet)** — OpenVPN (1194), WireGuard (51820), L2TP (1701), IKE/IPSec (500/4500), TOR (9001/9030/9050/9150)
+  - **Normal (grey)** — all other traffic
+  - Hovering an edge in High Risk mode shows a tooltip listing detected risk signals by name.
+- **Graph cluster layout: context-aware grouping** — When Layout is set to Cluster, the grouping key automatically adapts to the active node colour mode:
+  - `Node: Function` → clusters by service category (Remote Access / Interactive Shell / Messaging / File Transfer / Other)
+  - `Node: Role` → clusters by network role (Internal / External / Broadcast+Multicast / MAC+Layer-2)
+  - All other modes → clusters by subnet (original behaviour)
+- **Graph cluster: Ctrl+drag to reposition** — Hold Ctrl and drag inside any cluster's bounding box to move the entire cluster group as a unit. The dragged cluster is highlighted with a solid bright border while held. Pairs that cross cluster boundaries remain connected regardless of cluster position.
+- **Graph legend: spacing above hint text** — Added 6 px gap between the lowest legend item and the "click row to filter" hint below it, preventing overlap at small font sizes.
+
+### Changed
+- **Pair list arrows: ASCII for cross-platform consistency** — Direction arrows changed from Unicode double-stroke `⇒ ⇔ ⇐` to ASCII ` --> ` / ` <-> ` / ` <-- `. Fixes a Windows rendering issue where `⇐` had a different glyph advance width in Consolas, causing the destination address to shift left by one character when the reverse direction was selected.
+
+- AI-Assisted: yes (Claude) — beta toggle, Function node mode, high-risk edge mode, context-aware cluster layout, Ctrl+drag cluster, legend spacing fix, arrow fix
+
+## [0.5.1] - 2026-04-15
+
+### Added
+- **3-page PDF report** — The PDF export has been completely redesigned. The report now spans three pages:
+  - **Page 1 — Cover page**: PacketCircle logo centered on the page, large title "PacketCircle Report", configurable metadata fields (Company Name, Prepared by, Project, Comments, Date), and the GitHub URL at the bottom.
+  - **Page 2 — Report page**: The currently active view (Circle, Table, or Graph) fills the left two-thirds of the page at high resolution. The right column shows the full communication pair list. A protocol legend (for Circle and Table views) or a graph legend explaining node colour, edge thickness, and node size (for Graph view) appears below the visualization.
+  - **Page 3 — Explanation page**: Plain-language description of what the report shows, including view-specific interpretation guidance (circle node/edge colours and thickness; graph health scores, anomaly scoring, and threshold groups; table columns and sorting). Common sections cover the communication pair list, active filters, Top-N setting, and metric.
+- **Configure Reports... dialog** (Settings → Configure Reports…): Configurable cover page fields — Company Name, Prepared by, Project, Comments — with a paper size selector (A4 / Legal). Default values: Company = Demo, Prepared by = John Doe, Comments = Demo Segment Analysis. Settings are persisted in `~/.PacketCircle/settings.ini` under `[Report]`.
+- **Paper size selector**: A4 (210 × 297 mm) and Legal (8.5 × 14 in) both in landscape orientation.
+
+### Fixed
+- **TCP Window edge colors always gray** — `epan_dissect_new` was called with `create_proto_tree=FALSE` for non-Wi-Fi captures, so Wireshark never built a dissection tree and `tcp.window_size_value` fields were never populated. Fixed by always passing `TRUE, TRUE`; `epan_dissect_reset` frees the tree after each frame so peak memory cost is bounded to one frame.
+- **TCP Window proto tree walker** — replaced the original `find_tcp_win_value` implementation (using `PNODE_FINFO` + `proto_tree_children_foreach`) with `find_tcp_win_node`, which uses `node->finfo` + `first_child`/`next` — the same pattern as the working Wi-Fi RSSI walker. The old approach did not traverse child nodes correctly in all Wireshark API versions.
+- **Score Breakdown: TCP Window stats not shown** — added `getEdgeWindowStats()` to `GraphWidget` to expose the per-edge pre-computed window values; updated `setGraphScores()` signature to accept them; the Score popup now correctly shows min/max/avg window size and zero-window event counts for TCP connections.
+- **Edge color dropdown off-by-one** — `onGraphEdgeColorChanged()` was mapping the raw combo box index to `EdgeColorMode`, causing every mode from "TCP Health" onward to apply the wrong color scale (selecting "TCP Window" showed TCP Health colors; "TCP Health" showed Anomaly Score colors; etc.). Fixed by reading `itemData(index).toInt()` instead of the index.
+
+### Changed
+- **Version bumped to v0.5.1** — CMakeLists.txt `set_module_info` updated; PDF footer now reports `v0.5.1`.
+- **Installer redesigned** — macOS, Linux, and Windows installers now offer v.0.5.1 (latest, default) or v.0.4.7 (legacy), plus a **Standard** / **Experimental** feature set choice. Experimental writes `EnableGraphView=true` to `~/.PacketCircle/settings.ini`, enabling the beta Graph View without requiring a separate binary. Default path (press Enter twice) installs v.0.5.1 Standard.
+- **In-app help updated** — Graph View section extended with TCP Window, High Risk, and Node: Function entries; Ctrl+drag cluster added to keyboard reference; PDF Export section updated to describe the 3-page format and Configure Reports dialog; Score Breakdown note added for TCP Window stats.
+
+- AI-Assisted: yes (Claude) — 3-page PDF redesign, cover page, report config dialog, explanation page, TCP Window fixes, edge color fix, installer redesign, help + doc updates, version bump
+
 ## [0.4.7] - 2026-04-01
 
 ### Added
