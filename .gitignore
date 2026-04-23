@@ -31,3 +31,6 @@ Thumbs.db
 ._*
 .Spotlight-V100
 .Trashes
+
+# Internal docs — not published to GitHub
+extra-docs/

@@ -79,6 +79,10 @@
 
 *Click a line to see per-port details. Right-click to filter, follow a TCP stream, or open protocol info.*
 
+---
+
+> **Experimental Feature — v0.5.1:** The Graph View screenshots below showcase a new layout engine introduced in v0.5.1. This feature is experimental; behaviour and UI may change in future releases.
+
 ### Graph View — Star Layout with TCP Window Analysis
 
 ![Graph Star](screenshots/graph-star.png)
