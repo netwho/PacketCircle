@@ -3,7 +3,7 @@
 # =============================================================================
 #
 # Supports:
-#   - Installing v.0.5.1 (latest) or v.0.4.7 (stable legacy)
+#   - Installing v.0.5.2 (latest) or v.0.4.7 (stable legacy)
 #   - Two flavors: Standard (default) or Experimental (enables Graph View)
 #   - Detecting an already-installed version
 #   - Upgrading, downgrading, and uninstalling
@@ -24,14 +24,14 @@ $ErrorActionPreference = "Stop"
 
 $ScriptDir      = Split-Path -Parent $MyInvocation.MyCommand.Path
 $PluginName     = "packetcircle.dll"
-$LatestVersion  = "0.5.1"
+$LatestVersion  = "0.5.2"
 $LegacyVersion  = "0.4.7"
 
 Write-Host ""
 Write-Host "===========================================================" -ForegroundColor Cyan
 Write-Host "      PacketCircle Installer for Windows                   " -ForegroundColor Cyan
 Write-Host "      x86_64 (64-bit Intel/AMD)                            " -ForegroundColor Cyan
-Write-Host "      Available: v.0.5.1 (latest), v.0.4.7                " -ForegroundColor Cyan
+Write-Host "      Available: v.0.5.2 (latest), v.0.4.7                " -ForegroundColor Cyan
 Write-Host "===========================================================" -ForegroundColor Cyan
 Write-Host ""
 
@@ -92,7 +92,7 @@ if ($vcFound) {
 # --- Verify plugin binaries ---
 Write-Host ""
 Write-Host "  Plugin binaries in this installer:"
-$v051Ok = $true
+$v052Ok = $true
 $v047Ok = $true
 foreach ($ver in @("v.$LatestVersion", "v.$LegacyVersion")) {
     $path = Join-Path $ScriptDir "$ver\$PluginName"
@@ -101,11 +101,11 @@ foreach ($ver in @("v.$LatestVersion", "v.$LegacyVersion")) {
         Write-Host "    $ver\$PluginName : " -NoNewline; Write-Host "[FOUND]  ($sz KB)" -ForegroundColor Green
     } else {
         Write-Host "    $ver\$PluginName : " -NoNewline; Write-Host "[MISSING]" -ForegroundColor Yellow
-        if ($ver -eq "v.$LatestVersion") { $v051Ok = $false }
+        if ($ver -eq "v.$LatestVersion") { $v052Ok = $false }
         if ($ver -eq "v.$LegacyVersion") { $v047Ok = $false }
     }
 }
-if (-not $v051Ok -and -not $v047Ok) {
+if (-not $v052Ok -and -not $v047Ok) {
     Write-Host ""
     Write-Host "  Error: No plugin binaries found in this installer package." -ForegroundColor Red
     Read-Host "  Press Enter to exit"; exit 1
@@ -240,8 +240,8 @@ if ($vcFound) { Write-Host "OK ($vcVersion)" -ForegroundColor Green } else { Wri
 Write-Host "  Wireshark       : " -NoNewline
 if ($WiresharkPath) { Write-Host "Found at $WiresharkPath" -ForegroundColor Green } else { Write-Host "Not found in standard locations" -ForegroundColor Yellow }
 Write-Host "  Wireshark ver   : " -NoNewline; Write-Host "$WsVersion  (plugin API: $PluginPathId)" -ForegroundColor Cyan
-Write-Host "  v.0.5.1 binary  : " -NoNewline
-if ($v051Ok) { Write-Host "present" -ForegroundColor Green } else { Write-Host "not available in this package" -ForegroundColor Yellow }
+Write-Host "  v.0.5.2 binary  : " -NoNewline
+if ($v052Ok) { Write-Host "present" -ForegroundColor Green } else { Write-Host "not available in this package" -ForegroundColor Yellow }
 Write-Host "  v.0.4.7 binary  : " -NoNewline
 if ($v047Ok) { Write-Host "present" -ForegroundColor Green } else { Write-Host "not available in this package" -ForegroundColor Yellow }
 Write-Host "  Installed now   : " -NoNewline
@@ -303,7 +303,7 @@ if (-not $verChoice) { $verChoice = "1" }
 $SelectedVersion = $null
 switch ($verChoice) {
     "1" {
-        if (-not $v051Ok) {
+        if (-not $v052Ok) {
             Write-Host "v.$LatestVersion binary is not available in this installer." -ForegroundColor Red
             Read-Host "Press Enter to exit"; exit 1
         }
@@ -336,7 +336,7 @@ Write-Host ""
 Write-Host "[OK] " -ForegroundColor Green -NoNewline
 Write-Host "Selected: PacketCircle v.$SelectedVersion ($([math]::Round($fileInfo.Length / 1KB)) KB)"
 
-# --- Feature set selection (v.0.5.1 only) ---
+# --- Feature set selection (v.0.5.2 only) ---
 $EnableExperimental = $false
 if ($SelectedVersion -eq $LatestVersion) {
     Write-Host ""

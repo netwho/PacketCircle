@@ -147,7 +147,7 @@ Alternatively, in System Settings → Accessibility, disable VoiceOver and scree
 
 **Cause:** Binaries built on Ubuntu 24.04 (glibc 2.39) referenced C23 glibc variants. This was fixed in v0.4.4 with a `glibc_compat.c` shim.
 
-**Fix:** Install v.0.4.4 or later (current release is v.0.4.6).
+**Fix:** Install v.0.4.4 or later (current release is v.0.5.2).
 
 ---
 

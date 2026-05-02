@@ -44,11 +44,11 @@ The `installer/` directory is included in the repository at the root level, with
 
 ## Which Version to Install?
 
-The installer offers **v.0.5.1** (latest) and **v.0.4.7** (last v0.4.x). **Always choose v.0.5.1** unless you have a specific reason to stay on v.0.4.7.
+The installer offers **v.0.5.2** (latest) and **v.0.4.7** (last v0.4.x). **Always choose v.0.5.2** unless you have a specific reason to stay on v.0.4.7.
 
 | Version | Highlights |
 |---|---|
-| **v.0.5.1** (recommended) | 3-page PDF report with cover page & logo, Graph View with 8 layouts, streamlined toolbar with right-click pair-list menu, Configure Reports dialog |
+| **v.0.5.2** (recommended) | 3-page PDF report with cover page & logo, Graph View with 8 layouts, streamlined toolbar with right-click pair-list menu, Configure Reports dialog |
 | **v.0.4.7** (legacy) | 20+ protocol info dialogs, ntopng & Malcolm/Arkime integration, settings menu, TCP/UDP transport details, Connection Details popup & context menu |
 
 You can switch versions at any time by re-running the installer.
@@ -80,8 +80,8 @@ Find your exact plugin path in Wireshark under **Help → About Wireshark → Fo
 # Create the plugin directory (macOS uses dashes: 4-6)
 mkdir -p ~/.local/lib/wireshark/plugins/4-6/epan/
 
-# Install v.0.5.1 (latest):
-cp installer/macos-universal/v.0.5.1/packetcircle.so \
+# Install v.0.5.2 (latest):
+cp installer/macos-universal/v.0.5.2/packetcircle.so \
    ~/.local/lib/wireshark/plugins/4-6/epan/packetcircle.so
 
 # Or install v.0.4.7 (legacy):
@@ -110,7 +110,7 @@ The installer:
 - Searches for the correct plugin directory (dots vs dashes)
 - Checks Qt6 runtime availability and offers to install it if missing
 - Pauses for you to review the prerequisites summary before proceeding
-- Recommends v.0.5.1 and warns if you select v.0.4.7
+- Recommends v.0.5.2 and warns if you select v.0.4.7
 
 > **Note:** Run with `bash install.sh` or `chmod +x install.sh && ./install.sh`. Do not use `sh install.sh` — the script requires bash.
 
@@ -133,22 +133,22 @@ sudo zypper install libQt6Widgets6       # openSUSE
 #   packetcircle-ws42.so  →  Wireshark 4.2.x
 #   packetcircle-ws44.so  →  Wireshark 4.4.x
 #   packetcircle-ws46.so  →  Wireshark 4.6.x
-# (v.0.4.7 has ws40/ws42/ws44/ws46; v.0.5.1 has the same set)
+# (v.0.4.7 has ws40/ws42/ws44/ws46; v.0.5.2 has the same set)
 
-# Example: Wireshark 4.6.x, v.0.5.1:
+# Example: Wireshark 4.6.x, v.0.5.2:
 mkdir -p ~/.local/lib/wireshark/plugins/4.6/epan/
-cp installer/linux-x86_64/v.0.5.1/packetcircle-ws46.so \
+cp installer/linux-x86_64/v.0.5.2/packetcircle-ws46.so \
    ~/.local/lib/wireshark/plugins/4.6/epan/packetcircle.so
 
-# Example: Wireshark 4.2.x, v.0.5.1:
+# Example: Wireshark 4.2.x, v.0.5.2:
 mkdir -p ~/.local/lib/wireshark/plugins/4.2/epan/
-cp installer/linux-x86_64/v.0.5.1/packetcircle-ws42.so \
+cp installer/linux-x86_64/v.0.5.2/packetcircle-ws42.so \
    ~/.local/lib/wireshark/plugins/4.2/epan/packetcircle.so
 ```
 
 ### Supported Wireshark × Plugin Version Matrix (Linux)
 
-| Wireshark | v.0.5.1 binary | v.0.4.7 binary |
+| Wireshark | v.0.5.2 binary | v.0.4.7 binary |
 |---|---|---|
 | 4.0.x | `packetcircle-ws40.so` | `packetcircle-ws40.so` |
 | 4.2.x | `packetcircle-ws42.so` | `packetcircle-ws42.so` |
@@ -179,7 +179,7 @@ The installer:
 - Shows which plugin binaries are present (with file sizes)
 - Detects any existing PacketCircle installation and its version
 - Prints a prerequisites summary before prompting
-- Recommends v.0.5.1; warns if you choose v.0.4.7
+- Recommends v.0.5.2; warns if you choose v.0.4.7
 
 <details>
 <summary>Run the PowerShell script directly</summary>
@@ -200,8 +200,8 @@ Set-ExecutionPolicy -Scope CurrentUser -ExecutionPolicy RemoteSigned
 ```powershell
 # Check your exact path: Help → About Wireshark → Folders → Personal Plugins
 
-# Install v.0.5.1 (latest):
-Copy-Item installer\windows-x86_64\v.0.5.1\packetcircle.dll `
+# Install v.0.5.2 (latest):
+Copy-Item installer\windows-x86_64\v.0.5.2\packetcircle.dll `
           "$env:APPDATA\Wireshark\plugins\4.6\epan\"
 
 # Or install v.0.4.7 (legacy):

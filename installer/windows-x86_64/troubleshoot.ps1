@@ -519,7 +519,8 @@ if (-not $DllPath) {
     $scriptDir = if ($PSScriptRoot) { $PSScriptRoot } else { Split-Path -Parent $MyInvocation.MyCommand.Path }
     $candidates = @(
         (Join-Path $scriptDir $PLUGIN_NAME),
-        (Join-Path $scriptDir "..\installer\windows-x86_64\$PLUGIN_NAME"),
+        (Join-Path $scriptDir "v.0.5.2\$PLUGIN_NAME"),
+        (Join-Path $scriptDir "v.0.4.7\$PLUGIN_NAME"),
         "$env:APPDATA\Wireshark\plugins\4-6\epan\$PLUGIN_NAME",
         "$env:APPDATA\Wireshark\plugins\4.6\epan\$PLUGIN_NAME"
     )

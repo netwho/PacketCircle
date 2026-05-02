@@ -302,9 +302,19 @@ private:
     void saveThresholdGroups();
     void loadThresholdGroups();
     void showThresholdGroupEditor(const QString &groupName = QString());
+    void saveWifiThresholdGroups();
+    void loadWifiThresholdGroups();
+    void showWifiThresholdGroupEditor(const QString &groupName = QString());
     bool showNtopngConfigDialog();
     bool showMalcolmConfigDialog();
-    void showSettingsDialog();
+    void showSettingsDialog(int initialPage = 0);
+    void showIntegrationDialog();
+    void showInternalNetworksDialog();
+    void showPerformanceDialog();
+    void showGraphThresholdsDialog();
+    void showWifiThresholdsDialog();
+    void showResetSettingsDialog();
+    void showAboutDialog();
     void showReportConfigDialog();
     void showCaCertConfigDialog();
     void uploadToNtopng(const QString &filePath, const QString &host, int port,
@@ -414,6 +424,10 @@ private:
     QList<GraphWidget::GraphThresholds> m_thresholdGroups; /* index 0 = Default (read-only) */
     int                                 m_activeThresholdGroup; /* index into m_thresholdGroups */
     QList<GraphWidget::InternalSubnet>  m_internalSubnets;
+
+    /* WiFi signal-quality threshold groups */
+    QList<CircleWidget::WifiThresholds> m_wifiThresholdGroups; /* index 0 = Default (read-only) */
+    int                                 m_activeWifiThresholdGroup;
 
     /* Report configuration */
     QString m_reportCompany;

@@ -98,6 +98,7 @@ CircleWidget::CircleWidget(QWidget *parent)
     , m_pdfMode(false)
     , m_darkTheme(true)
     , m_wifiMode(false)
+    , m_wifiThresholds(CircleWidget::WifiThresholds::defaults())
     , m_hoveredLinePair(nullptr)
 {
     setMinimumSize(300, 300);
@@ -566,12 +567,13 @@ QColor CircleWidget::getProtocolColor(const gchar *protocol_name)
     return color;
 }
 
-/* Map average RSSI (dBm) to a color using 4 bins:
- *   Excellent: >= -55 dBm  →  green
- *   Good:     -65 .. -56   →  yellow-green
- *   Fair:     -75 .. -66   →  orange
- *   Poor:     < -75        →  red
- * Returns a neutral grey when no RSSI data is available. */
+/* Map average RSSI (dBm) to a color using 4 bins driven by m_wifiThresholds:
+ *   Excellent: >= rssi_excellent  →  green
+ *   Good:      >= rssi_good       →  yellow-green
+ *   Fair:      >= rssi_fair       →  orange
+ *   Poor:      below rssi_fair    →  red
+ * Returns a neutral grey when no RSSI data is available.
+ * Thresholds are configurable via Settings → WiFi Thresholds. */
 QColor CircleWidget::getRssiColor(comm_pair_t *pair)
 {
     if (!pair || !pair->is_wifi || pair->rssi_count == 0)
@@ -579,13 +581,19 @@ QColor CircleWidget::getRssiColor(comm_pair_t *pair)
 
     int avg = (int)(pair->rssi_sum / (gint32)pair->rssi_count);
 
-    if (avg >= -55)
-        return m_pdfMode ? QColor(0, 160, 0) : QColor(0, 200, 0);     /* Excellent — green */
-    if (avg >= -65)
+    if (avg >= m_wifiThresholds.rssi_excellent)
+        return m_pdfMode ? QColor(0, 160, 0) : QColor(0, 200, 0);      /* Excellent — green */
+    if (avg >= m_wifiThresholds.rssi_good)
         return m_pdfMode ? QColor(120, 180, 0) : QColor(160, 220, 0);  /* Good — yellow-green */
-    if (avg >= -75)
+    if (avg >= m_wifiThresholds.rssi_fair)
         return m_pdfMode ? QColor(200, 140, 0) : QColor(255, 165, 0);  /* Fair — orange */
     return m_pdfMode ? QColor(180, 0, 0) : QColor(220, 30, 30);        /* Poor — red */
+}
+
+void CircleWidget::setWifiThresholds(const WifiThresholds &t)
+{
+    m_wifiThresholds = t;
+    update();
 }
 
 guint64 CircleWidget::getPairVolume(comm_pair_t *pair)

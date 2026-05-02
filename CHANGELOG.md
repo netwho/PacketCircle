@@ -2,9 +2,12 @@
 
 All notable changes to PacketCircle will be documented in this file.
 
-## [0.5.2] - 2026-04-17
+## [0.5.2] - 2026-05-01
 
 ### Added
+- **Settings redesign** — The ⚙ Settings button now opens a single unified **Settings window**. A section selector at the top lets you switch between: Integration, Internal Networks, Performance, Graph Thresholds, Wi-Fi Thresholds, Reports, and About. The window automatically resizes to fit the selected section. Reset All and Close are in the footer.
+- **Wi-Fi Thresholds groups** — New "Wi-Fi Thresholds" section in the Settings window (visible in all modes; takes effect in Wi-Fi monitor mode). Mirrors the Graph Thresholds group system: a built-in **Default** group (Excellent ≥ −60, Good ≥ −65, Fair ≥ −70 dBm) plus unlimited custom groups. Changes update the RSSI legend, quality labels in the pair list, node/edge colours in the circle, and the RSSI legend in PDF reports immediately.
+- **CA Certificate on its own row** — In Settings → Integration, the CA Certificate option is now a dedicated row (not bundled with ntopng), ready for use with future integrations.
 - **Graph view: beta opt-in toggle** — Graph view is now hidden by default. QA volunteers can unlock it by adding `EnableGraphView=true` under `[Beta]` in `~/.PacketCircle/settings.ini`. No UI changes for standard users; the Graph button is simply absent until opted in.
 - **Graph node colour: Function mode** — New `Node: Function` colour mode classifies each node by the service category it provides (based on destination ports only — i.e. ports the host *receives* connections on). Categories and colours:
   - **Remote Access** (crimson) — RDP (3389), VNC (5900–5902), SPICE (5930), Citrix ICA (1494/2598), AnyDesk (7070)
@@ -28,9 +31,12 @@ All notable changes to PacketCircle will be documented in this file.
 - **Graph legend: spacing above hint text** — Added 6 px gap between the lowest legend item and the "click row to filter" hint below it, preventing overlap at small font sizes.
 
 ### Changed
+- **Version bumped to v0.5.2** — `CMakeLists.txt` `set_module_info` updated to `0 5 2 0`; `PC_VERSION` constant in source updated to `v.0.5.2`.
+- **RSSI quality labels now dynamic** — Pair list "Signal" column quality labels (Excellent / Good / Fair / Poor) and the RSSI legend use the active Wi-Fi Threshold group instead of hardcoded dBm boundaries.
+- **Help text updated** — Wi-Fi section now references the configurable RSSI bins and mentions Settings → Wi-Fi Thresholds.
 - **Pair list arrows: ASCII for cross-platform consistency** — Direction arrows changed from Unicode double-stroke `⇒ ⇔ ⇐` to ASCII ` --> ` / ` <-> ` / ` <-- `. Fixes a Windows rendering issue where `⇐` had a different glyph advance width in Consolas, causing the destination address to shift left by one character when the reverse direction was selected.
 
-- AI-Assisted: yes (Claude) — beta toggle, Function node mode, high-risk edge mode, context-aware cluster layout, Ctrl+drag cluster, legend spacing fix, arrow fix
+- AI-Assisted: yes (Claude) — Settings menu redesign, Wi-Fi Thresholds groups, dynamic RSSI legend, help update, version bump, beta toggle, Function node mode, high-risk edge mode, context-aware cluster layout, Ctrl+drag cluster, legend spacing fix, arrow fix
 
 ## [0.5.1] - 2026-04-15
 

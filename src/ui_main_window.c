@@ -83,6 +83,9 @@
 
 extern "C" void* extract_capture_file(capture_file *cf, void *user_data);
 
+/* ── Plugin version — single source of truth ───────────────────────────── */
+static constexpr char PC_VERSION[] = "v.0.5.2";
+
 /* ------------------------------------------------------------------ */
 /* Theme detection: uses the same logic as Wireshark's ColorUtils::   */
 /* themeIsDark() — compare palette text lightness vs window lightness. */
@@ -240,6 +243,7 @@ MainWindow::MainWindow(QWidget *parent)
     , m_enableTransportStats(true)
     , m_enableDeepInspection(true)
     , m_activeThresholdGroup(0)
+    , m_activeWifiThresholdGroup(0)
     , m_reportCompany("Demo")
     , m_reportPreparedBy("John Doe")
     , m_reportProject("")
@@ -247,6 +251,7 @@ MainWindow::MainWindow(QWidget *parent)
     , m_reportPaperSize(0)
 {
     m_thresholdGroups.append(GraphWidget::GraphThresholds::defaults());
+    m_wifiThresholdGroups.append(CircleWidget::WifiThresholds::defaults());
     m_internalSubnets = GraphWidget::defaultInternalSubnets();
     setupUI();
 }
@@ -325,6 +330,10 @@ void MainWindow::savePreferences()
     /* Graph threshold groups */
     saveThresholdGroups();
     settings.setValue("active_threshold_group", m_activeThresholdGroup);
+
+    /* WiFi threshold groups */
+    saveWifiThresholdGroups();
+    settings.setValue("active_wifi_threshold_group", m_activeWifiThresholdGroup);
     settings.endGroup();
 
     /* Report configuration */
@@ -452,6 +461,14 @@ void MainWindow::loadPreferences()
     m_activeThresholdGroup = settings.value("active_threshold_group", 0).toInt();
     if (m_activeThresholdGroup < 0 || m_activeThresholdGroup >= m_thresholdGroups.size())
         m_activeThresholdGroup = 0;
+
+    /* WiFi threshold groups */
+    loadWifiThresholdGroups();
+    m_activeWifiThresholdGroup = settings.value("active_wifi_threshold_group", 0).toInt();
+    if (m_activeWifiThresholdGroup < 0 || m_activeWifiThresholdGroup >= m_wifiThresholdGroups.size())
+        m_activeWifiThresholdGroup = 0;
+    if (m_circleWidget)
+        m_circleWidget->setWifiThresholds(m_wifiThresholdGroups[m_activeWifiThresholdGroup]);
     settings.endGroup();
 
     /* Report configuration */
@@ -583,7 +600,7 @@ void MainWindow::setupUI()
     resize(1280, 780);
     
     /* Set window title and flags */
-setWindowTitle("PacketCircle v.0.5.1"); /* WH: version bump */
+setWindowTitle(QString("PacketCircle %1").arg(QLatin1String(PC_VERSION)));
     
     /* Create pair list blink timer for synchronized search highlighting */
     m_pairListBlinkTimer = new QTimer(this);
@@ -876,7 +893,7 @@ void MainWindow::createControls()
 
     /* -- Settings (gear) button -- */
     m_settingsBtn = makeIconBtn("\u2699", "Open PacketCircle settings", m_row1Widget);
-    connect(m_settingsBtn, &QPushButton::clicked, this, &MainWindow::showSettingsDialog);
+    connect(m_settingsBtn, &QPushButton::clicked, this, [this](){ showSettingsDialog(); });
 
     /* -- Help button -- */
     QPushButton *helpBtn = makeIconBtn("?", "Show help and controls description", m_row1Widget);
@@ -1468,10 +1485,11 @@ void MainWindow::updateViews()
             if (pair->rssi_count > 0) {
                 int avg = (int)(pair->rssi_sum / (gint32)pair->rssi_count);
                 QString quality;
-                if (avg >= -55)      quality = "Excellent";
-                else if (avg >= -65) quality = "Good";
-                else if (avg >= -75) quality = "Fair";
-                else                 quality = "Poor";
+                const auto &wt = m_wifiThresholdGroups[m_activeWifiThresholdGroup];
+                if (avg >= wt.rssi_excellent)      quality = "Excellent";
+                else if (avg >= wt.rssi_good)      quality = "Good";
+                else if (avg >= wt.rssi_fair)      quality = "Fair";
+                else                               quality = "Poor";
                 sigText = QString("%1 (%2 dBm)").arg(quality).arg(avg);
             }
             m_tableWidget->setItem(row, 5, new QTableWidgetItem(sigText));
@@ -1755,16 +1773,17 @@ void MainWindow::updateLegend()
 
     /* Wi-Fi mode: show 4-bin RSSI legend instead of protocol categories */
     if (m_wifiMode) {
+        const auto &wt = m_wifiThresholdGroups[m_activeWifiThresholdGroup];
         struct RssiLegendItem {
-            const char *label;   /* e.g., "Excellent" */
-            const char *range;   /* e.g., ">= -55 dBm" */
+            QString label;
+            QString range;
             int r, g, b;         /* swatch color (on-screen palette to match CircleWidget) */
         };
         const RssiLegendItem bins[] = {
-            {"Excellent", ">= -55 dBm", 0, 200, 0},
-            {"Good",      "-65..-56 dBm", 160, 220, 0},
-            {"Fair",      "-75..-66 dBm", 255, 165, 0},
-            {"Poor",      "< -75 dBm", 220, 30, 30}
+            {"Excellent", QString(">= %1 dBm").arg(wt.rssi_excellent),                                   0, 200,  0},
+            {"Good",      QString("%1..%2 dBm").arg(wt.rssi_good).arg(wt.rssi_excellent - 1),          160, 220,  0},
+            {"Fair",      QString("%1..%2 dBm").arg(wt.rssi_fair).arg(wt.rssi_good - 1),               255, 165,  0},
+            {"Poor",      QString("< %1 dBm").arg(wt.rssi_fair),                                        220,  30, 30}
         };
 
         QString borderColor = m_darkTheme ? "#666" : "#aaa";
@@ -1995,6 +2014,8 @@ void MainWindow::updateAnalysis(analysis_result_t *result)
     m_wifiMode = (result && result->mode == ANALYSIS_MODE_WIFI);
     if (m_circleWidget) {
         m_circleWidget->setWiFiMode(m_wifiMode);
+        if (m_wifiMode)
+            m_circleWidget->setWifiThresholds(m_wifiThresholdGroups[m_activeWifiThresholdGroup]);
     }
     if (m_graphWidget) {
         m_graphWidget->setWiFiMode(m_wifiMode);
@@ -2796,7 +2817,7 @@ void MainWindow::onHelpClicked()
 {
     /* Use custom QDialog instead of QMessageBox for full size control */
     QDialog *helpDialog = new QDialog(this);
-helpDialog->setWindowTitle("Help - PacketCircle v.0.5.1"); /* WH: version bump */
+    helpDialog->setWindowTitle(QString("Help - PacketCircle %1").arg(QLatin1String(PC_VERSION)));
     helpDialog->setMinimumSize(600, 400);
     helpDialog->resize(900, 650);
     /* Make dialog resizable */
@@ -2857,12 +2878,19 @@ helpDialog->setWindowTitle("Help - PacketCircle v.0.5.1"); /* WH: version bump *
         "<p style='font-weight: normal;'>When a Wi-Fi monitor-mode capture is loaded (radiotap / 802.11), "
         "PacketCircle automatically switches to <b>Wi-Fi mode</b>. The MAC/IP toggle is hidden (Wi-Fi always uses MAC addresses), "
         "and connection colors reflect signal strength (RSSI) instead of protocol.</p>"
-        "<p style='font-weight: normal;'>The <b>RSSI legend</b> at the bottom shows four signal quality bins:</p>"
-        "<p style='margin-left: 0; padding-left: 0; font-weight: normal;'>"
-        "&bull; <b>Excellent</b>: &ge; &minus;55 dBm (green)<br/>"
-        "&bull; <b>Good</b>: &minus;65 to &minus;56 dBm (yellow-green)<br/>"
-        "&bull; <b>Fair</b>: &minus;75 to &minus;66 dBm (orange)<br/>"
-        "&bull; <b>Poor</b>: &lt; &minus;75 dBm (red)"
+        "<p style='font-weight: normal;'>The <b>RSSI legend</b> at the bottom shows four signal quality bins "
+        "(configurable via Settings &rarr; Wi-Fi Thresholds):</p>"
+        "<p style='margin-left: 0; padding-left: 0; font-weight: normal;'>" +
+        QString("&bull; <b>Excellent</b>: &ge; %1 dBm (green)<br/>"
+                "&bull; <b>Good</b>: %2 to %3 dBm (yellow-green)<br/>"
+                "&bull; <b>Fair</b>: %4 to %5 dBm (orange)<br/>"
+                "&bull; <b>Poor</b>: &lt; %6 dBm (red)")
+            .arg(m_wifiThresholdGroups[m_activeWifiThresholdGroup].rssi_excellent)
+            .arg(m_wifiThresholdGroups[m_activeWifiThresholdGroup].rssi_good)
+            .arg(m_wifiThresholdGroups[m_activeWifiThresholdGroup].rssi_excellent - 1)
+            .arg(m_wifiThresholdGroups[m_activeWifiThresholdGroup].rssi_fair)
+            .arg(m_wifiThresholdGroups[m_activeWifiThresholdGroup].rssi_good - 1)
+            .arg(m_wifiThresholdGroups[m_activeWifiThresholdGroup].rssi_fair) +
         "</p>"
         "<p style='font-weight: normal;'>Node tooltips show Wi-Fi details: SSID, BSSID, channel, average/min/max RSSI, and retry count.</p>"
         "<h3>Wi-Fi Search Keywords:</h3>"
@@ -3251,7 +3279,7 @@ void MainWindow::onSavePDFClicked()
         painter.drawLine(0, pageH - fh - mm(3), pageW, pageH - fh - mm(3));
         painter.setPen(QColor(140, 140, 140));
         painter.drawText(0, pageH - fh - mm(1), pageW / 2, fh, Qt::AlignLeft,
-                         QString("PacketCircle v0.5.1  —  %1").arg(nowStr));
+                         QString("PacketCircle %1  —  %2").arg(QLatin1String(PC_VERSION), nowStr));
         painter.drawText(pageW / 2, pageH - fh - mm(1), pageW / 2, fh, Qt::AlignRight,
                          QString("Page %1 of 3").arg(pageNum));
     };
@@ -3588,13 +3616,16 @@ void MainWindow::onSavePDFClicked()
                 painter.drawText(0, ly, vizW, lrH, Qt::AlignVCenter,
                                  "Node & edge colour — Signal quality (RSSI):");
                 ly += lrH;
-                ly = drawSwatches(0, ly, vizW, {
-                    {"Excellent (≥ -55 dBm)", QColor(  0, 200,   0)},
-                    {"Good      (-65..-56)",  QColor(160, 220,   0)},
-                    {"Fair      (-75..-66)",  QColor(255, 165,   0)},
-                    {"Poor      (< -75 dBm)", QColor(220,  50,  50)},
-                    {"No signal",             QColor(160, 160, 160)},
-                }, mm(40));
+                {
+                    const auto &wt = m_wifiThresholdGroups[m_activeWifiThresholdGroup];
+                    ly = drawSwatches(0, ly, vizW, {
+                        {QString("Excellent (≥ %1 dBm)").arg(wt.rssi_excellent),                        QColor(  0, 200,   0)},
+                        {QString("Good      (%1..%2)")  .arg(wt.rssi_good).arg(wt.rssi_excellent - 1),  QColor(160, 220,   0)},
+                        {QString("Fair      (%1..%2)")  .arg(wt.rssi_fair).arg(wt.rssi_good - 1),       QColor(255, 165,   0)},
+                        {QString("Poor      (< %1 dBm)").arg(wt.rssi_fair),                             QColor(220,  50,  50)},
+                        {"No signal",                                                                    QColor(160, 160, 160)},
+                    }, mm(40));
+                }
 
             } else {
                 /* ── Normal mode: node colour + edge colour sections ── */
@@ -4203,73 +4234,690 @@ void MainWindow::showReportConfigDialog()
     }
 }
 
-/* ── Settings dialog ────────────────────────────────────────────────────── */
-void MainWindow::showSettingsDialog()
+/* ── Settings dialog ─────────────────────────────────────────────────────────
+ * Single unified window: section selector (QComboBox) at top, QStackedWidget
+ * in the middle, Reset All + Close at the bottom.  Window auto-resizes when
+ * the user switches sections.                                                */
+void MainWindow::showSettingsDialog(int initialPage)
 {
     bool dark = isDarkTheme();
     QDialog dlg(this);
-    dlg.setWindowTitle("PacketCircle Settings");
-    dlg.setMinimumWidth(440);
+    dlg.setWindowTitle(QString("PacketCircle Settings  —  %1").arg(QLatin1String(PC_VERSION)));
     dlg.setSizeGripEnabled(true);
 
-    /* Cap height so the dialog stays usable on smaller screens */
+    const QString ss = dark ?
+        "QDialog  { background:#1e1e1e; color:#e0e0e0; }"
+        "QLabel   { color:#e0e0e0; }"
+        "QGroupBox{ color:#e0e0e0; border:1px solid #444; border-radius:4px; margin-top:8px; }"
+        "QGroupBox::title{ subcontrol-origin:margin; left:10px; padding:0 4px; color:#90caf9; }"
+        "QCheckBox{ color:#e0e0e0; }"
+        "QListWidget{ background:#2a2a2a; color:#e0e0e0; border:1px solid #444; }"
+        "QLineEdit{ background:#2a2a2a; color:#e0e0e0; border:1px solid #555; padding:2px; border-radius:3px; }"
+        "QSpinBox { background:#2a2a2a; color:#e0e0e0; border:1px solid #555; }"
+        "QComboBox{ background:#2a2a2a; color:#e0e0e0; border:1px solid #555; padding:2px; }"
+        "QPushButton{ background:#333; color:#e0e0e0; border:1px solid #555; padding:4px 14px; border-radius:3px; }"
+        "QPushButton:hover:enabled{ background:#444; }"
+        "QPushButton:disabled{ color:#555; border-color:#444; background:#2a2a2a; }"
+        : "";
+    if (dark) dlg.setStyleSheet(ss);
+
+    QVBoxLayout *outerLayout = new QVBoxLayout(&dlg);
+    outerLayout->setSpacing(8);
+    outerLayout->setContentsMargins(14, 10, 14, 10);
+
+    /* ── Section selector ─────────────────────────────────────────────── */
+    QComboBox *sectionCombo = new QComboBox;
+    sectionCombo->addItem("Integration");
+    sectionCombo->addItem("Internal Networks");
+    sectionCombo->addItem("Performance");
+    sectionCombo->addItem("Graph Thresholds");
+    sectionCombo->addItem("Wi-Fi Thresholds");
+    sectionCombo->addItem("Reports");
+    sectionCombo->addItem("About");
+    outerLayout->addWidget(sectionCombo);
+
+    /* ── Stacked pages ────────────────────────────────────────────────── */
+    QStackedWidget *stack = new QStackedWidget;
+    outerLayout->addWidget(stack);
+
+    /* ── PAGE 0 — Integration ─────────────────────────────────────────── */
     {
-        int screenH = QGuiApplication::primaryScreen()->availableGeometry().height();
-        dlg.setMaximumHeight(qMin(760, screenH - 60));
+        QWidget *page = new QWidget;
+        QVBoxLayout *pv = new QVBoxLayout(page);
+        pv->setSpacing(8); pv->setContentsMargins(0,4,0,4);
+
+        QGroupBox *intGrp = new QGroupBox("Integrations");
+        QVBoxLayout *intBox = new QVBoxLayout(intGrp);
+        intBox->setSpacing(6);
+
+        /* ntopng row */
+        QCheckBox *ntopChk = new QCheckBox("ntopng");
+        ntopChk->setChecked(m_ntopEnabled);
+        QPushButton *cfgNtopBtn = new QPushButton("Configure…");
+        cfgNtopBtn->setEnabled(m_ntopEnabled);
+        QHBoxLayout *ntopRow = new QHBoxLayout;
+        ntopRow->addWidget(ntopChk, 1);
+        ntopRow->addWidget(cfgNtopBtn);
+        intBox->addLayout(ntopRow);
+
+        /* CA Certificate — own separate row */
+        QLabel *certLbl = new QLabel("CA Certificate:");
+        QPushButton *cfgCertBtn = new QPushButton("Configure…");
+        cfgCertBtn->setToolTip("Set a custom CA certificate for TLS connections");
+        QHBoxLayout *certRow = new QHBoxLayout;
+        certRow->addWidget(certLbl, 1);
+        certRow->addWidget(cfgCertBtn);
+        intBox->addLayout(certRow);
+
+        /* Malcolm row */
+        QCheckBox *malcolmChk = new QCheckBox("Malcolm / Arkime");
+        malcolmChk->setChecked(m_malcolmEnabled);
+        QPushButton *cfgMalcolmBtn = new QPushButton("Configure…");
+        cfgMalcolmBtn->setEnabled(m_malcolmEnabled);
+        QHBoxLayout *malcolmRow = new QHBoxLayout;
+        malcolmRow->addWidget(malcolmChk, 1);
+        malcolmRow->addWidget(cfgMalcolmBtn);
+        intBox->addLayout(malcolmRow);
+
+        pv->addWidget(intGrp);
+        pv->addStretch();
+
+        QObject::connect(ntopChk, &QCheckBox::toggled, [this, cfgNtopBtn](bool on) {
+            cfgNtopBtn->setEnabled(on);
+            m_ntopEnabled = on;
+            if (m_sendToNtopBtn) m_sendToNtopBtn->setVisible(on);
+        });
+        QObject::connect(cfgNtopBtn,    &QPushButton::clicked, this, &MainWindow::showNtopngConfigDialog);
+        QObject::connect(cfgCertBtn,    &QPushButton::clicked, this, &MainWindow::showCaCertConfigDialog);
+        QObject::connect(malcolmChk, &QCheckBox::toggled, [this, cfgMalcolmBtn](bool on) {
+            cfgMalcolmBtn->setEnabled(on);
+            m_malcolmEnabled = on;
+            if (m_sendToMalcolmBtn) m_sendToMalcolmBtn->setVisible(on);
+        });
+        QObject::connect(cfgMalcolmBtn, &QPushButton::clicked, this, &MainWindow::showMalcolmConfigDialog);
+
+        stack->addWidget(page);
     }
+
+    /* ── PAGE 1 — Internal Networks ───────────────────────────────────── */
+    {
+        QWidget *page = new QWidget;
+        QVBoxLayout *pv = new QVBoxLayout(page);
+        pv->setSpacing(8); pv->setContentsMargins(0,4,0,4);
+
+        QGroupBox *netGrp = new QGroupBox("Internal Networks (Graph)");
+        QVBoxLayout *netBox = new QVBoxLayout(netGrp);
+        netBox->setSpacing(6);
+
+        QLabel *netNote = new QLabel("Subnets treated as Internal in cluster view. Change /bits to adjust granularity.");
+        netNote->setWordWrap(true);
+        netBox->addWidget(netNote);
+
+        QListWidget *snList = new QListWidget;
+        snList->setFixedHeight(100);
+        snList->setSelectionMode(QAbstractItemView::SingleSelection);
+        auto rebuildSnList = [this, snList]() {
+            snList->clear();
+            for (const auto &sn : m_internalSubnets)
+                snList->addItem(QString("%1/%2%3").arg(sn.prefix).arg(sn.bits)
+                                .arg(sn.builtIn ? " (built-in)" : ""));
+        };
+        rebuildSnList();
+        netBox->addWidget(snList);
+
+        QHBoxLayout *snAddRow = new QHBoxLayout;
+        QLineEdit *snIpEdit = new QLineEdit;
+        snIpEdit->setPlaceholderText("IP prefix (e.g. 10.5.0.0)");
+        QLabel *snSlash = new QLabel("/");
+        QSpinBox *snBits = new QSpinBox;
+        snBits->setRange(1, 32); snBits->setValue(24);
+        QPushButton *snAddBtn = new QPushButton("Add");
+        snAddRow->addWidget(snIpEdit, 1);
+        snAddRow->addWidget(snSlash);
+        snAddRow->addWidget(snBits);
+        snAddRow->addWidget(snAddBtn);
+        netBox->addLayout(snAddRow);
+
+        QPushButton *snRemoveBtn  = new QPushButton("Remove Selected");
+        QPushButton *snSetBitsBtn = new QPushButton("Set /bits for selected");
+        snRemoveBtn->setEnabled(false);
+        snSetBitsBtn->setEnabled(false);
+        snSetBitsBtn->setToolTip("Update the clustering prefix length for the selected subnet");
+        QHBoxLayout *snBtnRow2 = new QHBoxLayout;
+        snBtnRow2->addWidget(snRemoveBtn);
+        snBtnRow2->addWidget(snSetBitsBtn);
+        netBox->addLayout(snBtnRow2);
+
+        QObject::connect(snList, &QListWidget::currentRowChanged, [this, snList, snBits, snRemoveBtn, snSetBitsBtn](int row) {
+            bool valid = (row >= 0 && row < (int)m_internalSubnets.size());
+            snRemoveBtn->setEnabled(valid && !m_internalSubnets[row].builtIn);
+            snSetBitsBtn->setEnabled(valid);
+            if (valid) snBits->setValue(m_internalSubnets[row].bits);
+        });
+        QObject::connect(snSetBitsBtn, &QPushButton::clicked, [this, snList, snBits, rebuildSnList]() {
+            int row = snList->currentRow();
+            if (row < 0 || row >= (int)m_internalSubnets.size()) return;
+            m_internalSubnets[row].bits = snBits->value();
+            rebuildSnList();
+            snList->setCurrentRow(row);
+            if (m_graphWidget) m_graphWidget->setInternalSubnets(m_internalSubnets);
+        });
+        QObject::connect(snAddBtn, &QPushButton::clicked, [this, snIpEdit, snBits, rebuildSnList]() {
+            QString prefix = snIpEdit->text().trimmed();
+            if (prefix.isEmpty()) return;
+            GraphWidget::InternalSubnet sn;
+            sn.prefix = prefix; sn.bits = snBits->value(); sn.builtIn = false;
+            m_internalSubnets.append(sn);
+            rebuildSnList();
+            snIpEdit->clear();
+            if (m_graphWidget) m_graphWidget->setInternalSubnets(m_internalSubnets);
+        });
+        QObject::connect(snRemoveBtn, &QPushButton::clicked, [this, snList, snRemoveBtn, snSetBitsBtn, rebuildSnList]() {
+            int row = snList->currentRow();
+            if (row < 0 || row >= (int)m_internalSubnets.size() || m_internalSubnets[row].builtIn) return;
+            m_internalSubnets.removeAt(row);
+            rebuildSnList();
+            snRemoveBtn->setEnabled(false);
+            snSetBitsBtn->setEnabled(false);
+            if (m_graphWidget) m_graphWidget->setInternalSubnets(m_internalSubnets);
+        });
+
+        pv->addWidget(netGrp);
+        pv->addStretch();
+        stack->addWidget(page);
+    }
+
+    /* ── PAGE 2 — Performance ─────────────────────────────────────────── */
+    {
+        QWidget *page = new QWidget;
+        QVBoxLayout *pv = new QVBoxLayout(page);
+        pv->setSpacing(8); pv->setContentsMargins(0,4,0,4);
+
+        QGroupBox *perfGrp = new QGroupBox("Performance");
+        QVBoxLayout *perfBox = new QVBoxLayout(perfGrp);
+        perfBox->setSpacing(6);
+
+        QCheckBox *l2Chk = new QCheckBox("Enable Layer-2 / LLC analysis");
+        l2Chk->setToolTip("Scans the full capture for MAC-layer protocol breakdown (EtherType, LLC DSAP/SSAP).\n"
+                          "Disable if clicking MAC connections is slow on large captures.");
+        l2Chk->setChecked(m_enableL2Analysis);
+
+        QCheckBox *transportChk = new QCheckBox("Enable TCP / UDP transport statistics");
+        transportChk->setToolTip("Scans the full capture for per-flow TCP/UDP metrics (window size, RTT, payload stats).\n"
+                                 "Disable if Transport Details dialogs are slow on large captures.");
+        transportChk->setChecked(m_enableTransportStats);
+
+        QCheckBox *deepChk = new QCheckBox("Enable protocol deep inspection");
+        deepChk->setToolTip("Scans the full capture for protocol-specific information (TLS, HTTP, SMB, DNS, …).\n"
+                            "Disable to suppress per-protocol info dialogs on large captures.");
+        deepChk->setChecked(m_enableDeepInspection);
+
+        perfBox->addWidget(l2Chk);
+        perfBox->addWidget(transportChk);
+        perfBox->addWidget(deepChk);
+
+        QObject::connect(l2Chk,        &QCheckBox::toggled, [this](bool on) { m_enableL2Analysis     = on; });
+        QObject::connect(transportChk, &QCheckBox::toggled, [this](bool on) { m_enableTransportStats = on; });
+        QObject::connect(deepChk,      &QCheckBox::toggled, [this](bool on) { m_enableDeepInspection = on; });
+
+        pv->addWidget(perfGrp);
+        pv->addStretch();
+        stack->addWidget(page);
+    }
+
+    /* ── PAGE 3 — Graph Thresholds ────────────────────────────────────── */
+    {
+        QWidget *page = new QWidget;
+        QVBoxLayout *pv = new QVBoxLayout(page);
+        pv->setSpacing(8); pv->setContentsMargins(0,4,0,4);
+
+        QGroupBox *threshGrp = new QGroupBox("Graph Thresholds");
+        QVBoxLayout *threshBox = new QVBoxLayout(threshGrp);
+        threshBox->setSpacing(6);
+
+        QHBoxLayout *activeRow = new QHBoxLayout;
+        QLabel *activeLabel = new QLabel("Active group:");
+        QComboBox *activeCombo = new QComboBox;
+        for (const auto &g : m_thresholdGroups)
+            activeCombo->addItem(g.name);
+        activeCombo->setCurrentIndex(m_activeThresholdGroup);
+        activeRow->addWidget(activeLabel);
+        activeRow->addWidget(activeCombo, 1);
+        threshBox->addLayout(activeRow);
+
+        QHBoxLayout *threshBtnRow = new QHBoxLayout;
+        QPushButton *editGroupBtn = new QPushButton("Edit…");
+        QPushButton *addGroupBtn  = new QPushButton("+ Add Group");
+        QPushButton *delGroupBtn  = new QPushButton("Delete");
+        delGroupBtn->setToolTip("Delete selected group (built-in profiles cannot be deleted)");
+        delGroupBtn->setEnabled(activeCombo->currentIndex() >= 3);
+        threshBtnRow->addWidget(editGroupBtn);
+        threshBtnRow->addWidget(addGroupBtn);
+        threshBtnRow->addWidget(delGroupBtn);
+        threshBtnRow->addStretch();
+        threshBox->addLayout(threshBtnRow);
+
+        QObject::connect(activeCombo, QOverload<int>::of(&QComboBox::currentIndexChanged), [this, activeCombo, delGroupBtn](int idx) {
+            delGroupBtn->setEnabled(idx >= 3);
+            m_activeThresholdGroup = idx;
+            if (m_graphWidget && idx >= 0 && idx < m_thresholdGroups.size())
+                m_graphWidget->setThresholds(m_thresholdGroups[idx]);
+        });
+        QObject::connect(editGroupBtn, &QPushButton::clicked, [this, activeCombo]() {
+            int idx = activeCombo->currentIndex();
+            if (idx < 0 || idx >= m_thresholdGroups.size()) return;
+            showThresholdGroupEditor(m_thresholdGroups[idx].name);
+            for (int i = 0; i < m_thresholdGroups.size(); i++)
+                activeCombo->setItemText(i, m_thresholdGroups[i].name);
+        });
+        QObject::connect(addGroupBtn, &QPushButton::clicked, [this, activeCombo, delGroupBtn]() {
+            showThresholdGroupEditor(QString());
+            activeCombo->blockSignals(true);
+            activeCombo->clear();
+            for (const auto &g : m_thresholdGroups) activeCombo->addItem(g.name);
+            activeCombo->setCurrentIndex(m_activeThresholdGroup);
+            activeCombo->blockSignals(false);
+            delGroupBtn->setEnabled(m_activeThresholdGroup >= 3);
+        });
+        QObject::connect(delGroupBtn, &QPushButton::clicked, [this, &dlg, activeCombo, delGroupBtn]() {
+            int idx = activeCombo->currentIndex();
+            if (idx < 3 || idx >= m_thresholdGroups.size()) return;
+            auto reply = QMessageBox::question(&dlg, "Delete Threshold Group",
+                QString("Delete group \"%1\"?").arg(m_thresholdGroups[idx].name),
+                QMessageBox::Yes | QMessageBox::Cancel, QMessageBox::Cancel);
+            if (reply != QMessageBox::Yes) return;
+            m_thresholdGroups.removeAt(idx);
+            m_activeThresholdGroup = 0;
+            activeCombo->blockSignals(true);
+            activeCombo->clear();
+            for (const auto &g : m_thresholdGroups) activeCombo->addItem(g.name);
+            activeCombo->setCurrentIndex(0);
+            activeCombo->blockSignals(false);
+            delGroupBtn->setEnabled(false);
+            if (m_graphWidget) m_graphWidget->setThresholds(m_thresholdGroups[0]);
+        });
+
+        pv->addWidget(threshGrp);
+        pv->addStretch();
+        stack->addWidget(page);
+    }
+
+    /* ── PAGE 4 — Wi-Fi Thresholds ────────────────────────────────────── */
+    {
+        QWidget *page = new QWidget;
+        QVBoxLayout *pv = new QVBoxLayout(page);
+        pv->setSpacing(8); pv->setContentsMargins(0,4,0,4);
+
+        QGroupBox *wifiGrp = new QGroupBox("Wi-Fi Signal Quality Thresholds");
+        QVBoxLayout *wifiBox = new QVBoxLayout(wifiGrp);
+        wifiBox->setSpacing(6);
+
+        QLabel *wifiNote = new QLabel(
+            "Controls the RSSI (dBm) boundaries used to colour Wi-Fi connections and the legend.\n"
+            "Default: Excellent ≥ −60, Good ≥ −65, Fair ≥ −70, Poor below −70.");
+        wifiNote->setWordWrap(true);
+        wifiNote->setStyleSheet(dark ? "color:#aaa; font-size:8pt;" : "color:#555; font-size:8pt;");
+        wifiBox->addWidget(wifiNote);
+
+        QHBoxLayout *wifiActiveRow = new QHBoxLayout;
+        QLabel *wifiActiveLabel = new QLabel("Active group:");
+        QComboBox *wifiActiveCombo = new QComboBox;
+        for (const auto &g : m_wifiThresholdGroups)
+            wifiActiveCombo->addItem(g.name);
+        wifiActiveCombo->setCurrentIndex(m_activeWifiThresholdGroup);
+        wifiActiveRow->addWidget(wifiActiveLabel);
+        wifiActiveRow->addWidget(wifiActiveCombo, 1);
+        wifiBox->addLayout(wifiActiveRow);
+
+        QHBoxLayout *wifiBtnRow = new QHBoxLayout;
+        QPushButton *wifiEditBtn = new QPushButton("Edit…");
+        QPushButton *wifiAddBtn  = new QPushButton("+ Add Group");
+        QPushButton *wifiDelBtn  = new QPushButton("Delete");
+        wifiDelBtn->setToolTip("Delete the selected group (Default cannot be deleted)");
+        wifiDelBtn->setEnabled(m_activeWifiThresholdGroup > 0);
+        wifiBtnRow->addWidget(wifiEditBtn);
+        wifiBtnRow->addWidget(wifiAddBtn);
+        wifiBtnRow->addWidget(wifiDelBtn);
+        wifiBtnRow->addStretch();
+        wifiBox->addLayout(wifiBtnRow);
+
+        QObject::connect(wifiActiveCombo, QOverload<int>::of(&QComboBox::currentIndexChanged), [this, wifiActiveCombo, wifiDelBtn](int idx) {
+            wifiDelBtn->setEnabled(idx > 0);
+            m_activeWifiThresholdGroup = idx;
+            if (m_circleWidget && idx >= 0 && idx < m_wifiThresholdGroups.size())
+                m_circleWidget->setWifiThresholds(m_wifiThresholdGroups[idx]);
+            updateLegend();
+        });
+        QObject::connect(wifiEditBtn, &QPushButton::clicked, [this, wifiActiveCombo]() {
+            int idx = wifiActiveCombo->currentIndex();
+            if (idx < 0 || idx >= m_wifiThresholdGroups.size()) return;
+            showWifiThresholdGroupEditor(m_wifiThresholdGroups[idx].name);
+            for (int i = 0; i < m_wifiThresholdGroups.size(); i++)
+                wifiActiveCombo->setItemText(i, m_wifiThresholdGroups[i].name);
+            updateLegend();
+        });
+        QObject::connect(wifiAddBtn, &QPushButton::clicked, [this, wifiActiveCombo, wifiDelBtn]() {
+            showWifiThresholdGroupEditor(QString());
+            wifiActiveCombo->blockSignals(true);
+            wifiActiveCombo->clear();
+            for (const auto &g : m_wifiThresholdGroups) wifiActiveCombo->addItem(g.name);
+            wifiActiveCombo->setCurrentIndex(m_activeWifiThresholdGroup);
+            wifiActiveCombo->blockSignals(false);
+            wifiDelBtn->setEnabled(m_activeWifiThresholdGroup > 0);
+        });
+        QObject::connect(wifiDelBtn, &QPushButton::clicked, [this, &dlg, wifiActiveCombo, wifiDelBtn]() {
+            int idx = wifiActiveCombo->currentIndex();
+            if (idx <= 0 || idx >= m_wifiThresholdGroups.size()) return;
+            auto reply = QMessageBox::question(&dlg, "Delete Wi-Fi Threshold Group",
+                QString("Delete group \"%1\"?").arg(m_wifiThresholdGroups[idx].name),
+                QMessageBox::Yes | QMessageBox::Cancel, QMessageBox::Cancel);
+            if (reply != QMessageBox::Yes) return;
+            m_wifiThresholdGroups.removeAt(idx);
+            m_activeWifiThresholdGroup = 0;
+            wifiActiveCombo->blockSignals(true);
+            wifiActiveCombo->clear();
+            for (const auto &g : m_wifiThresholdGroups) wifiActiveCombo->addItem(g.name);
+            wifiActiveCombo->setCurrentIndex(0);
+            wifiActiveCombo->blockSignals(false);
+            wifiDelBtn->setEnabled(false);
+            if (m_circleWidget) m_circleWidget->setWifiThresholds(m_wifiThresholdGroups[0]);
+            updateLegend();
+        });
+
+        pv->addWidget(wifiGrp);
+        pv->addStretch();
+        stack->addWidget(page);
+    }
+
+    /* ── PAGE 5 — Reports ─────────────────────────────────────────────── */
+    {
+        QWidget *page = new QWidget;
+        QVBoxLayout *pv = new QVBoxLayout(page);
+        pv->setSpacing(8); pv->setContentsMargins(0,4,0,4);
+
+        QGroupBox *rptGrp = new QGroupBox("Configure Reports");
+        QFormLayout *rptForm = new QFormLayout(rptGrp);
+        rptForm->setLabelAlignment(Qt::AlignRight | Qt::AlignVCenter);
+        rptForm->setHorizontalSpacing(12);
+        rptForm->setVerticalSpacing(8);
+        rptForm->setContentsMargins(8, 12, 8, 8);
+
+        QLineEdit *rptCompany    = new QLineEdit(m_reportCompany);
+        QLineEdit *rptPreparedBy = new QLineEdit(m_reportPreparedBy);
+        QLineEdit *rptProject    = new QLineEdit(m_reportProject);
+        QLineEdit *rptComments   = new QLineEdit(m_reportComments);
+        rptCompany   ->setPlaceholderText("e.g. Acme Corp");
+        rptPreparedBy->setPlaceholderText("e.g. Jane Smith");
+        rptProject   ->setPlaceholderText("e.g. Q2 Security Audit (optional)");
+        rptComments  ->setPlaceholderText("e.g. Demo Segment Analysis");
+
+        QComboBox *rptPaper = new QComboBox;
+        rptPaper->addItem("A4  (210 × 297 mm)");
+        rptPaper->addItem("Legal  (8.5 × 14 in)");
+        rptPaper->setCurrentIndex(m_reportPaperSize);
+
+        rptForm->addRow("Company Name:", rptCompany);
+        rptForm->addRow("Prepared by:",  rptPreparedBy);
+        rptForm->addRow("Project:",      rptProject);
+        rptForm->addRow("Comments:",     rptComments);
+        rptForm->addRow("Paper Size:",   rptPaper);
+
+        /* Capture edits into members when Close is pressed — connect below */
+        QObject::connect(rptCompany,    &QLineEdit::textEdited, [this](const QString &t){ m_reportCompany    = t.trimmed(); });
+        QObject::connect(rptPreparedBy, &QLineEdit::textEdited, [this](const QString &t){ m_reportPreparedBy = t.trimmed(); });
+        QObject::connect(rptProject,    &QLineEdit::textEdited, [this](const QString &t){ m_reportProject    = t.trimmed(); });
+        QObject::connect(rptComments,   &QLineEdit::textEdited, [this](const QString &t){ m_reportComments   = t.trimmed(); });
+        QObject::connect(rptPaper, QOverload<int>::of(&QComboBox::currentIndexChanged), [this](int idx){ m_reportPaperSize = idx; });
+
+        pv->addWidget(rptGrp);
+        pv->addStretch();
+        stack->addWidget(page);
+    }
+
+    /* ── PAGE 6 — About ───────────────────────────────────────────────── */
+    {
+        QWidget *page = new QWidget;
+        QVBoxLayout *pv = new QVBoxLayout(page);
+        pv->setSpacing(8); pv->setContentsMargins(0,4,0,4);
+
+        QGroupBox *aboutGrp = new QGroupBox("About");
+        QVBoxLayout *aboutBox = new QVBoxLayout(aboutGrp);
+        aboutBox->setSpacing(5);
+
+        const QString platform =
+#if defined(Q_OS_MACOS)
+            "macOS Universal";
+#elif defined(Q_OS_LINUX)
+            "Linux x86_64";
+#elif defined(Q_OS_WIN)
+            "Windows x86_64";
+#else
+            "Unknown platform";
+#endif
+        QLabel *verLabel = new QLabel(
+            QString("<b>PacketCircle %1</b> &nbsp;&middot;&nbsp; %2 &nbsp;&middot;&nbsp; Qt %3")
+            .arg(QLatin1String(PC_VERSION), platform, QLatin1String(QT_VERSION_STR)));
+        verLabel->setTextFormat(Qt::RichText);
+        aboutBox->addWidget(verLabel);
+
+        QStringList pluginSearchPaths = {
+            QDir::homePath() + "/.local/lib/wireshark/plugins/4-6/epan/packetcircle.so",
+            QDir::homePath() + "/.local/lib/wireshark/plugins/4.6/epan/packetcircle.so",
+#if defined(Q_OS_WIN)
+            QDir::fromNativeSeparators(qEnvironmentVariable("APPDATA"))
+                + "/Wireshark/plugins/4.6/epan/packetcircle.dll",
+            QDir::fromNativeSeparators(qEnvironmentVariable("APPDATA"))
+                + "/Wireshark/plugins/4-6/epan/packetcircle.dll",
+            QDir::fromNativeSeparators(qEnvironmentVariable("LOCALAPPDATA"))
+                + "/Wireshark/plugins/4.6/epan/packetcircle.dll",
+            QDir::fromNativeSeparators(qEnvironmentVariable("LOCALAPPDATA"))
+                + "/Wireshark/plugins/4-6/epan/packetcircle.dll",
+            "C:/Program Files/Wireshark/plugins/4.6/epan/packetcircle.dll",
+            "C:/Program Files/Wireshark/plugins/4-6/epan/packetcircle.dll",
+#endif
+        };
+        QString foundPluginPath;
+        for (const QString &pp : pluginSearchPaths)
+            if (QFile::exists(pp)) { foundPluginPath = pp; break; }
+
+        QLabel *pathLabel = new QLabel(
+            foundPluginPath.isEmpty()
+            ? QString("<span style='color:%1;'>&#9888; Plugin file not found at expected location</span>")
+                .arg(dark ? "#f0c040" : "#b07800")
+            : QString("<span style='color:%1;'>&#10003; %2</span>")
+                .arg(dark ? "#6ec96e" : "#27ae60", foundPluginPath.toHtmlEscaped()));
+        pathLabel->setTextFormat(Qt::RichText);
+        pathLabel->setWordWrap(true);
+        aboutBox->addWidget(pathLabel);
+
+        QHBoxLayout *updateRow = new QHBoxLayout;
+        QPushButton *checkUpdateBtn  = new QPushButton("Check for Updates");
+        QLabel      *updateStatusLbl = new QLabel("");
+        updateStatusLbl->setTextFormat(Qt::RichText);
+        updateStatusLbl->setOpenExternalLinks(true);
+        updateRow->addWidget(checkUpdateBtn);
+        updateRow->addWidget(updateStatusLbl, 1);
+        aboutBox->addLayout(updateRow);
+
+        QObject::connect(checkUpdateBtn, &QPushButton::clicked,
+                         [this, checkUpdateBtn, updateStatusLbl]() {
+            QPointer<QPushButton> safeBtn(checkUpdateBtn);
+            QPointer<QLabel>      safeLbl(updateStatusLbl);
+            if (safeBtn) safeBtn->setEnabled(false);
+            if (safeLbl) safeLbl->setText("Checking…");
+            if (!m_networkManager) m_networkManager = new QNetworkAccessManager(this);
+            QNetworkRequest req(QUrl("https://api.github.com/repos/netwho/PacketCircle/releases/latest"));
+            req.setHeader(QNetworkRequest::UserAgentHeader,
+                          QString("PacketCircle/%1").arg(QLatin1String(PC_VERSION + 2)));
+            req.setRawHeader("Accept", "application/vnd.github.v3+json");
+            QNetworkReply *reply = m_networkManager->get(req);
+            QObject::connect(reply, &QNetworkReply::finished,
+                             [reply, safeBtn, safeLbl]() mutable {
+                reply->deleteLater();
+                if (safeBtn) safeBtn->setEnabled(true);
+                if (!safeLbl) return;
+                if (reply->error() != QNetworkReply::NoError) {
+                    safeLbl->setText(
+                        QString("<span style='color:#e07070;'>Could not reach GitHub (%1)</span>")
+                        .arg(reply->errorString().toHtmlEscaped()));
+                    return;
+                }
+                QString tag = QJsonDocument::fromJson(reply->readAll())
+                                  .object().value("tag_name").toString();
+                if (tag.isEmpty()) {
+                    safeLbl->setText("<span style='color:#e07070;'>No release info found</span>");
+                    return;
+                }
+                auto strip = [](const QString &s) {
+                    QString r = s.toLower();
+                    if (r.startsWith("v.")) return r.mid(2);
+                    if (r.startsWith("v"))  return r.mid(1);
+                    return r;
+                };
+                auto isNewer = [&](const QString &remote, const QString &current) {
+                    auto parts = [](const QString &v) {
+                        QList<int> out;
+                        for (const QString &p : v.split('.')) out.append(p.toInt());
+                        while (out.size() < 3) out.append(0);
+                        return out;
+                    };
+                    QList<int> r = parts(remote), c = parts(current);
+                    for (int i = 0; i < 3; i++) {
+                        if (r[i] > c[i]) return true;
+                        if (r[i] < c[i]) return false;
+                    }
+                    return false;
+                };
+                if (!isNewer(strip(tag), strip(QString(PC_VERSION)))) {
+                    safeLbl->setText("<span style='color:#6ec96e;'>&#10003; Up to date</span>");
+                } else {
+                    static const QString dlUrl =
+                        "https://raw.githubusercontent.com/netwho/PacketCircle/main/installer.zip";
+                    auto reply2 = QMessageBox::question(
+                        nullptr, "Update Available",
+                        QString("PacketCircle %1 is available (you have %2).\n\nDownload installer.zip now?")
+                        .arg(tag, QLatin1String(PC_VERSION)),
+                        QMessageBox::Yes | QMessageBox::No, QMessageBox::Yes);
+                    if (reply2 == QMessageBox::Yes)
+                        QDesktopServices::openUrl(QUrl(dlUrl));
+                    safeLbl->setText(
+                        QString("<span style='color:#f0c040;'>%1 available</span>")
+                        .arg(tag.toHtmlEscaped()));
+                }
+            });
+        });
+
+        pv->addWidget(aboutGrp);
+        pv->addStretch();
+        stack->addWidget(page);
+    }
+
+    /* ── Footer: Reset All + Close ────────────────────────────────────── */
+    QFrame *sep = new QFrame;
+    sep->setFrameShape(QFrame::HLine);
+    sep->setFrameShadow(QFrame::Sunken);
+    outerLayout->addWidget(sep);
+
+    QHBoxLayout *footer = new QHBoxLayout;
+    QPushButton *resetBtn = new QPushButton("Reset All Settings…");
+    resetBtn->setToolTip("Reset all settings to their defaults");
+    if (dark) resetBtn->setStyleSheet("color:#f09090;");
+    QPushButton *closeBtn = new QPushButton("Close");
+    footer->addWidget(resetBtn);
+    footer->addStretch();
+    footer->addWidget(closeBtn);
+    outerLayout->addLayout(footer);
+
+    /* ── Switch pages + resize ────────────────────────────────────────── */
+    stack->setCurrentIndex(initialPage);
+    sectionCombo->setCurrentIndex(initialPage);
+    QObject::connect(sectionCombo, QOverload<int>::of(&QComboBox::currentIndexChanged),
+                     [stack, &dlg](int idx) {
+        stack->setCurrentIndex(idx);
+        QTimer::singleShot(0, &dlg, [&dlg]() { dlg.adjustSize(); });
+    });
+
+    /* ── Reset All ────────────────────────────────────────────────────── */
+    QObject::connect(resetBtn, &QPushButton::clicked, [this, &dlg]() {
+        auto reply = QMessageBox::question(&dlg, "Reset Settings",
+            "Reset all window, display, and integration settings to their defaults?\n\n"
+            "ntopng connection settings (host, port, credentials) are preserved.",
+            QMessageBox::Yes | QMessageBox::Cancel, QMessageBox::Cancel);
+        if (reply != QMessageBox::Yes) return;
+
+        QFile::remove(preferencesFilePath());
+        m_topN = 10; m_useBytes = FALSE; m_useMAC = FALSE;
+        m_ntopEnabled = true; m_malcolmEnabled = false;
+        if (m_top10Btn)  m_top10Btn->setChecked(true);
+        if (m_top25Btn)  m_top25Btn->setChecked(false);
+        if (m_top50Btn)  m_top50Btn->setChecked(false);
+        if (m_packetsBtn) m_packetsBtn->setChecked(true);
+        if (m_bytesBtn)   m_bytesBtn->setChecked(false);
+        if (m_ipBtn)   m_ipBtn->setChecked(true);
+        if (m_macBtn)  m_macBtn->setChecked(false);
+        if (m_circleBtn) m_circleBtn->setChecked(true);
+        if (m_tableBtn)  m_tableBtn->setChecked(false);
+        if (m_viewStack) m_viewStack->setCurrentIndex(0);
+        if (m_lineThicknessCheckBox) m_lineThicknessCheckBox->setChecked(false);
+        updateSearchBarForMode();
+        if (m_sendToNtopBtn)    m_sendToNtopBtn->setVisible(true);
+        if (m_sendToMalcolmBtn) m_sendToMalcolmBtn->setVisible(false);
+        m_enableL2Analysis = true; m_enableTransportStats = true; m_enableDeepInspection = true;
+        resize(1280, 780);
+        m_thresholdGroups.clear();
+        m_thresholdGroups.append(GraphWidget::GraphThresholds::defaults());
+        m_thresholdGroups.append(GraphWidget::GraphThresholds::strict());
+        m_thresholdGroups.append(GraphWidget::GraphThresholds::tolerant());
+        m_activeThresholdGroup = 0;
+        if (m_graphWidget) m_graphWidget->setThresholds(m_thresholdGroups[0]);
+        m_wifiThresholdGroups.clear();
+        m_wifiThresholdGroups.append(CircleWidget::WifiThresholds::defaults());
+        m_activeWifiThresholdGroup = 0;
+        if (m_circleWidget) m_circleWidget->setWifiThresholds(m_wifiThresholdGroups[0]);
+        updateLegend();
+        savePreferences();
+        QMessageBox::information(&dlg, "Reset Complete", "Settings have been reset to defaults.");
+        dlg.accept();
+    });
+
+    QObject::connect(closeBtn, &QPushButton::clicked, &dlg, &QDialog::accept);
+
+    dlg.exec();
+    savePreferences();
+}
+
+/* ── Integration sub-dialog ─────────────────────────────────────────────── */
+void MainWindow::showIntegrationDialog()
+{
+    bool dark = isDarkTheme();
+    QDialog dlg(this);
+    dlg.setWindowTitle("Integration");
+    dlg.setMinimumWidth(420);
 
     if (dark) {
         dlg.setStyleSheet(
             "QDialog { background:#1e1e1e; color:#e0e0e0; }"
-            "QLabel  { color:#e0e0e0; }"
+            "QLabel { color:#e0e0e0; }"
             "QGroupBox { color:#e0e0e0; border:1px solid #444; border-radius:4px; margin-top:8px; }"
             "QGroupBox::title { subcontrol-origin:margin; left:10px; padding:0 4px; color:#90caf9; }"
             "QCheckBox { color:#e0e0e0; }"
-            "QCheckBox:disabled { color:#555; }"
             "QPushButton { background:#333; color:#e0e0e0; border:1px solid #555; padding:4px 14px; border-radius:3px; }"
-            "QPushButton:hover:enabled { background:#444; }"
-            "QPushButton:disabled { color:#555; border-color:#444; background:#2a2a2a; }"
-        );
+            "QPushButton:hover:enabled { background:#444; }");
     }
 
-    /* Outer layout: scroll area fills the top, Close button is always visible */
-    QVBoxLayout *outerLayout = new QVBoxLayout(&dlg);
-    outerLayout->setSpacing(0);
-    outerLayout->setContentsMargins(0, 6, 0, 8);
-
-    QScrollArea *scrollArea = new QScrollArea;
-    scrollArea->setWidgetResizable(true);
-    scrollArea->setFrameShape(QFrame::NoFrame);
-    scrollArea->setHorizontalScrollBarPolicy(Qt::ScrollBarAlwaysOff);
-    if (dark)
-        scrollArea->setStyleSheet("QScrollArea { background:#1e1e1e; }");
-
-    QWidget *scrollContent = new QWidget;
-    QVBoxLayout *main = new QVBoxLayout(scrollContent);
+    QVBoxLayout *main = new QVBoxLayout(&dlg);
     main->setSpacing(8);
-    main->setContentsMargins(14, 6, 14, 6);
-    scrollArea->setWidget(scrollContent);
-    outerLayout->addWidget(scrollArea, 1);
+    main->setContentsMargins(14, 10, 14, 10);
 
-    /* ── Reset ──────────────────────────────────────────────────────── */
-    QGroupBox *resetGrp = new QGroupBox("Reset");
-    QVBoxLayout *resetBox = new QVBoxLayout(resetGrp);
-    QPushButton *resetBtn = new QPushButton("\u27f3  Reset All Settings to Defaults");
-    resetBtn->setToolTip("Clears all saved settings — window position, display options, and integration toggles");
-    resetBox->addWidget(resetBtn);
-    main->addWidget(resetGrp);
-
-    /* ── Integrations ───────────────────────────────────────────────── */
     QGroupBox *intGrp = new QGroupBox("Integrations");
     QVBoxLayout *intBox = new QVBoxLayout(intGrp);
     intBox->setSpacing(6);
 
-    /* ntopng — checkbox + configure on one row */
     QCheckBox *ntopChk = new QCheckBox("ntopng");
     ntopChk->setChecked(m_ntopEnabled);
-    QPushButton *cfgNtopBtn = new QPushButton("Configure\u2026");
+    QPushButton *cfgNtopBtn = new QPushButton("Configure…");
     cfgNtopBtn->setEnabled(m_ntopEnabled);
-    QPushButton *cfgCertBtn = new QPushButton("CA Cert\u2026");
+    QPushButton *cfgCertBtn = new QPushButton("CA Cert…");
     cfgCertBtn->setToolTip("Set a custom CA certificate for TLS connections to ntopng");
 
     QHBoxLayout *ntopRow = new QHBoxLayout;
@@ -4278,10 +4926,9 @@ void MainWindow::showSettingsDialog()
     ntopRow->addWidget(cfgCertBtn);
     intBox->addLayout(ntopRow);
 
-    /* Malcolm / Arkime — checkbox + configure on one row */
     QCheckBox *malcolmChk = new QCheckBox("Malcolm / Arkime");
     malcolmChk->setChecked(m_malcolmEnabled);
-    QPushButton *cfgMalcolmBtn = new QPushButton("Configure\u2026");
+    QPushButton *cfgMalcolmBtn = new QPushButton("Configure…");
     cfgMalcolmBtn->setEnabled(m_malcolmEnabled);
 
     QHBoxLayout *malcolmRow = new QHBoxLayout;
@@ -4291,32 +4938,56 @@ void MainWindow::showSettingsDialog()
 
     main->addWidget(intGrp);
 
-    /* ── Performance ────────────────────────────────────────────────── */
-    QGroupBox *perfGrp = new QGroupBox("Performance");
-    QVBoxLayout *perfBox = new QVBoxLayout(perfGrp);
-    perfBox->setSpacing(6);
+    QHBoxLayout *btnRow = new QHBoxLayout;
+    btnRow->addStretch();
+    QPushButton *closeBtn = new QPushButton("Close");
+    btnRow->addWidget(closeBtn);
+    main->addLayout(btnRow);
 
-    QCheckBox *l2Chk = new QCheckBox("Enable Layer-2 / LLC analysis");
-    l2Chk->setToolTip("Scans the full capture for MAC-layer protocol breakdown (EtherType, LLC DSAP/SSAP).\n"
-                      "Disable if clicking MAC connections is slow on large captures.");
-    l2Chk->setChecked(m_enableL2Analysis);
+    QObject::connect(ntopChk, &QCheckBox::toggled, [&](bool on) {
+        cfgNtopBtn->setEnabled(on);
+        m_ntopEnabled = on;
+        if (m_sendToNtopBtn) m_sendToNtopBtn->setVisible(on);
+    });
+    QObject::connect(cfgNtopBtn,    &QPushButton::clicked, [&]() { showNtopngConfigDialog(); });
+    QObject::connect(cfgCertBtn,    &QPushButton::clicked, [&]() { showCaCertConfigDialog(); });
+    QObject::connect(malcolmChk, &QCheckBox::toggled, [&](bool on) {
+        cfgMalcolmBtn->setEnabled(on);
+        m_malcolmEnabled = on;
+        if (m_sendToMalcolmBtn) m_sendToMalcolmBtn->setVisible(on);
+    });
+    QObject::connect(cfgMalcolmBtn, &QPushButton::clicked, [&]() { showMalcolmConfigDialog(); });
+    QObject::connect(closeBtn, &QPushButton::clicked, &dlg, &QDialog::accept);
 
-    QCheckBox *transportChk = new QCheckBox("Enable TCP / UDP transport statistics");
-    transportChk->setToolTip("Scans the full capture for per-flow TCP/UDP metrics (window size, RTT, payload stats).\n"
-                             "Disable if Transport Details dialogs are slow on large captures.");
-    transportChk->setChecked(m_enableTransportStats);
+    dlg.exec();
+    savePreferences();
+}
 
-    QCheckBox *deepChk = new QCheckBox("Enable protocol deep inspection");
-    deepChk->setToolTip("Scans the full capture for protocol-specific information (TLS, HTTP, SMB, DNS, \u2026).\n"
-                        "Disable to suppress per-protocol info dialogs on large captures.");
-    deepChk->setChecked(m_enableDeepInspection);
+/* ── Internal Networks sub-dialog ───────────────────────────────────────── */
+void MainWindow::showInternalNetworksDialog()
+{
+    bool dark = isDarkTheme();
+    QDialog dlg(this);
+    dlg.setWindowTitle("Internal Networks");
+    dlg.setMinimumWidth(440);
 
-    perfBox->addWidget(l2Chk);
-    perfBox->addWidget(transportChk);
-    perfBox->addWidget(deepChk);
-    main->addWidget(perfGrp);
+    if (dark) {
+        dlg.setStyleSheet(
+            "QDialog { background:#1e1e1e; color:#e0e0e0; }"
+            "QLabel { color:#e0e0e0; }"
+            "QGroupBox { color:#e0e0e0; border:1px solid #444; border-radius:4px; margin-top:8px; }"
+            "QGroupBox::title { subcontrol-origin:margin; left:10px; padding:0 4px; color:#90caf9; }"
+            "QListWidget { background:#2a2a2a; color:#e0e0e0; border:1px solid #444; }"
+            "QLineEdit { background:#2a2a2a; color:#e0e0e0; border:1px solid #555; padding:2px; }"
+            "QSpinBox { background:#2a2a2a; color:#e0e0e0; border:1px solid #555; }"
+            "QPushButton { background:#333; color:#e0e0e0; border:1px solid #555; padding:4px 14px; border-radius:3px; }"
+            "QPushButton:hover:enabled { background:#444; }");
+    }
 
-    /* ── Internal Networks (Graph) ─────────────────────────────────── */
+    QVBoxLayout *main = new QVBoxLayout(&dlg);
+    main->setSpacing(8);
+    main->setContentsMargins(14, 10, 14, 10);
+
     QGroupBox *netGrp = new QGroupBox("Internal Networks (Graph)");
     QVBoxLayout *netBox = new QVBoxLayout(netGrp);
     netBox->setSpacing(6);
@@ -4367,7 +5038,6 @@ void MainWindow::showSettingsDialog()
         snSetBitsBtn->setEnabled(valid);
         if (valid) snBits->setValue(m_internalSubnets[row].bits);
     });
-
     QObject::connect(snSetBitsBtn, &QPushButton::clicked, [&]() {
         int row = snList->currentRow();
         if (row < 0 || row >= (int)m_internalSubnets.size()) return;
@@ -4376,21 +5046,18 @@ void MainWindow::showSettingsDialog()
         snList->setCurrentRow(row);
         if (m_graphWidget) m_graphWidget->setInternalSubnets(m_internalSubnets);
     });
-
     QObject::connect(snAddBtn, &QPushButton::clicked, [&]() {
         QString prefix = snIpEdit->text().trimmed();
-        int bits = snBits->value();
         if (prefix.isEmpty()) return;
         GraphWidget::InternalSubnet sn;
         sn.prefix  = prefix;
-        sn.bits    = bits;
+        sn.bits    = snBits->value();
         sn.builtIn = false;
         m_internalSubnets.append(sn);
         rebuildSnList();
         snIpEdit->clear();
         if (m_graphWidget) m_graphWidget->setInternalSubnets(m_internalSubnets);
     });
-
     QObject::connect(snRemoveBtn, &QPushButton::clicked, [&]() {
         int row = snList->currentRow();
         if (row < 0 || row >= (int)m_internalSubnets.size()) return;
@@ -4404,12 +5071,107 @@ void MainWindow::showSettingsDialog()
 
     main->addWidget(netGrp);
 
-    /* ── Graph Thresholds ───────────────────────────────────────────── */
+    QHBoxLayout *btnRow = new QHBoxLayout;
+    btnRow->addStretch();
+    QPushButton *closeBtn = new QPushButton("Close");
+    btnRow->addWidget(closeBtn);
+    main->addLayout(btnRow);
+    QObject::connect(closeBtn, &QPushButton::clicked, &dlg, &QDialog::accept);
+
+    dlg.exec();
+    savePreferences();
+}
+
+/* ── Performance sub-dialog ─────────────────────────────────────────────── */
+void MainWindow::showPerformanceDialog()
+{
+    bool dark = isDarkTheme();
+    QDialog dlg(this);
+    dlg.setWindowTitle("Performance");
+    dlg.setMinimumWidth(420);
+
+    if (dark) {
+        dlg.setStyleSheet(
+            "QDialog { background:#1e1e1e; color:#e0e0e0; }"
+            "QLabel { color:#e0e0e0; }"
+            "QGroupBox { color:#e0e0e0; border:1px solid #444; border-radius:4px; margin-top:8px; }"
+            "QGroupBox::title { subcontrol-origin:margin; left:10px; padding:0 4px; color:#90caf9; }"
+            "QCheckBox { color:#e0e0e0; }"
+            "QPushButton { background:#333; color:#e0e0e0; border:1px solid #555; padding:4px 14px; border-radius:3px; }"
+            "QPushButton:hover:enabled { background:#444; }");
+    }
+
+    QVBoxLayout *main = new QVBoxLayout(&dlg);
+    main->setSpacing(8);
+    main->setContentsMargins(14, 10, 14, 10);
+
+    QGroupBox *perfGrp = new QGroupBox("Performance");
+    QVBoxLayout *perfBox = new QVBoxLayout(perfGrp);
+    perfBox->setSpacing(6);
+
+    QCheckBox *l2Chk = new QCheckBox("Enable Layer-2 / LLC analysis");
+    l2Chk->setToolTip("Scans the full capture for MAC-layer protocol breakdown (EtherType, LLC DSAP/SSAP).\n"
+                      "Disable if clicking MAC connections is slow on large captures.");
+    l2Chk->setChecked(m_enableL2Analysis);
+
+    QCheckBox *transportChk = new QCheckBox("Enable TCP / UDP transport statistics");
+    transportChk->setToolTip("Scans the full capture for per-flow TCP/UDP metrics (window size, RTT, payload stats).\n"
+                             "Disable if Transport Details dialogs are slow on large captures.");
+    transportChk->setChecked(m_enableTransportStats);
+
+    QCheckBox *deepChk = new QCheckBox("Enable protocol deep inspection");
+    deepChk->setToolTip("Scans the full capture for protocol-specific information (TLS, HTTP, SMB, DNS, …).\n"
+                        "Disable to suppress per-protocol info dialogs on large captures.");
+    deepChk->setChecked(m_enableDeepInspection);
+
+    perfBox->addWidget(l2Chk);
+    perfBox->addWidget(transportChk);
+    perfBox->addWidget(deepChk);
+    main->addWidget(perfGrp);
+
+    QHBoxLayout *btnRow = new QHBoxLayout;
+    btnRow->addStretch();
+    QPushButton *closeBtn = new QPushButton("Close");
+    btnRow->addWidget(closeBtn);
+    main->addLayout(btnRow);
+
+    QObject::connect(l2Chk,        &QCheckBox::toggled, [&](bool on) { m_enableL2Analysis     = on; });
+    QObject::connect(transportChk, &QCheckBox::toggled, [&](bool on) { m_enableTransportStats = on; });
+    QObject::connect(deepChk,      &QCheckBox::toggled, [&](bool on) { m_enableDeepInspection = on; });
+    QObject::connect(closeBtn, &QPushButton::clicked, &dlg, &QDialog::accept);
+
+    dlg.exec();
+    savePreferences();
+}
+
+/* ── Graph Thresholds sub-dialog ────────────────────────────────────────── */
+void MainWindow::showGraphThresholdsDialog()
+{
+    bool dark = isDarkTheme();
+    QDialog dlg(this);
+    dlg.setWindowTitle("Graph Thresholds");
+    dlg.setMinimumWidth(400);
+
+    if (dark) {
+        dlg.setStyleSheet(
+            "QDialog { background:#1e1e1e; color:#e0e0e0; }"
+            "QLabel { color:#e0e0e0; }"
+            "QGroupBox { color:#e0e0e0; border:1px solid #444; border-radius:4px; margin-top:8px; }"
+            "QGroupBox::title { subcontrol-origin:margin; left:10px; padding:0 4px; color:#90caf9; }"
+            "QComboBox { background:#333; color:#e0e0e0; border:1px solid #555; }"
+            "QPushButton { background:#333; color:#e0e0e0; border:1px solid #555; padding:4px 14px; border-radius:3px; }"
+            "QPushButton:hover:enabled { background:#444; }"
+            "QPushButton:disabled { color:#555; border-color:#444; background:#2a2a2a; }");
+    }
+
+    QVBoxLayout *main = new QVBoxLayout(&dlg);
+    main->setSpacing(8);
+    main->setContentsMargins(14, 10, 14, 10);
+
     QGroupBox *threshGrp = new QGroupBox("Graph Thresholds");
     QVBoxLayout *threshBox = new QVBoxLayout(threshGrp);
     threshBox->setSpacing(6);
 
-    /* Active group selector */
     QHBoxLayout *activeRow = new QHBoxLayout;
     QLabel *activeLabel = new QLabel("Active group:");
     QComboBox *activeCombo = new QComboBox;
@@ -4420,11 +5182,10 @@ void MainWindow::showSettingsDialog()
     activeRow->addWidget(activeCombo, 1);
     threshBox->addLayout(activeRow);
 
-    /* Buttons row */
     QHBoxLayout *threshBtnRow = new QHBoxLayout;
-    QPushButton *editGroupBtn  = new QPushButton("Edit\u2026");
-    QPushButton *addGroupBtn   = new QPushButton("+ Add Group");
-    QPushButton *delGroupBtn   = new QPushButton("Delete");
+    QPushButton *editGroupBtn = new QPushButton("Edit…");
+    QPushButton *addGroupBtn  = new QPushButton("+ Add Group");
+    QPushButton *delGroupBtn  = new QPushButton("Delete");
     delGroupBtn->setToolTip("Delete selected group (built-in profiles cannot be deleted)");
     delGroupBtn->setEnabled(activeCombo->currentIndex() >= 3);
     threshBtnRow->addWidget(editGroupBtn);
@@ -4434,26 +5195,27 @@ void MainWindow::showSettingsDialog()
     threshBox->addLayout(threshBtnRow);
     main->addWidget(threshGrp);
 
-    /* Wiring */
+    QHBoxLayout *btnRow = new QHBoxLayout;
+    btnRow->addStretch();
+    QPushButton *closeBtn = new QPushButton("Close");
+    btnRow->addWidget(closeBtn);
+    main->addLayout(btnRow);
+
     QObject::connect(activeCombo, QOverload<int>::of(&QComboBox::currentIndexChanged), [&](int idx) {
         delGroupBtn->setEnabled(idx >= 3);
         m_activeThresholdGroup = idx;
         if (m_graphWidget && idx >= 0 && idx < m_thresholdGroups.size())
             m_graphWidget->setThresholds(m_thresholdGroups[idx]);
     });
-
     QObject::connect(editGroupBtn, &QPushButton::clicked, [&]() {
         int idx = activeCombo->currentIndex();
         if (idx < 0 || idx >= m_thresholdGroups.size()) return;
         showThresholdGroupEditor(m_thresholdGroups[idx].name);
-        /* Refresh combo text (name may have changed for non-default groups) */
         for (int i = 0; i < m_thresholdGroups.size(); i++)
             activeCombo->setItemText(i, m_thresholdGroups[i].name);
     });
-
     QObject::connect(addGroupBtn, &QPushButton::clicked, [&]() {
-        showThresholdGroupEditor(QString());  /* empty = create new */
-        /* Rebuild combo */
+        showThresholdGroupEditor(QString());
         activeCombo->blockSignals(true);
         activeCombo->clear();
         for (const auto &g : m_thresholdGroups)
@@ -4462,12 +5224,10 @@ void MainWindow::showSettingsDialog()
         activeCombo->blockSignals(false);
         delGroupBtn->setEnabled(m_activeThresholdGroup > 0);
     });
-
     QObject::connect(delGroupBtn, &QPushButton::clicked, [&]() {
         int idx = activeCombo->currentIndex();
         if (idx < 3 || idx >= m_thresholdGroups.size()) return;
-        auto reply = QMessageBox::question(&dlg,
-            "Delete Threshold Group",
+        auto reply = QMessageBox::question(&dlg, "Delete Threshold Group",
             QString("Delete group \"%1\"?").arg(m_thresholdGroups[idx].name),
             QMessageBox::Yes | QMessageBox::Cancel, QMessageBox::Cancel);
         if (reply != QMessageBox::Yes) return;
@@ -4482,23 +5242,210 @@ void MainWindow::showSettingsDialog()
         delGroupBtn->setEnabled(activeCombo->currentIndex() >= 3);
         if (m_graphWidget) m_graphWidget->setThresholds(m_thresholdGroups[0]);
     });
+    QObject::connect(closeBtn, &QPushButton::clicked, &dlg, &QDialog::accept);
 
-    /* ── Reports ────────────────────────────────────────────────────── */
-    QGroupBox *reportGrp = new QGroupBox("Reports");
-    QVBoxLayout *reportBox = new QVBoxLayout(reportGrp);
-    QPushButton *cfgReportBtn = new QPushButton("Configure Reports\u2026");
-    cfgReportBtn->setToolTip("Set cover page metadata: company name, author, project, comments, and paper size");
-    reportBox->addWidget(cfgReportBtn);
-    main->addWidget(reportGrp);
+    dlg.exec();
+    savePreferences();
+}
 
-    /* ── About ─────────────────────────────────────────────────────── */
-    static const char *PC_VERSION = "v.0.5.1";
+/* ── WiFi Thresholds sub-dialog ─────────────────────────────────────────── */
+void MainWindow::showWifiThresholdsDialog()
+{
+    bool dark = isDarkTheme();
+    QDialog dlg(this);
+    dlg.setWindowTitle("WiFi Thresholds");
+    dlg.setMinimumWidth(400);
+
+    if (dark) {
+        dlg.setStyleSheet(
+            "QDialog { background:#1e1e1e; color:#e0e0e0; }"
+            "QLabel { color:#e0e0e0; }"
+            "QGroupBox { color:#e0e0e0; border:1px solid #444; border-radius:4px; margin-top:8px; }"
+            "QGroupBox::title { subcontrol-origin:margin; left:10px; padding:0 4px; color:#90caf9; }"
+            "QComboBox { background:#333; color:#e0e0e0; border:1px solid #555; }"
+            "QPushButton { background:#333; color:#e0e0e0; border:1px solid #555; padding:4px 14px; border-radius:3px; }"
+            "QPushButton:hover:enabled { background:#444; }"
+            "QPushButton:disabled { color:#555; border-color:#444; background:#2a2a2a; }");
+    }
+
+    QVBoxLayout *main = new QVBoxLayout(&dlg);
+    main->setSpacing(8);
+    main->setContentsMargins(14, 10, 14, 10);
+
+    QGroupBox *threshGrp = new QGroupBox("WiFi Signal Quality Thresholds");
+    QVBoxLayout *threshBox = new QVBoxLayout(threshGrp);
+    threshBox->setSpacing(6);
+
+    QLabel *note = new QLabel(
+        "Controls the RSSI (dBm) boundaries used to colour Wi-Fi connections and the legend.\n"
+        "Default: Excellent ≥ −60, Good ≥ −65, Fair ≥ −70, Poor below −70.");
+    note->setWordWrap(true);
+    note->setStyleSheet(dark ? "color:#aaa; font-size:8pt;" : "color:#555; font-size:8pt;");
+    threshBox->addWidget(note);
+
+    QHBoxLayout *activeRow = new QHBoxLayout;
+    QLabel *activeLabel = new QLabel("Active group:");
+    QComboBox *activeCombo = new QComboBox;
+    for (const auto &g : m_wifiThresholdGroups)
+        activeCombo->addItem(g.name);
+    activeCombo->setCurrentIndex(m_activeWifiThresholdGroup);
+    activeRow->addWidget(activeLabel);
+    activeRow->addWidget(activeCombo, 1);
+    threshBox->addLayout(activeRow);
+
+    QHBoxLayout *btnRow2 = new QHBoxLayout;
+    QPushButton *editGroupBtn = new QPushButton("Edit…");
+    QPushButton *addGroupBtn  = new QPushButton("+ Add Group");
+    QPushButton *delGroupBtn  = new QPushButton("Delete");
+    delGroupBtn->setToolTip("Delete the selected group (Default cannot be deleted)");
+    delGroupBtn->setEnabled(m_activeWifiThresholdGroup > 0);
+    btnRow2->addWidget(editGroupBtn);
+    btnRow2->addWidget(addGroupBtn);
+    btnRow2->addWidget(delGroupBtn);
+    btnRow2->addStretch();
+    threshBox->addLayout(btnRow2);
+    main->addWidget(threshGrp);
+
+    QHBoxLayout *closeRow = new QHBoxLayout;
+    closeRow->addStretch();
+    QPushButton *closeBtn = new QPushButton("Close");
+    closeRow->addWidget(closeBtn);
+    main->addLayout(closeRow);
+
+    QObject::connect(activeCombo, QOverload<int>::of(&QComboBox::currentIndexChanged), [&](int idx) {
+        delGroupBtn->setEnabled(idx > 0);
+        m_activeWifiThresholdGroup = idx;
+        if (m_circleWidget && idx >= 0 && idx < m_wifiThresholdGroups.size())
+            m_circleWidget->setWifiThresholds(m_wifiThresholdGroups[idx]);
+        updateLegend();
+    });
+    QObject::connect(editGroupBtn, &QPushButton::clicked, [&]() {
+        int idx = activeCombo->currentIndex();
+        if (idx < 0 || idx >= m_wifiThresholdGroups.size()) return;
+        showWifiThresholdGroupEditor(m_wifiThresholdGroups[idx].name);
+        for (int i = 0; i < m_wifiThresholdGroups.size(); i++)
+            activeCombo->setItemText(i, m_wifiThresholdGroups[i].name);
+        updateLegend();
+    });
+    QObject::connect(addGroupBtn, &QPushButton::clicked, [&]() {
+        showWifiThresholdGroupEditor(QString());
+        activeCombo->blockSignals(true);
+        activeCombo->clear();
+        for (const auto &g : m_wifiThresholdGroups)
+            activeCombo->addItem(g.name);
+        activeCombo->setCurrentIndex(m_activeWifiThresholdGroup);
+        activeCombo->blockSignals(false);
+        delGroupBtn->setEnabled(m_activeWifiThresholdGroup > 0);
+    });
+    QObject::connect(delGroupBtn, &QPushButton::clicked, [&]() {
+        int idx = activeCombo->currentIndex();
+        if (idx <= 0 || idx >= m_wifiThresholdGroups.size()) return;
+        auto reply = QMessageBox::question(&dlg, "Delete WiFi Threshold Group",
+            QString("Delete group \"%1\"?").arg(m_wifiThresholdGroups[idx].name),
+            QMessageBox::Yes | QMessageBox::Cancel, QMessageBox::Cancel);
+        if (reply != QMessageBox::Yes) return;
+        m_wifiThresholdGroups.removeAt(idx);
+        m_activeWifiThresholdGroup = 0;
+        activeCombo->blockSignals(true);
+        activeCombo->clear();
+        for (const auto &g : m_wifiThresholdGroups)
+            activeCombo->addItem(g.name);
+        activeCombo->setCurrentIndex(0);
+        activeCombo->blockSignals(false);
+        delGroupBtn->setEnabled(false);
+        if (m_circleWidget)
+            m_circleWidget->setWifiThresholds(m_wifiThresholdGroups[0]);
+        updateLegend();
+    });
+    QObject::connect(closeBtn, &QPushButton::clicked, &dlg, &QDialog::accept);
+
+    dlg.exec();
+    savePreferences();
+}
+
+/* ── Reset All Settings sub-dialog ─────────────────────────────────────── */
+void MainWindow::showResetSettingsDialog()
+{
+    auto reply = QMessageBox::question(this,
+        "Reset Settings",
+        "Reset all window, display, and integration settings to their defaults?\n\n"
+        "ntopng connection settings (host, port, credentials) are preserved.",
+        QMessageBox::Yes | QMessageBox::Cancel, QMessageBox::Cancel);
+    if (reply != QMessageBox::Yes) return;
+
+    QFile::remove(preferencesFilePath());
+
+    m_topN           = 10;
+    m_useBytes       = FALSE;
+    m_useMAC         = FALSE;
+    m_ntopEnabled    = true;
+    m_malcolmEnabled = false;
+
+    if (m_top10Btn)  m_top10Btn->setChecked(true);
+    if (m_top25Btn)  m_top25Btn->setChecked(false);
+    if (m_top50Btn)  m_top50Btn->setChecked(false);
+    if (m_packetsBtn) m_packetsBtn->setChecked(true);
+    if (m_bytesBtn)   m_bytesBtn->setChecked(false);
+    if (m_ipBtn)  m_ipBtn->setChecked(true);
+    if (m_macBtn) m_macBtn->setChecked(false);
+    if (m_circleBtn) m_circleBtn->setChecked(true);
+    if (m_tableBtn)  m_tableBtn->setChecked(false);
+    if (m_viewStack) m_viewStack->setCurrentIndex(0);
+    if (m_lineThicknessCheckBox) m_lineThicknessCheckBox->setChecked(false);
+    updateSearchBarForMode();
+
+    if (m_sendToNtopBtn)    m_sendToNtopBtn->setVisible(true);
+    if (m_sendToMalcolmBtn) m_sendToMalcolmBtn->setVisible(false);
+
+    m_enableL2Analysis     = true;
+    m_enableTransportStats = true;
+    m_enableDeepInspection = true;
+
+    resize(1280, 780);
+
+    m_thresholdGroups.clear();
+    m_thresholdGroups.append(GraphWidget::GraphThresholds::defaults());
+    m_thresholdGroups.append(GraphWidget::GraphThresholds::strict());
+    m_thresholdGroups.append(GraphWidget::GraphThresholds::tolerant());
+    m_activeThresholdGroup = 0;
+    if (m_graphWidget) m_graphWidget->setThresholds(m_thresholdGroups[0]);
+
+    m_wifiThresholdGroups.clear();
+    m_wifiThresholdGroups.append(CircleWidget::WifiThresholds::defaults());
+    m_activeWifiThresholdGroup = 0;
+    if (m_circleWidget) m_circleWidget->setWifiThresholds(m_wifiThresholdGroups[0]);
+    updateLegend();
+
+    savePreferences();
+    QMessageBox::information(this, "Reset Complete", "Settings have been reset to defaults.");
+}
+
+/* ── About sub-dialog ───────────────────────────────────────────────────── */
+void MainWindow::showAboutDialog()
+{
+    bool dark = isDarkTheme();
+    QDialog dlg(this);
+    dlg.setWindowTitle(QString("About PacketCircle %1").arg(QLatin1String(PC_VERSION)));
+    dlg.setMinimumWidth(460);
+
+    if (dark) {
+        dlg.setStyleSheet(
+            "QDialog { background:#1e1e1e; color:#e0e0e0; }"
+            "QLabel { color:#e0e0e0; }"
+            "QGroupBox { color:#e0e0e0; border:1px solid #444; border-radius:4px; margin-top:8px; }"
+            "QGroupBox::title { subcontrol-origin:margin; left:10px; padding:0 4px; color:#90caf9; }"
+            "QPushButton { background:#333; color:#e0e0e0; border:1px solid #555; padding:4px 14px; border-radius:3px; }"
+            "QPushButton:hover:enabled { background:#444; }");
+    }
+
+    QVBoxLayout *main = new QVBoxLayout(&dlg);
+    main->setSpacing(8);
+    main->setContentsMargins(14, 10, 14, 10);
 
     QGroupBox *aboutGrp = new QGroupBox("About");
     QVBoxLayout *aboutBox = new QVBoxLayout(aboutGrp);
     aboutBox->setSpacing(5);
 
-    /* Version / platform / Qt */
     const QString platform =
 #if defined(Q_OS_MACOS)
         "macOS Universal";
@@ -4509,13 +5456,13 @@ void MainWindow::showSettingsDialog()
 #else
         "Unknown platform";
 #endif
+
     QLabel *verLabel = new QLabel(
         QString("<b>PacketCircle %1</b> &nbsp;&middot;&nbsp; %2 &nbsp;&middot;&nbsp; Qt %3")
         .arg(QLatin1String(PC_VERSION), platform, QLatin1String(QT_VERSION_STR)));
     verLabel->setTextFormat(Qt::RichText);
     aboutBox->addWidget(verLabel);
 
-    /* Plugin file installation check */
     QStringList pluginSearchPaths = {
         QDir::homePath() + "/.local/lib/wireshark/plugins/4-6/epan/packetcircle.so",
         QDir::homePath() + "/.local/lib/wireshark/plugins/4.6/epan/packetcircle.so",
@@ -4541,13 +5488,11 @@ void MainWindow::showSettingsDialog()
         ? QString("<span style='color:%1;'>&#9888; Plugin file not found at expected location</span>")
             .arg(dark ? "#f0c040" : "#b07800")
         : QString("<span style='color:%1;'>&#10003; %2</span>")
-            .arg(dark ? "#6ec96e" : "#27ae60",
-                 foundPluginPath.toHtmlEscaped()));
+            .arg(dark ? "#6ec96e" : "#27ae60", foundPluginPath.toHtmlEscaped()));
     pathLabel->setTextFormat(Qt::RichText);
     pathLabel->setWordWrap(true);
     aboutBox->addWidget(pathLabel);
 
-    /* GitHub update check */
     QHBoxLayout *updateRow = new QHBoxLayout;
     QPushButton *checkUpdateBtn  = new QPushButton("Check for Updates");
     QLabel      *updateStatusLbl = new QLabel("");
@@ -4558,134 +5503,27 @@ void MainWindow::showSettingsDialog()
     aboutBox->addLayout(updateRow);
 
     main->addWidget(aboutGrp);
-
     main->addStretch();
 
-    /* ── Close — outside the scroll area so it is always visible ─── */
     QHBoxLayout *btnRow = new QHBoxLayout;
-    btnRow->setContentsMargins(14, 4, 14, 0);
     btnRow->addStretch();
     QPushButton *closeBtn = new QPushButton("Close");
     btnRow->addWidget(closeBtn);
-    outerLayout->addLayout(btnRow);
+    main->addLayout(btnRow);
 
-    /* ── Wiring ─────────────────────────────────────────────────────── */
-
-    /* ntopng checkbox toggles button + main window NTOP button */
-    QObject::connect(ntopChk, &QCheckBox::toggled, [&](bool on) {
-        cfgNtopBtn->setEnabled(on);
-        m_ntopEnabled = on;
-        if (m_sendToNtopBtn) m_sendToNtopBtn->setVisible(on);
-    });
-
-    QObject::connect(cfgNtopBtn, &QPushButton::clicked, [&]() {
-        showNtopngConfigDialog();
-    });
-
-    /* Malcolm / Arkime checkbox toggles button + main window Malcolm button */
-    QObject::connect(malcolmChk, &QCheckBox::toggled, [&](bool on) {
-        cfgMalcolmBtn->setEnabled(on);
-        m_malcolmEnabled = on;
-        if (m_sendToMalcolmBtn) m_sendToMalcolmBtn->setVisible(on);
-    });
-
-    QObject::connect(cfgMalcolmBtn, &QPushButton::clicked, [&]() {
-        showMalcolmConfigDialog();
-    });
-
-    QObject::connect(cfgReportBtn, &QPushButton::clicked, [&]() {
-        showReportConfigDialog();
-    });
-
-    QObject::connect(cfgCertBtn, &QPushButton::clicked, [&]() {
-        showCaCertConfigDialog();
-    });
-
-    QObject::connect(resetBtn, &QPushButton::clicked, [&]() {
-        auto reply = QMessageBox::question(&dlg,
-            "Reset Settings",
-            "Reset all window, display, and integration settings to their defaults?\n\n"
-            "ntopng connection settings (host, port, credentials) are preserved.",
-            QMessageBox::Yes | QMessageBox::Cancel,
-            QMessageBox::Cancel);
-        if (reply != QMessageBox::Yes) return;
-
-        /* Delete the INI file — next load will use all defaults */
-        QFile::remove(preferencesFilePath());
-
-        /* Reset display members */
-        m_topN    = 10;
-        m_useBytes = FALSE;
-        m_useMAC   = FALSE;
-        m_ntopEnabled    = true;
-        m_malcolmEnabled = false;
-
-        /* Reset toolbar controls */
-        if (m_top10Btn)  m_top10Btn->setChecked(true);
-        if (m_top25Btn)  m_top25Btn->setChecked(false);
-        if (m_top50Btn)  m_top50Btn->setChecked(false);
-        if (m_packetsBtn) m_packetsBtn->setChecked(true);
-        if (m_bytesBtn)   m_bytesBtn->setChecked(false);
-        if (m_ipBtn)  m_ipBtn->setChecked(true);
-        if (m_macBtn) m_macBtn->setChecked(false);
-        if (m_circleBtn) m_circleBtn->setChecked(true);
-        if (m_tableBtn)  m_tableBtn->setChecked(false);
-        if (m_viewStack) m_viewStack->setCurrentIndex(0);
-        if (m_lineThicknessCheckBox) m_lineThicknessCheckBox->setChecked(false);
-        updateSearchBarForMode();
-
-        /* Reset integrations */
-        if (m_sendToNtopBtn)    m_sendToNtopBtn->setVisible(true);
-        if (m_sendToMalcolmBtn) m_sendToMalcolmBtn->setVisible(false);
-        ntopChk->setChecked(true);
-        cfgNtopBtn->setEnabled(true);
-        malcolmChk->setChecked(false);
-        cfgMalcolmBtn->setEnabled(false);
-
-        /* Reset performance */
-        m_enableL2Analysis     = true;
-        m_enableTransportStats = true;
-        m_enableDeepInspection = true;
-        l2Chk->setChecked(true);
-        transportChk->setChecked(true);
-        deepChk->setChecked(true);
-
-        /* Reset window size */
-        resize(1280, 780);
-
-        /* Reset threshold groups to built-in profiles only */
-        m_thresholdGroups.clear();
-        m_thresholdGroups.append(GraphWidget::GraphThresholds::defaults());
-        m_thresholdGroups.append(GraphWidget::GraphThresholds::strict());
-        m_thresholdGroups.append(GraphWidget::GraphThresholds::tolerant());
-        m_activeThresholdGroup = 0;
-        activeCombo->clear();
-        activeCombo->addItem("Default");
-        if (m_graphWidget) m_graphWidget->setThresholds(m_thresholdGroups[0]);
-
-        QMessageBox::information(&dlg, "Reset Complete",
-            "Settings have been reset to defaults.");
-    });
-
-    /* Performance checkboxes update flags immediately */
-    QObject::connect(l2Chk,        &QCheckBox::toggled, [&](bool on) { m_enableL2Analysis     = on; });
-    QObject::connect(transportChk, &QCheckBox::toggled, [&](bool on) { m_enableTransportStats = on; });
-    QObject::connect(deepChk,      &QCheckBox::toggled, [&](bool on) { m_enableDeepInspection = on; });
-
-    /* GitHub update check — async, safe against dialog close before reply */
     QObject::connect(checkUpdateBtn, &QPushButton::clicked,
                      [this, checkUpdateBtn, updateStatusLbl]() {
         QPointer<QPushButton> safeBtn(checkUpdateBtn);
         QPointer<QLabel>      safeLbl(updateStatusLbl);
 
         if (safeBtn) safeBtn->setEnabled(false);
-        if (safeLbl) safeLbl->setText("Checking\u2026");
+        if (safeLbl) safeLbl->setText("Checking…");
 
         if (!m_networkManager)
             m_networkManager = new QNetworkAccessManager(this);
 
         QNetworkRequest req(QUrl("https://api.github.com/repos/netwho/PacketCircle/releases/latest"));
-        req.setHeader(QNetworkRequest::UserAgentHeader, "PacketCircle/0.5.1");
+        req.setHeader(QNetworkRequest::UserAgentHeader, QString("PacketCircle/%1").arg(QLatin1String(PC_VERSION + 2)));
         req.setRawHeader("Accept", "application/vnd.github.v3+json");
 
         QNetworkReply *reply = m_networkManager->get(req);
@@ -4693,7 +5531,7 @@ void MainWindow::showSettingsDialog()
                          [reply, safeBtn, safeLbl]() mutable {
             reply->deleteLater();
             if (safeBtn) safeBtn->setEnabled(true);
-            if (!safeLbl) return; /* dialog was closed before reply arrived */
+            if (!safeLbl) return;
 
             if (reply->error() != QNetworkReply::NoError) {
                 safeLbl->setText(
@@ -4709,14 +5547,12 @@ void MainWindow::showSettingsDialog()
                 return;
             }
 
-            /* Normalise "v.0.5.1" / "v0.5.1" → "0.5.1" */
             auto strip = [](const QString &s) {
                 QString r = s.toLower();
                 if (r.startsWith("v.")) return r.mid(2);
                 if (r.startsWith("v"))  return r.mid(1);
                 return r;
             };
-            /* Numeric semver comparison — returns true if remote > current */
             auto isNewer = [&](const QString &remote, const QString &current) {
                 auto parts = [](const QString &v) {
                     QList<int> out;
@@ -4736,17 +5572,13 @@ void MainWindow::showSettingsDialog()
             if (!isNewer(strip(tag), strip(QString(PC_VERSION)))) {
                 safeLbl->setText("<span style='color:#6ec96e;'>&#10003; Up to date</span>");
             } else {
-                /* Newer version on GitHub — offer installer.zip download */
                 static const QString dlUrl =
                     "https://raw.githubusercontent.com/netwho/PacketCircle/main/installer.zip";
                 auto reply2 = QMessageBox::question(
-                    nullptr,
-                    "Update Available",
-                    QString("PacketCircle %1 is available (you have %2).\n\n"
-                            "Download installer.zip now?")
+                    nullptr, "Update Available",
+                    QString("PacketCircle %1 is available (you have %2).\n\nDownload installer.zip now?")
                     .arg(tag, QLatin1String(PC_VERSION)),
-                    QMessageBox::Yes | QMessageBox::No,
-                    QMessageBox::Yes);
+                    QMessageBox::Yes | QMessageBox::No, QMessageBox::Yes);
                 if (reply2 == QMessageBox::Yes)
                     QDesktopServices::openUrl(QUrl(dlUrl));
                 safeLbl->setText(
@@ -4756,13 +5588,10 @@ void MainWindow::showSettingsDialog()
         });
     });
 
-    QObject::connect(closeBtn, &QPushButton::clicked, &dlg, &QDialog::reject);
-
+    QObject::connect(closeBtn, &QPushButton::clicked, &dlg, &QDialog::accept);
     dlg.exec();
-
-    /* Persist whatever state the checkboxes were left in */
-    savePreferences();
 }
+
 
 /* ── Graph threshold group persistence ──────────────────────────────────────
  * Groups are stored in the same INI file.
@@ -4846,6 +5675,153 @@ void MainWindow::loadThresholdGroups()
         m_thresholdGroups.append(t);
     }
     settings.endArray();
+}
+
+/* ── WiFi threshold group save / load ───────────────────────────────────── */
+void MainWindow::saveWifiThresholdGroups()
+{
+    QSettings settings(preferencesFilePath(), QSettings::IniFormat);
+    settings.beginWriteArray("wifiThresholds");
+    int writeIdx = 0;
+    for (int i = 1; i < m_wifiThresholdGroups.size(); i++) {   /* skip index 0 (Default, builtIn) */
+        settings.setArrayIndex(writeIdx++);
+        const auto &t = m_wifiThresholdGroups[i];
+        settings.setValue("name",           t.name);
+        settings.setValue("rssi_excellent", t.rssi_excellent);
+        settings.setValue("rssi_good",      t.rssi_good);
+        settings.setValue("rssi_fair",      t.rssi_fair);
+    }
+    settings.endArray();
+}
+
+void MainWindow::loadWifiThresholdGroups()
+{
+    QSettings settings(preferencesFilePath(), QSettings::IniFormat);
+    m_wifiThresholdGroups.clear();
+    m_wifiThresholdGroups.append(CircleWidget::WifiThresholds::defaults()); /* index 0 always Default */
+
+    int count = settings.beginReadArray("wifiThresholds");
+    for (int i = 0; i < count; i++) {
+        settings.setArrayIndex(i);
+        CircleWidget::WifiThresholds t = CircleWidget::WifiThresholds::defaults();
+        t.name           = settings.value("name", QString("Group %1").arg(i + 1)).toString();
+        t.builtIn        = false;
+        t.rssi_excellent = settings.value("rssi_excellent", t.rssi_excellent).toInt();
+        t.rssi_good      = settings.value("rssi_good",      t.rssi_good).toInt();
+        t.rssi_fair      = settings.value("rssi_fair",      t.rssi_fair).toInt();
+        m_wifiThresholdGroups.append(t);
+    }
+    settings.endArray();
+}
+
+/* ── WiFi threshold group editor dialog ─────────────────────────────────────
+ * groupName.isEmpty() → create new group (cloned from Default).
+ * Otherwise, edit the existing group with that name.                         */
+void MainWindow::showWifiThresholdGroupEditor(const QString &groupName)
+{
+    int editIdx = -1;
+    CircleWidget::WifiThresholds working = CircleWidget::WifiThresholds::defaults();
+    bool isNew = groupName.isEmpty();
+
+    if (!isNew) {
+        for (int i = 0; i < m_wifiThresholdGroups.size(); i++) {
+            if (m_wifiThresholdGroups[i].name == groupName) { editIdx = i; working = m_wifiThresholdGroups[i]; break; }
+        }
+        if (editIdx < 0) return;
+    } else {
+        working.name    = "New Group";
+        working.builtIn = false;
+    }
+
+    bool isBuiltIn = (!isNew && working.builtIn);
+
+    QDialog dlg(this);
+    dlg.setWindowTitle(isNew ? "Add WiFi Threshold Group"
+                             : (isBuiltIn ? QString("View — %1 (read-only)").arg(working.name)
+                                          : "Edit WiFi Threshold Group"));
+    dlg.setMinimumWidth(400);
+
+    QVBoxLayout *main = new QVBoxLayout(&dlg);
+    main->setSpacing(8);
+    main->setContentsMargins(12, 12, 12, 12);
+
+    /* Group name */
+    QHBoxLayout *nameRow = new QHBoxLayout;
+    QLineEdit *nameEdit = new QLineEdit(working.name);
+    nameEdit->setReadOnly(isBuiltIn);
+    nameRow->addWidget(new QLabel("Group name:"));
+    nameRow->addWidget(nameEdit, 1);
+    main->addLayout(nameRow);
+
+    /* Threshold spinboxes */
+    QGroupBox *thGrp = new QGroupBox("RSSI Thresholds (dBm)");
+    QFormLayout *thForm = new QFormLayout(thGrp);
+    thForm->setSpacing(6);
+
+    auto addSpin = [&](const QString &label, int val) -> QSpinBox* {
+        QSpinBox *sb = new QSpinBox;
+        sb->setRange(-100, 0);
+        sb->setSuffix(" dBm");
+        sb->setValue(val);
+        sb->setReadOnly(isBuiltIn);
+        sb->setButtonSymbols(isBuiltIn ? QAbstractSpinBox::NoButtons : QAbstractSpinBox::UpDownArrows);
+        thForm->addRow(label, sb);
+        return sb;
+    };
+
+    QLabel *hint = new QLabel("Signal bins: Excellent ≥ excellent_threshold, Good ≥ good_threshold,\n"
+                               "Fair ≥ fair_threshold, Poor below fair_threshold.\n"
+                               "Thresholds must be strictly descending (excellent > good > fair).");
+    hint->setWordWrap(true);
+    hint->setStyleSheet("color: gray; font-size: 8pt;");
+    thForm->addRow(hint);
+
+    QSpinBox *sbExcellent = addSpin("Excellent threshold (≥ X → Excellent):", working.rssi_excellent);
+    QSpinBox *sbGood      = addSpin("Good threshold (≥ X → Good):",           working.rssi_good);
+    QSpinBox *sbFair      = addSpin("Fair threshold (≥ X → Fair):",            working.rssi_fair);
+    main->addWidget(thGrp);
+
+    QDialogButtonBox *bbx;
+    if (isBuiltIn)
+        bbx = new QDialogButtonBox(QDialogButtonBox::Close);
+    else
+        bbx = new QDialogButtonBox(QDialogButtonBox::Save | QDialogButtonBox::Cancel);
+    main->addWidget(bbx);
+
+    if (!isBuiltIn) {
+        QObject::connect(bbx, &QDialogButtonBox::accepted, [&]() {
+            int exc = sbExcellent->value();
+            int gd  = sbGood->value();
+            int fr  = sbFair->value();
+            if (!(exc > gd && gd > fr)) {
+                QMessageBox::warning(&dlg, "Invalid Thresholds",
+                    "Thresholds must be strictly descending:\n"
+                    "Excellent > Good > Fair\n\n"
+                    "Example: Excellent -60, Good -65, Fair -70");
+                return;
+            }
+            working.name           = nameEdit->text().trimmed();
+            if (working.name.isEmpty()) working.name = "Unnamed";
+            if (working.name == "Default") working.name += " (copy)";
+            working.builtIn        = false;
+            working.rssi_excellent = exc;
+            working.rssi_good      = gd;
+            working.rssi_fair      = fr;
+
+            if (isNew) {
+                m_wifiThresholdGroups.append(working);
+                m_activeWifiThresholdGroup = m_wifiThresholdGroups.size() - 1;
+            } else {
+                m_wifiThresholdGroups[editIdx] = working;
+            }
+            if (m_circleWidget && (isNew || editIdx == m_activeWifiThresholdGroup))
+                m_circleWidget->setWifiThresholds(working);
+            dlg.accept();
+        });
+    }
+
+    QObject::connect(bbx, &QDialogButtonBox::rejected, &dlg, &QDialog::reject);
+    dlg.exec();
 }
 
 /* ── Threshold group editor dialog ──────────────────────────────────────────

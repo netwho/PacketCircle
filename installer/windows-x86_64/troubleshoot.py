@@ -659,6 +659,8 @@ def main():
         script_dir = os.path.dirname(os.path.abspath(__file__))
         candidates = [
             os.path.join(script_dir, PLUGIN_NAME),
+            os.path.join(script_dir, "v.0.5.2", PLUGIN_NAME),
+            os.path.join(script_dir, "v.0.4.7", PLUGIN_NAME),
         ]
         appdata = os.environ.get("APPDATA", "")
         if appdata:

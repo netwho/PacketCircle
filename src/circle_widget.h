@@ -54,6 +54,26 @@ public:
     void setWiFiMode(bool wifi);
     QPixmap renderForPDF(int width, int height);
 
+    /* ── WiFi signal-quality threshold groups ─────────────────────────── */
+    struct WifiThresholds {
+        QString name;
+        bool    builtIn      = false;
+        int     rssi_excellent = -60;   /* >= this dBm → Excellent */
+        int     rssi_good      = -65;   /* >= this dBm → Good      */
+        int     rssi_fair      = -70;   /* >= this dBm → Fair      */
+                                        /* below rssi_fair  → Poor  */
+        static WifiThresholds defaults() {
+            WifiThresholds t;
+            t.name          = "Default";
+            t.builtIn       = true;
+            t.rssi_excellent = -60;
+            t.rssi_good      = -65;
+            t.rssi_fair      = -70;
+            return t;
+        }
+    };
+    void setWifiThresholds(const WifiThresholds &t);
+
 signals:
     void pairClicked(comm_pair_t *pair);
     void pairSelectionChanged(QList<comm_pair_t*> selected);
@@ -127,6 +147,7 @@ private:
     bool m_pdfMode;
     bool m_darkTheme;
     bool m_wifiMode;
+    WifiThresholds m_wifiThresholds;
     QString      m_last_hovered_label;
     comm_pair_t *m_hoveredLinePair;  /**< Line currently hovered (nullptr = none) */
 };

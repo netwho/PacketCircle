@@ -4,7 +4,7 @@
 # =============================================================================
 #
 # Supports:
-#   - Installing v.0.5.1 (latest) or v.0.4.7 (stable legacy)
+#   - Installing v.0.5.2 (latest) or v.0.4.7 (stable legacy)
 #   - Two flavors: Standard (default) or Experimental (enables Graph View)
 #   - Detecting an already-installed version
 #   - Upgrading, downgrading, and uninstalling
@@ -23,7 +23,7 @@ set -e
 
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 PLUGIN_NAME="packetcircle.so"
-LATEST_VERSION="0.5.1"
+LATEST_VERSION="0.5.2"
 LEGACY_VERSION="0.4.7"
 
 RED='\033[0;31m'
@@ -38,7 +38,7 @@ printf "\n"
 printf "${BLUE}╔══════════════════════════════════════════════════╗${NC}\n"
 printf "${BLUE}║   PacketCircle Installer for macOS               ║${NC}\n"
 printf "${BLUE}║   Universal Binary (Intel + Apple Silicon)       ║${NC}\n"
-printf "${BLUE}║   Available: v.0.5.1 (latest), v.0.4.7           ║${NC}\n"
+printf "${BLUE}║   Available: v.0.5.2 (latest), v.0.4.7           ║${NC}\n"
 printf "${BLUE}╚══════════════════════════════════════════════════╝${NC}\n"
 printf "\n"
 
@@ -235,7 +235,7 @@ printf "  Binary: %s\n" "$PLUGIN_FILE"
 printf "  Architecture: "
 file "$PLUGIN_FILE" | grep -o "universal binary.*" || file "$PLUGIN_FILE" | grep -o "Mach-O.*"
 
-# --- Feature set selection (v.0.5.1 only) ---
+# --- Feature set selection (v.0.5.2 only) ---
 ENABLE_EXPERIMENTAL=false
 if [ "$SELECTED_VERSION" = "$LATEST_VERSION" ]; then
     printf "\n"
