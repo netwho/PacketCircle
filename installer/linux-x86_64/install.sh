@@ -42,7 +42,7 @@ printf "${BLUE}╔════════════════════�
 printf "${BLUE}║   PacketCircle Installer for Linux               ║${NC}\n"
 printf "${BLUE}║   x86_64 (64-bit Intel/AMD)                      ║${NC}\n"
 printf "${BLUE}║   Supports Wireshark 4.0.x, 4.2.x, 4.4.x, 4.6.x  ║${NC}\n"
-printf "${BLUE}║   Available: v.0.5.3 (latest), v.0.4.7            ║${NC}\n"
+printf "${BLUE}║   Available: v.0.5.3 (latest), v.0.4.7           ║${NC}\n"
 printf "${BLUE}╚══════════════════════════════════════════════════╝${NC}\n"
 printf "\n"
 
@@ -238,18 +238,29 @@ INSTALL_DIR="$HOME/.local/lib/wireshark/plugins/$PLUGIN_PATH_ID/epan"
 printf "\n  Checking for existing PacketCircle installation:\n"
 INSTALLED_VERSION=""
 INSTALLED_PATH=""
-if [ -f "$INSTALL_DIR/$PLUGIN_NAME" ]; then
-    INSTALLED_VERSION=$(strings "$INSTALL_DIR/$PLUGIN_NAME" 2>/dev/null \
-        | grep -oE 'PacketCircle v\.[0-9]+\.[0-9]+\.[0-9]+' | head -1 \
-        | grep -oE '[0-9]+\.[0-9]+\.[0-9]+')
-    INSTALLED_PATH="$INSTALL_DIR/$PLUGIN_NAME"
-    if [ -n "$INSTALLED_VERSION" ]; then
-        printf "    ${GREEN}[FOUND]${NC}   v.%s at %s\n" "$INSTALLED_VERSION" "$INSTALLED_PATH"
-    else
-        printf "    ${YELLOW}[found]${NC}   %s  (no version string in binary)\n" "$INSTALLED_PATH"
+
+for CHECK_DIR in \
+    "$HOME/.local/lib/wireshark/plugins/$PLUGIN_PATH_ID/epan" \
+    "/usr/lib/x86_64-linux-gnu/wireshark/plugins/$PLUGIN_PATH_ID/epan" \
+    "/usr/lib/x86_64-linux-gnu/wireshark/plugins/$PLUGIN_PATH_ID" \
+    "/usr/lib64/wireshark/plugins/$PLUGIN_PATH_ID/epan" \
+    "/usr/lib/wireshark/plugins/$PLUGIN_PATH_ID/epan"; do
+    if [ -f "$CHECK_DIR/$PLUGIN_NAME" ]; then
+        INSTALLED_VERSION=$(strings "$CHECK_DIR/$PLUGIN_NAME" 2>/dev/null \
+            | grep -oE 'PacketCircle v\.[0-9]+\.[0-9]+\.[0-9]+' | head -1 \
+            | grep -oE '[0-9]+\.[0-9]+\.[0-9]+' || true)
+        INSTALLED_PATH="$CHECK_DIR/$PLUGIN_NAME"
+        if [ -n "$INSTALLED_VERSION" ]; then
+            printf "    ${GREEN}[FOUND]${NC}   v.%s at %s\n" "$INSTALLED_VERSION" "$INSTALLED_PATH"
+        else
+            printf "    ${YELLOW}[found]${NC}   %s  (no version string detected)\n" "$INSTALLED_PATH"
+        fi
+        break
     fi
-else
-    printf "    ${GRAY}[none]${NC}    %s  (not installed)\n" "$INSTALL_DIR/$PLUGIN_NAME"
+done
+
+if [ -z "$INSTALLED_PATH" ]; then
+    printf "    ${GRAY}[none]${NC}    no existing installation found\n"
 fi
 
 # --- Qt6 runtime check ---
@@ -274,7 +285,9 @@ if [ "$V047_OK" = "1" ]; then printf "${GREEN}all present${NC}\n"; else printf "
 printf "  Install dir     : %s\n" "$INSTALL_DIR"
 printf "  Installed now   : "
 if [ -n "$INSTALLED_VERSION" ]; then
-    printf "${CYAN}v.%s${NC}\n" "$INSTALLED_VERSION"
+    printf "${CYAN}v.%s${NC}  at %s\n" "$INSTALLED_VERSION" "$INSTALLED_PATH"
+elif [ -n "$INSTALLED_PATH" ]; then
+    printf "${YELLOW}unknown version${NC}  at %s\n" "$INSTALLED_PATH"
 else
     printf "${GRAY}none${NC}\n"
 fi
