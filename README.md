@@ -23,6 +23,8 @@
 
 ▶️ **[Watch the intro video on YouTube](https://youtu.be/jg4O9rdUp_0)** — PacketCircle in action in under 4 minutes.
 
+▶️ **[Watch the v0.5.x update video on YouTube](https://youtu.be/p4OCaTHJlEI?si=5DKXki0Ptnqg4QK-)** — Graph view, settings persistence, Star layout, and the macOS crash fix.
+
 ▶️ **[Watch the v0.4.x feature video on YouTube](https://www.youtube.com/watch?v=Q83vcK8hXJo)** — protocol info dialogs, Wi-Fi mode, bidirectional filtering, and more.
 
 ▶️ **[PacketCircle v0.4.7 Quickstart Training on YouTube](https://youtu.be/f1wBlKo-7nI)** — step-by-step walkthrough for new users.
