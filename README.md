@@ -23,9 +23,7 @@
 
 ▶️ **[Watch the intro video on YouTube](https://youtu.be/jg4O9rdUp_0)** — PacketCircle in action in under 4 minutes.
 
-▶️ **[Watch the v0.4.x feature video on YouTube](https://www.youtube.com/watch?v=Q83vcK8hXJo)** — protocol info dialogs, Wi-Fi mode, bidirectional filtering.
-
-▶️ **[Watch the v0.5.x feature video on YouTube](https://youtu.be/p4OCaTHJlEI?si=yI9d8Ab0xCv0sNDU)** — Graph Mode, Security Workflow & More
+▶️ **[Watch the v0.4.x feature video on YouTube](https://www.youtube.com/watch?v=Q83vcK8hXJo)** — protocol info dialogs, Wi-Fi mode, bidirectional filtering, and more.
 
 ▶️ **[PacketCircle v0.4.7 Quickstart Training on YouTube](https://youtu.be/f1wBlKo-7nI)** — step-by-step walkthrough for new users.
 
