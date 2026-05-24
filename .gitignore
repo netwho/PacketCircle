@@ -6,6 +6,10 @@ build-*/
 *.dylib
 *.a
 
+# Allow prebuilt installer binaries despite the *.so / *.dylib rules above
+!installer/**/*.so
+!installer/**/*.dylib
+
 # CMake
 CMakeCache.txt
 CMakeFiles/
