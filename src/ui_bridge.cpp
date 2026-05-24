@@ -53,23 +53,6 @@ void circle_vis_pump_events(void)
 /* Global main window instance */
 static MainWindow *g_main_window = NULL;
 
-/* Ensure a Qt6 QApplication exists.
- * Wireshark 4.0.x / 4.2.x may use Qt5; in that case Qt6's
- * QApplication::instance() returns nullptr.  We create our own Qt6
- * QApplication so the plugin's widgets can run alongside Wireshark's Qt5 UI.
- */
-static void ensure_qapplication(void)
-{
-    if (!QApplication::instance()) {
-        static char  app_name[] = "packetcircle";
-        static char *argv_buf[] = { app_name, nullptr };
-        static int   argc_buf   = 1;
-        static QApplication *s_app = new QApplication(argc_buf, argv_buf);
-        (void)s_app;
-        qDebug() << "circle_vis: created Qt6 QApplication (Wireshark is using Qt5)";
-    }
-}
-
 #ifdef __cplusplus
 extern "C" {
 #endif
@@ -77,8 +60,6 @@ extern "C" {
 void circle_vis_open_window(capture_file *cf)
 {
     qDebug() << "circle_vis_open_window: called with cf=" << (void*)cf;
-
-    ensure_qapplication();
 
     /* Create or show main window */
     if (!g_main_window) {
@@ -140,8 +121,6 @@ extern "C" void* extract_capture_file(capture_file *cf, void *user_data)
 void circle_vis_reload_data(void)
 {
     qDebug() << "circle_vis_reload_data: called";
-
-    ensure_qapplication();
 
     /* Ensure main window exists */
     if (!g_main_window) {

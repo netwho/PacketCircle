@@ -12,7 +12,7 @@ Get up and running in under 5 minutes.
 
 **git users:** `git clone https://github.com/netwho/PacketCircle.git`
 
-Then run the installer for your platform and follow the prompts. Always choose **v.0.5.2** (latest). v.0.4.7 is the last v0.4.x release.
+Then run the installer for your platform and follow the prompts. Always choose **v.0.5.3** (latest). v.0.4.7 is the last v0.4.x release.
 
 | Platform | From the `installer/` folder |
 |---|---|

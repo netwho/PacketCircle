@@ -309,7 +309,7 @@ GraphWidget::GraphWidget(QWidget *parent)
     , m_protocols(nullptr)
     , m_edgeColorMode(COLOR_PROTOCOL)
     , m_nodeColorMode(NODECOLOR_SERVICE)
-    , m_layoutMode(LAYOUT_FORCE)
+    , m_layoutMode(LAYOUT_STAR)
     , m_useBytes(FALSE)
     , m_showThickness(FALSE)
     , m_darkTheme(true)
@@ -2565,7 +2565,7 @@ void GraphWidget::paintEvent(QPaintEvent *event)
             int lineH = 14;
             int legW  = 145;
             /* Compute hint metrics first so legH reserves the same gap as the node legend */
-            QFont hf; hf.setPointSize(6);
+            QFont hf; hf.setPointSize(9);
             QFontMetrics fmHint(hf);
             int hintGap = fmHint.height() + 14; /* matches node legend bottom-padding */
             int legH  = nItems * lineH + 18 + hintGap;
@@ -2599,7 +2599,7 @@ void GraphWidget::paintEvent(QPaintEvent *event)
             p.setFont(hf);
             p.setPen(QColor(140, 140, 140));
             p.drawText(lx, ly + 14 + fmHint.ascent(), m_legendFilterColor.isValid() && !m_legendFilterIsNode
-                       ? "click again to clear filter" : "click row to filter");
+                       ? "click again to clear filter" : "Click Edge to filter");
         }
     }
 
@@ -2609,7 +2609,7 @@ void GraphWidget::paintEvent(QPaintEvent *event)
         int lx = 10;
         QFont lf; lf.setPointSize(8); p.setFont(lf);
         QFontMetrics fm(lf);
-        QFont hf; hf.setPointSize(6);
+        QFont hf; hf.setPointSize(9);
         QFontMetrics fmHint(hf);
 
         /* Reserve space at bottom: hint + gap above it */
@@ -2668,7 +2668,7 @@ void GraphWidget::paintEvent(QPaintEvent *event)
         p.setPen(QColor(140, 140, 140));
         p.drawText(lx, hint_y,
                    m_legendFilterColor.isValid() && m_legendFilterIsNode
-                   ? "click again to clear filter" : "click row to filter");
+                   ? "click again to clear filter" : "Click Protocol to select");
     }
 }
 

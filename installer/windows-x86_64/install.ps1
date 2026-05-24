@@ -3,7 +3,7 @@
 # =============================================================================
 #
 # Supports:
-#   - Installing v.0.5.2 (latest) or v.0.4.7 (stable legacy)
+#   - Installing v.0.5.3 or v.0.4.7 (stable legacy)
 #   - Two flavors: Standard (default) or Experimental (enables Graph View)
 #   - Detecting an already-installed version
 #   - Upgrading, downgrading, and uninstalling
@@ -24,14 +24,14 @@ $ErrorActionPreference = "Stop"
 
 $ScriptDir      = Split-Path -Parent $MyInvocation.MyCommand.Path
 $PluginName     = "packetcircle.dll"
-$LatestVersion  = "0.5.2"
+$LatestVersion  = "0.5.3"
 $LegacyVersion  = "0.4.7"
 
 Write-Host ""
 Write-Host "===========================================================" -ForegroundColor Cyan
 Write-Host "      PacketCircle Installer for Windows                   " -ForegroundColor Cyan
 Write-Host "      x86_64 (64-bit Intel/AMD)                            " -ForegroundColor Cyan
-Write-Host "      Available: v.0.5.2 (latest), v.0.4.7                " -ForegroundColor Cyan
+Write-Host "      Available: v.0.5.3 (latest), v.0.4.7" -ForegroundColor Cyan
 Write-Host "===========================================================" -ForegroundColor Cyan
 Write-Host ""
 
@@ -240,7 +240,7 @@ if ($vcFound) { Write-Host "OK ($vcVersion)" -ForegroundColor Green } else { Wri
 Write-Host "  Wireshark       : " -NoNewline
 if ($WiresharkPath) { Write-Host "Found at $WiresharkPath" -ForegroundColor Green } else { Write-Host "Not found in standard locations" -ForegroundColor Yellow }
 Write-Host "  Wireshark ver   : " -NoNewline; Write-Host "$WsVersion  (plugin API: $PluginPathId)" -ForegroundColor Cyan
-Write-Host "  v.0.5.2 binary  : " -NoNewline
+Write-Host "  v.0.5.3 binary  : " -NoNewline
 if ($v052Ok) { Write-Host "present" -ForegroundColor Green } else { Write-Host "not available in this package" -ForegroundColor Yellow }
 Write-Host "  v.0.4.7 binary  : " -NoNewline
 if ($v047Ok) { Write-Host "present" -ForegroundColor Green } else { Write-Host "not available in this package" -ForegroundColor Yellow }
@@ -336,7 +336,7 @@ Write-Host ""
 Write-Host "[OK] " -ForegroundColor Green -NoNewline
 Write-Host "Selected: PacketCircle v.$SelectedVersion ($([math]::Round($fileInfo.Length / 1KB)) KB)"
 
-# --- Feature set selection (v.0.5.2 only) ---
+# --- Feature set selection (latest version only) ---
 $EnableExperimental = $false
 if ($SelectedVersion -eq $LatestVersion) {
     Write-Host ""

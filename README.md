@@ -4,7 +4,7 @@
   <img src="PacketCircle.png" alt="PacketCircle Logo" width="128">
 </p>
 
-[![Version](https://img.shields.io/badge/version-0.5.2-blue.svg)](CHANGELOG.md)
+[![Version](https://img.shields.io/badge/version-0.5.3-blue.svg)](CHANGELOG.md)
 [![Status](https://img.shields.io/badge/status-public%20beta-orange.svg)](CHANGELOG.md)
 [![License: GPL v2](https://img.shields.io/badge/License-GPL%20v2-blue.svg)](LICENSE)
 [![Wireshark](https://img.shields.io/badge/Wireshark-4.0.x%20%7C%204.2.x%20%7C%204.4.x%20%7C%204.6.x-1679A7.svg)](https://www.wireshark.org/)
@@ -15,7 +15,7 @@
 
 **A native Wireshark plugin that turns packet captures into interactive circle and graph diagrams** — with protocol color coding, deep protocol inspection, traffic volume indicators, and PDF report export.
 
-> **Beta Status**: v0.5.2, fully functional, actively developed. Report issues via [GitHub Issues](https://github.com/netwho/PacketCircle/issues).
+> **Beta Status**: v0.5.3, fully functional, actively developed. Report issues via [GitHub Issues](https://github.com/netwho/PacketCircle/issues).
 
 ---
 
@@ -83,7 +83,7 @@
 
 ---
 
-> **Experimental Feature — v0.5.2:** The Graph View screenshots below showcase a new layout engine introduced in v0.5.2. This feature is experimental; behaviour and UI may change in future releases.
+> **Experimental Feature — v0.5.3:** The Graph View showcases an interactive layout engine first introduced in v0.5.2 and improved in v0.5.3. This feature is experimental; behaviour and UI may change in future releases.
 
 ### Graph View — Star Layout with TCP Window Analysis
 
@@ -182,14 +182,14 @@ Then run the installer for your platform from the `installer/` directory:
 All installers offer two **versions** and two **feature sets**:
 
 **Version:**
-- `v.0.5.2` (latest, default — just press Enter) — 3-page PDF reports, TCP Window analysis, all protocol info dialogs
+- `v.0.5.3` (latest, default — just press Enter) — Star-default graph layout, graph settings persistence, improved legend, macOS crash fix
 - `v.0.4.7` — stable legacy release
 
-**Feature set** (v.0.5.2 only):
+**Feature set** (v.0.5.3 only):
 - `Standard` (default — just press Enter) — Circle view, Table view, Wi-Fi mode, 20+ protocol info dialogs, PDF reports, ntopng/Malcolm integration
 - `Experimental` — everything in Standard, plus the **Graph View** beta feature (interactive topology diagrams, health scoring, anomaly detection, 8 layout modes)
 
-> The default is v.0.5.2 Standard. Just press Enter twice to install with no prompts.
+> The default is v.0.5.3 Standard. Just press Enter twice to install with no prompts.
 
 ---
 

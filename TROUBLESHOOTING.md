@@ -120,24 +120,11 @@ The plugin is verified on Windows 11. On Windows 10, the three steps above resol
 
 ## macOS: Crash Report After Closing Wireshark
 
-macOS may show a crash report for Wireshark **after it has already closed normally**. This is a [known Qt bug (QTBUG-119526)](https://bugreports.qt.io/browse/QTBUG-119526) affecting Qt 6.x on macOS. The macOS accessibility framework queries the Qt widget tree during teardown, hitting already-freed objects. **Wireshark and PacketCircle work correctly — no data is lost.** The crash report is spurious.
+**Fixed in v0.5.3.** Earlier releases (v0.5.2 and below) could trigger a macOS crash report for Wireshark on exit. The root cause was a sequencing issue in Wireshark's own shutdown: `epan_cleanup()` called `g_module_close()` on the plugin DSO — unmapping its code — before `QApplication::~QApplication()` had finished cleaning up Qt's accessibility cache. The cache then tried to call into unmapped vtable memory, producing a `SIGSEGV` in `QAccessibleCache::~QAccessibleCache()`.
 
-**This is not a PacketCircle bug** — it affects any Qt6 application on macOS.
+**Fix (v0.5.3):** The plugin now calls `dlopen(..., RTLD_NODELETE)` on itself at registration time, which prevents the dynamic linker from unmapping the DSO when `dlclose()` is called. The mapping remains valid through the full Qt teardown and is reclaimed by the OS at process exit.
 
-**Workaround — disable the Qt accessibility bridge:**
-
-```bash
-QT_ACCESSIBILITY=0 open -a Wireshark
-```
-
-Or add permanently to `~/.zshrc`:
-```bash
-export QT_ACCESSIBILITY=0
-```
-
-Alternatively, in System Settings → Accessibility, disable VoiceOver and screen reader integrations.
-
-> Disabling accessibility has no impact on Wireshark's core functionality.
+No workaround is needed with v0.5.3 or later. If you are still on an older release, upgrading resolves the issue entirely.
 
 ---
 

@@ -2,6 +2,20 @@
 
 All notable changes to PacketCircle will be documented in this file.
 
+## [0.5.3] - 2026-05-21
+
+### Changed
+- **Graph view: default layout is now Star** — When the graph is first opened, it starts in Star layout (busiest node at centre) instead of Force-directed. The Layout selector now correctly reflects the active layout on open. All layouts remain selectable.
+- **Graph view: Edge / Node / Layout settings persisted** — The three graph toolbar selectors (Edge color, Node color, Layout) are now saved to `~/.PacketCircle/settings.ini` under `[Graph]` and restored on next launch.
+- **Graph legend hint text** — "click row to filter" replaced with "Click Protocol to select" (node legend) and "Click Edge to filter" (edge legend). Font size increased from 6 pt to 9 pt for readability.
+- **Version bumped to v0.5.3** — `CMakeLists.txt` `set_module_info` updated to `0 5 3 0`; `PC_VERSION` constant updated to `v.0.5.3`.
+
+### Fixed
+- **macOS: SIGSEGV crash on Wireshark exit** — Wireshark's `epan_cleanup()` called `g_module_close()` on the plugin DSO before `QApplication::~QApplication()` finished tearing down Qt's accessibility cache. The cache then accessed the plugin's vtable in unmapped memory, producing a `SIGSEGV` in `QAccessibleCache::~QAccessibleCache()`. Fix: the plugin now calls `dlopen(..., RTLD_NODELETE)` on itself at registration time, keeping the mapping valid through the full Qt teardown.
+- **Linux installer: uninstall blocked by missing binaries** — The prerequisite binary check ran before the action menu, causing the installer to exit early when only `install.sh` was present without binary directories. Uninstall no longer requires installer binaries to be present.
+
+- AI-Assisted: yes (Claude) — default layout, settings persistence, legend text, macOS crash fix, Linux uninstall fix, version bump, documentation
+
 ## [0.5.2] - 2026-05-01
 
 ### Added

@@ -29,6 +29,23 @@
 #include <wsutil/wslog.h>
 #include <cfile.h>
 
+#ifdef __APPLE__
+#include <dlfcn.h>
+/*
+ * macOS only: Wireshark's epan_cleanup() calls g_module_close() on the plugin
+ * DSO before QApplication::~QApplication() runs (stack variable in main).
+ * Qt's QAccessibleCache then accesses the unmapped vtable → SIGSEGV.
+ * RTLD_NODELETE keeps the mapping alive through full Qt teardown.
+ * Linux does not have this issue — its shutdown order is safe.
+ */
+static void pin_dso(void)
+{
+    Dl_info info;
+    if (dladdr((void *)pin_dso, &info) && info.dli_fname)
+        dlopen(info.dli_fname, RTLD_NOW | RTLD_NODELETE);
+}
+#endif
+
 #define WS_LOG_DOMAIN "packetcircle"
 
 /* Plugin protocol handle */
@@ -122,6 +139,10 @@ static ext_menu_t *circle_vis_menu = NULL;
 /* Plugin registration - called from plugin.c */
 void proto_register_circle_vis(void)
 {
+#ifdef __APPLE__
+    pin_dso();
+#endif
+
     int existing_id = proto_get_id_by_short_name("PacketCircle");
     if (existing_id == -1) {
         existing_id = proto_get_id_by_filter_name("packetcircle");

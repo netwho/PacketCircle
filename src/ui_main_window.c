@@ -84,7 +84,7 @@
 extern "C" void* extract_capture_file(capture_file *cf, void *user_data);
 
 /* ── Plugin version — single source of truth ───────────────────────────── */
-static constexpr char PC_VERSION[] = "v.0.5.2";
+static constexpr char PC_VERSION[] = "v.0.5.3";
 
 /* ------------------------------------------------------------------ */
 /* Theme detection: uses the same logic as Wireshark's ColorUtils::   */
@@ -353,6 +353,13 @@ void MainWindow::savePreferences()
     settings.setValue("internalSubnets", snEntries);
     settings.endGroup();
 
+    /* Graph view combo selections */
+    settings.beginGroup("Graph");
+    if (m_graphEdgeColorCombo) settings.setValue("edgeColor", m_graphEdgeColorCombo->currentIndex());
+    if (m_graphNodeColorCombo) settings.setValue("nodeColor", m_graphNodeColorCombo->currentIndex());
+    if (m_graphLayoutCombo)    settings.setValue("layout",    m_graphLayoutCombo->currentIndex());
+    settings.endGroup();
+
     settings.sync();
 }
 
@@ -499,6 +506,22 @@ void MainWindow::loadPreferences()
     }
     settings.endGroup();
     if (m_graphWidget) m_graphWidget->setInternalSubnets(m_internalSubnets);
+
+    /* Graph view combo selections — restored after combos and m_graphWidget both exist */
+    settings.beginGroup("Graph");
+    if (m_graphEdgeColorCombo)
+        m_graphEdgeColorCombo->setCurrentIndex(
+            qBound(0, settings.value("edgeColor", 0).toInt(),
+                   m_graphEdgeColorCombo->count() - 1));
+    if (m_graphNodeColorCombo)
+        m_graphNodeColorCombo->setCurrentIndex(
+            qBound(0, settings.value("nodeColor", 0).toInt(),
+                   m_graphNodeColorCombo->count() - 1));
+    if (m_graphLayoutCombo)
+        m_graphLayoutCombo->setCurrentIndex(
+            qBound(0, settings.value("layout", (int)GraphWidget::LAYOUT_STAR).toInt(),
+                   m_graphLayoutCombo->count() - 1));
+    settings.endGroup();
 
     /* Beta features — graph view is hidden until opted in via settings.ini */
     settings.beginGroup("Beta");
@@ -1087,6 +1110,11 @@ void MainWindow::createControls()
         "  Hierarchical: tiers top-to-bottom: External / Gateway / Server / Client\n"
         "  Radial: BFS rings outward from most-connected node\n"
         "Pan: middle-mouse drag or Space+left-drag on empty space");
+
+    /* Sync combo to GraphWidget's default (LAYOUT_STAR). Set before connecting
+     * the signal so no spurious onGraphLayoutChanged fires while m_graphWidget
+     * is still nullptr. */
+    m_graphLayoutCombo->setCurrentIndex(GraphWidget::LAYOUT_STAR);
 
     QPushButton *relayoutBtn = new QPushButton("\u21BA Re-layout", m_graphControlsRow);
     relayoutBtn->setToolTip("Re-run selected layout from scratch");
