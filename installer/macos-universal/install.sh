@@ -23,7 +23,7 @@ set -e
 
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 PLUGIN_NAME="packetcircle.so"
-LATEST_VERSION="0.5.2"
+LATEST_VERSION="0.5.3"
 LEGACY_VERSION="0.4.7"
 
 RED='\033[0;31m'
@@ -38,7 +38,7 @@ printf "\n"
 printf "${BLUE}╔══════════════════════════════════════════════════╗${NC}\n"
 printf "${BLUE}║   PacketCircle Installer for macOS               ║${NC}\n"
 printf "${BLUE}║   Universal Binary (Intel + Apple Silicon)       ║${NC}\n"
-printf "${BLUE}║   Available: v.0.5.2 (latest), v.0.4.7           ║${NC}\n"
+printf "${BLUE}║   Available: v.0.5.3 (latest), v.0.4.7           ║${NC}\n"
 printf "${BLUE}╚══════════════════════════════════════════════════╝${NC}\n"
 printf "\n"
 
@@ -205,10 +205,10 @@ if [ "$INSTALLED_VERSION" = "$LATEST_VERSION" ]; then
     printf "  ${GREEN}1${NC}) v.%s ${BOLD}(latest)${NC}   — already installed, reinstall\n" "$LATEST_VERSION"
     printf "  ${YELLOW}2${NC}) v.%s             — downgrade to stable legacy\n" "$LEGACY_VERSION"
 elif [ "$INSTALLED_VERSION" = "$LEGACY_VERSION" ]; then
-    printf "  ${GREEN}1${NC}) v.%s ${BOLD}(latest)${NC}   — upgrade (recommended): 3-page PDF, graph view, protocol improvements\n" "$LATEST_VERSION"
+    printf "  ${GREEN}1${NC}) v.%s ${BOLD}(latest)${NC}   — upgrade (recommended): circle default layout, macOS crash fix\n" "$LATEST_VERSION"
     printf "  ${YELLOW}2${NC}) v.%s             — already installed, reinstall\n" "$LEGACY_VERSION"
 else
-    printf "  ${GREEN}1${NC}) v.%s ${BOLD}(latest)${NC}   — 3-page PDF reports, graph view (opt-in), TCP Window analysis\n" "$LATEST_VERSION"
+    printf "  ${GREEN}1${NC}) v.%s ${BOLD}(latest)${NC}   — 3-page PDF, graph view (opt-in), circle default layout, macOS crash fix\n" "$LATEST_VERSION"
     printf "  ${YELLOW}2${NC}) v.%s             — stable legacy: table view, protocol info dialogs, Wi-Fi mode\n" "$LEGACY_VERSION"
 fi
 
@@ -235,7 +235,7 @@ printf "  Binary: %s\n" "$PLUGIN_FILE"
 printf "  Architecture: "
 file "$PLUGIN_FILE" | grep -o "universal binary.*" || file "$PLUGIN_FILE" | grep -o "Mach-O.*"
 
-# --- Feature set selection (v.0.5.2 only) ---
+# --- Feature set selection (latest only) ---
 ENABLE_EXPERIMENTAL=false
 if [ "$SELECTED_VERSION" = "$LATEST_VERSION" ]; then
     printf "\n"

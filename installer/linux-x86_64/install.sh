@@ -4,7 +4,7 @@
 # =============================================================================
 #
 # Supports:
-#   - Installing v.0.5.2 (latest) or v.0.4.7 (stable legacy)
+#   - Installing v.0.5.3 (latest) or v.0.4.7 (stable legacy)
 #   - Two flavors: Standard (default) or Experimental (enables Graph View)
 #   - Detecting an already-installed version
 #   - Upgrading, downgrading, and uninstalling
@@ -14,7 +14,7 @@
 #   ~/.local/lib/wireshark/plugins/<version>/epan/
 #
 # Binaries are in version subdirectories next to this script:
-#   v.0.5.2/packetcircle-wsNN.so   (ws40, ws42, ws44, ws46)
+#   v.0.5.3/packetcircle-wsNN.so   (ws40, ws42, ws44, ws46)
 #   v.0.4.7/packetcircle-wsNN.so   (ws40, ws42, ws44, ws46)
 #
 # Usage:
@@ -25,7 +25,7 @@ set -e
 
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 PLUGIN_NAME="packetcircle.so"
-LATEST_VERSION="0.5.2"
+LATEST_VERSION="0.5.3"
 LEGACY_VERSION="0.4.7"
 
 RED='\033[0;31m'
@@ -42,7 +42,7 @@ printf "${BLUE}╔════════════════════�
 printf "${BLUE}║   PacketCircle Installer for Linux               ║${NC}\n"
 printf "${BLUE}║   x86_64 (64-bit Intel/AMD)                      ║${NC}\n"
 printf "${BLUE}║   Supports Wireshark 4.0.x, 4.2.x, 4.4.x, 4.6.x  ║${NC}\n"
-printf "${BLUE}║   Available: v.0.5.2 (latest), v.0.4.7            ║${NC}\n"
+printf "${BLUE}║   Available: v.0.5.3 (latest), v.0.4.7            ║${NC}\n"
 printf "${BLUE}╚══════════════════════════════════════════════════╝${NC}\n"
 printf "\n"
 
@@ -63,15 +63,15 @@ printf "Checking prerequisites...\n\n"
 # --- Verify which plugin binaries are present ---
 printf "  Plugin binaries in this installer:\n"
 
-V052_OK=1
+VLATEST_OK=1
 for ws in ws40 ws42 ws44 ws46; do
-    f="$SCRIPT_DIR/v.0.5.2/packetcircle-${ws}.so"
+    f="$SCRIPT_DIR/v.${LATEST_VERSION}/packetcircle-${ws}.so"
     if [ -f "$f" ]; then
         sz=$(ls -lh "$f" | awk '{print $5}')
-        printf "    ${GREEN}[FOUND]${NC}   v.0.5.2/packetcircle-%s.so  (%s)\n" "$ws" "$sz"
+        printf "    ${GREEN}[FOUND]${NC}   v.%s/packetcircle-%s.so  (%s)\n" "$LATEST_VERSION" "$ws" "$sz"
     else
-        printf "    ${GRAY}[missing]${NC} v.0.5.2/packetcircle-%s.so\n" "$ws"
-        V052_OK=0
+        printf "    ${GRAY}[missing]${NC} v.%s/packetcircle-%s.so\n" "$LATEST_VERSION" "$ws"
+        VLATEST_OK=0
     fi
 done
 
@@ -88,9 +88,11 @@ for ws in ws40 ws42 ws44 ws46; do
     fi
 done
 
-if [ "$V052_OK" = "0" ] && [ "$V047_OK" = "0" ]; then
-    printf "\n${RED}Error: No usable plugin binaries found in this installer package.${NC}\n"
-    exit 1
+if [ "$VLATEST_OK" = "0" ] && [ "$V047_OK" = "0" ]; then
+    printf "\n${YELLOW}Warning: No installer binaries found — uninstall still available.${NC}\n"
+    INSTALL_ONLY_WARN=1
+else
+    INSTALL_ONLY_WARN=0
 fi
 
 # --- Detect Wireshark version ---
@@ -265,9 +267,9 @@ printf "  Prerequisites Summary\n"
 printf "%s\n" "$SEP"
 printf "  Wireshark       : %s.%s  (plugin API dir: %s)\n" "$WS_MAJOR" "$WS_MINOR" "$PLUGIN_PATH_ID"
 printf "  Binary tag      : %s  (%s)\n" "$SELECTED_WS_TAG" "$SELECTED_WS_LABEL"
-printf "  v.0.5.2 binaries: "
-if [ "$V052_OK" = "1" ]; then printf "${GREEN}all present${NC}\n"; else printf "${YELLOW}some missing${NC}\n"; fi
-printf "  v.0.4.7 binaries: "
+printf "  v.%s binaries: " "$LATEST_VERSION"
+if [ "$VLATEST_OK" = "1" ]; then printf "${GREEN}all present${NC}\n"; else printf "${YELLOW}some missing${NC}\n"; fi
+printf "  v.%s binaries: " "$LEGACY_VERSION"
 if [ "$V047_OK" = "1" ]; then printf "${GREEN}all present${NC}\n"; else printf "${YELLOW}some missing${NC}\n"; fi
 printf "  Install dir     : %s\n" "$INSTALL_DIR"
 printf "  Installed now   : "
@@ -295,22 +297,31 @@ ACTION=${ACTION:-i}
 case "$ACTION" in
     u|U)
         if [ -z "$INSTALLED_PATH" ]; then
-            printf "\n${YELLOW}PacketCircle is not currently installed.${NC}\n\n"
+            printf "\n${YELLOW}PacketCircle is not currently installed at:%s${NC}\n" "$INSTALL_DIR"
+            printf "If you installed manually, remove the file:\n"
+            printf "  find ~/.local/lib/wireshark -name 'packetcircle.so' 2>/dev/null\n\n"
             exit 0
         fi
         printf "\nRemove: ${CYAN}%s${NC}\n" "$INSTALLED_PATH"
         printf "Confirm uninstall? [y/N]: "
         read -r CONFIRM
         if [ "$CONFIRM" = "y" ] || [ "$CONFIRM" = "Y" ]; then
-            rm "$INSTALLED_PATH"
-            printf "\n${GREEN}✓ PacketCircle v.%s uninstalled successfully.${NC}\n\n" "$INSTALLED_VERSION"
+            rm -f "$INSTALLED_PATH"
+            printf "\n${GREEN}✓ PacketCircle%s uninstalled successfully.${NC}\n\n" \
+                "${INSTALLED_VERSION:+ v.$INSTALLED_VERSION}"
         else
             printf "Uninstall cancelled.\n"
         fi
         exit 0
         ;;
     q|Q) printf "Bye.\n"; exit 0 ;;
-    i|I|"") ;;
+    i|I|"")
+        if [ "$INSTALL_ONLY_WARN" = "1" ]; then
+            printf "\n${RED}Error: No installer binaries found — cannot install.${NC}\n"
+            printf "Download the full installer package from GitHub.\n\n"
+            exit 1
+        fi
+        ;;
     *) printf "Invalid choice. Exiting.\n"; exit 1 ;;
 esac
 
@@ -340,8 +351,8 @@ VER_CHOICE=${VER_CHOICE:-1}
 
 case "$VER_CHOICE" in
     1)
-        if [ "$V052_OK" = "0" ] || [ ! -f "$SCRIPT_DIR/v.0.5.2/packetcircle-${SELECTED_WS_TAG}.so" ]; then
-            printf "\n${RED}v.0.5.2 binary for %s is not available in this installer.${NC}\n" "$SELECTED_WS_TAG"
+        if [ "$VLATEST_OK" = "0" ] || [ ! -f "$SCRIPT_DIR/v.${LATEST_VERSION}/packetcircle-${SELECTED_WS_TAG}.so" ]; then
+            printf "\n${RED}v.%s binary for %s is not available in this installer.${NC}\n" "$LATEST_VERSION" "$SELECTED_WS_TAG"
             exit 1
         fi
         SELECTED_VERSION="$LATEST_VERSION"
@@ -375,7 +386,7 @@ FILESIZE=$(ls -lh "$PLUGIN_FILE" | awk '{print $5}')
 printf "\n${GREEN}✓${NC} Selected: PacketCircle v.%s  |  %s  |  %s\n" \
     "$SELECTED_VERSION" "$SELECTED_WS_LABEL" "$FILESIZE"
 
-# --- Feature set selection (v.0.5.2 only) ---
+# --- Feature set selection (latest version only) ---
 ENABLE_EXPERIMENTAL=false
 if [ "$SELECTED_VERSION" = "$LATEST_VERSION" ]; then
     printf "\n"
