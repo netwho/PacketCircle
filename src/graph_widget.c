@@ -31,6 +31,18 @@
 #include <QFontMetrics>
 #include <QQueue>
 #include <QRandomGenerator>
+#include <QApplication>
+#include <QPalette>
+
+/* Accent colour from the host (Wireshark) palette so the legend's active-filter
+ * highlight matches the app. Falls back to a Wireshark-ish blue. */
+static QColor legendAccent()
+{
+    QColor c = qApp->palette().color(QPalette::Highlight);
+    if (!c.isValid() || (c.red() == 0 && c.green() == 0 && c.blue() == 0))
+        c = QColor(0x33, 0x7a, 0xCC);
+    return c;
+}
 
 /* ─────────────────────────────────────────────────────────────────────── *
  *  Service / port colour table
@@ -831,7 +843,7 @@ static qreal anomalyScore(const comm_pair_t *pair, bool hasReverse,
     /* Packets per port — very low = rapid scan */
     if (nPorts > T.an_scan_min_ports && pair->packet_count > 0) {
         qreal ppp = (qreal)pair->packet_count / nPorts;
-        if (ppp < T.an_scan_ppp) { score += 0.20; addF(QString("%.1f packets/port — rapid scan rate").arg(ppp), +0.20); }
+        if (ppp < T.an_scan_ppp) { score += 0.20; addF(QString("%1 packets/port — rapid scan rate").arg(ppp, 0, 'f', 1), +0.20); }
     }
 
     /* Tiny-packet + high-volume pattern */
@@ -2571,21 +2583,42 @@ void GraphWidget::paintEvent(QPaintEvent *event)
             int legH  = nItems * lineH + 18 + hintGap;
             int lx    = width() - legW - 8;
             int ly    = height() - legH - 8;
-            p.fillRect(lx - 4, ly - 2, legW + 8, legH + 4, QColor(0, 0, 0, 120));
-            p.setPen(QColor(180, 180, 180));
-            p.drawText(lx, ly + fm.ascent(), QString::fromUtf8(title));
-            ly += 16;
+            /* Rounded card behind the legend (always dark — graph canvas is black) */
+            p.setRenderHint(QPainter::Antialiasing, true);
+            p.setPen(QPen(QColor(255, 255, 255, 30), 1));
+            p.setBrush(QColor(35, 35, 38, 230));
+            p.drawRoundedRect(QRectF(lx - 8, ly - 6, legW + 16, legH + 10), 8.0, 8.0);
+            p.setBrush(Qt::NoBrush);
+            /* Header: accent dot + uppercase title + hairline */
+            {
+                QColor accHdr = legendAccent();
+                p.setPen(Qt::NoPen);
+                p.setBrush(accHdr);
+                p.drawEllipse(QPointF(lx + 3.0, ly + fm.ascent() - 3.0), 3.0, 3.0);
+                p.setBrush(Qt::NoBrush);
+                QFont titleFont = p.font(); titleFont.setBold(true);
+                QFont prevFont = p.font();
+                p.setFont(titleFont);
+                p.setPen(QColor(225, 225, 225));
+                p.drawText(lx + 13, ly + fm.ascent(), QString::fromUtf8(title).toUpper());
+                p.setFont(prevFont);
+                p.setPen(QPen(QColor(255, 255, 255, 28), 1));
+                p.drawLine(lx, ly + 14, lx + legW, ly + 14);
+                p.setPen(Qt::NoPen);
+            }
+            ly += 18;
             for (int i = 0; i < nItems; i++) {
                 bool isActive = m_legendFilterColor.isValid() && !m_legendFilterIsNode
                                 && (m_legendFilterColor == items[i].color);
                 /* Record clickable rect */
                 m_legendHitRects.append({QRect(lx - 2, ly, legW + 2, lineH),
                                          items[i].color, /*isNodeLeg=*/false});
-                /* Selection highlight */
+                /* Selection highlight — accent pill */
                 if (isActive) {
-                    p.setPen(QPen(Qt::white, 1.5));
-                    p.setBrush(QColor(255,255,255,30));
-                    p.drawRoundedRect(lx - 2, ly, legW + 2, lineH, 2, 2);
+                    QColor acc = legendAccent();
+                    p.setPen(QPen(acc.lighter(140), 1.5));
+                    p.setBrush(QColor(acc.red(), acc.green(), acc.blue(), 60));
+                    p.drawRoundedRect(lx - 2, ly, legW + 2, lineH, 4, 4);
                 }
                 p.setPen(Qt::NoPen);
                 p.setBrush(items[i].color);
@@ -2614,18 +2647,97 @@ void GraphWidget::paintEvent(QPaintEvent *event)
 
         /* Reserve space at bottom: hint + gap above it */
         int hint_y = height() - 8;                    /* hint text baseline    */
-        int ly     = hint_y - fmHint.height() - 14;  /* items build upward    */
 
-        auto drawLegItem = [&](const QString &label, QColor c, bool clickable, quint16 port = 0) {
+        /* Build the legend entries up-front so we can size a card behind them. */
+        struct NodeLeg { QString label; QColor color; bool clickable; quint16 port; };
+        QVector<NodeLeg> entries;
+        switch (m_nodeColorMode) {
+            case NODECOLOR_SERVICE:
+                for (const ServiceEntry &se : m_legendServices)
+                    entries.append({ QString("%1 (%2)").arg(se.name).arg(se.port), se.color, true, se.port });
+                if (m_legendHasUnknown || m_legendServices.isEmpty())
+                    entries.append({ QStringLiteral("Other"), portServiceColor(0), true, 0 });
+                break;
+            case NODECOLOR_ROLE:
+                entries.append({ QStringLiteral("Internal"),    m_darkTheme ? QColor( 70,130,180) : QColor( 41, 98,163), true, 0 });
+                entries.append({ QStringLiteral("External"),    m_darkTheme ? QColor(220,100, 80) : QColor(180, 55, 35), true, 0 });
+                entries.append({ QStringLiteral("Broadcast"),   m_darkTheme ? QColor(200,160, 64) : QColor(160,110, 10), true, 0 });
+                entries.append({ QStringLiteral("MAC/Unknown"), m_darkTheme ? QColor(160,100,200) : QColor(110, 55,155), true, 0 });
+                break;
+            case NODECOLOR_FUNCTION:
+                entries.append({ QStringLiteral("Remote (RDP/VNC/Citrix)"),    serviceCategoryColor(SC_REMOTE),       true, 0 });
+                entries.append({ QStringLiteral("Interactive (SSH/Telnet)"),   serviceCategoryColor(SC_INTERACTIVE),  true, 0 });
+                entries.append({ QStringLiteral("Messaging (SIP/XMPP/IRC)"),   serviceCategoryColor(SC_MESSAGING),    true, 0 });
+                entries.append({ QStringLiteral("Filetransfer (SMB/NFS/FTP)"), serviceCategoryColor(SC_FILETRANSFER), true, 0 });
+                entries.append({ QStringLiteral("Other / uncategorised"),
+                    m_darkTheme ? QColor(100,100,100) : QColor(150,150,150), true, 0 });
+                break;
+            case NODECOLOR_PROTOCOL:
+                entries.append({ QStringLiteral("(protocol colours — same as circle view)"), QColor(120,120,120), false, 0 });
+                break;
+        }
+
+        /* Hint text uses the larger 9 pt font — size the card to whichever is wider:
+         * the widest swatch+label (8 pt) or the hint line. */
+        const QString hintText = (m_legendFilterColor.isValid() && m_legendFilterIsNode)
+                                 ? QStringLiteral("click again to clear filter")
+                                 : QStringLiteral("Click Protocol to select");
+        /* Card title reflects the active node-colour mode. */
+        QString nodeTitle;
+        switch (m_nodeColorMode) {
+            case NODECOLOR_SERVICE:  nodeTitle = QStringLiteral("Service / Port"); break;
+            case NODECOLOR_ROLE:     nodeTitle = QStringLiteral("Node Role");      break;
+            case NODECOLOR_FUNCTION: nodeTitle = QStringLiteral("Function");       break;
+            case NODECOLOR_PROTOCOL: nodeTitle = QStringLiteral("Protocol");       break;
+        }
+        QFont titleFont = hf; titleFont.setBold(true);
+        QFontMetrics fmTitle(titleFont);
+        int titleW = 13 + fmTitle.horizontalAdvance(nodeTitle.toUpper());
+
+        int count = entries.size();
+        int maxW  = qMax(fmHint.horizontalAdvance(hintText), titleW);
+        for (const NodeLeg &e : entries) maxW = qMax(maxW, 18 + fm.horizontalAdvance(e.label));
+        int cardW     = maxW + 16;                           /* content + side padding */
+        int headerH   = fmTitle.height() + 8;                /* title row + spacing    */
+        int itemsTop  = hint_y - fmHint.height() - 14 - count * 16;
+        int cardTop   = itemsTop - 6 - headerH;
+
+        /* Rounded card behind the node legend (always dark — graph canvas is black) */
+        if (count > 0) {
+            p.setRenderHint(QPainter::Antialiasing, true);
+            p.setPen(QPen(QColor(255, 255, 255, 30), 1));
+            p.setBrush(QColor(35, 35, 38, 230));
+            p.drawRoundedRect(QRectF(lx - 8, cardTop, cardW + 16, (hint_y - cardTop) + 10), 8.0, 8.0);
+            p.setBrush(Qt::NoBrush);
+
+            /* Header: accent dot + uppercase title + hairline */
+            int titleBase = cardTop + 6 + fmTitle.ascent();
+            QColor accHdr = legendAccent();
+            p.setPen(Qt::NoPen);
+            p.setBrush(accHdr);
+            p.drawEllipse(QPointF(lx + 3.0, titleBase - fmTitle.ascent() / 2.0 + 1.0), 3.0, 3.0);
+            p.setBrush(Qt::NoBrush);
+            p.setFont(titleFont);
+            p.setPen(QColor(225, 225, 225));
+            p.drawText(lx + 13, titleBase, nodeTitle.toUpper());
+            p.setPen(QPen(QColor(255, 255, 255, 28), 1));
+            p.drawLine(lx, cardTop + headerH, lx + cardW, cardTop + headerH);
+            p.setPen(Qt::NoPen);
+        }
+
+        int ly = hint_y - fmHint.height() - 14;             /* items build upward */
+        const QColor acc = legendAccent();
+
+        auto drawLegItem = [&](const QString &label, QColor c, bool clickable, quint16 port) {
             ly -= 16;
             bool isActive = clickable && m_legendFilterColor.isValid()
                             && m_legendFilterIsNode && (m_legendFilterColor == c);
             if (clickable)
-                m_legendHitRects.append({QRect(lx, ly, 200, 16), c, /*isNodeLeg=*/true, port});
+                m_legendHitRects.append({QRect(lx, ly, cardW, 16), c, /*isNodeLeg=*/true, port});
             if (isActive) {
-                p.setPen(QPen(Qt::white, 1.5));
-                p.setBrush(QColor(255,255,255,30));
-                p.drawRoundedRect(lx, ly, 200, 16, 2, 2);
+                p.setPen(QPen(acc.lighter(140), 1.5));
+                p.setBrush(QColor(acc.red(), acc.green(), acc.blue(), 60));
+                p.drawRoundedRect(lx - 2, ly, cardW, 16, 4, 4);
             }
             QColor fill(c.red(), c.green(), c.blue(), 180);
             p.setPen(QPen(c.lighter(150), 1.5));
@@ -2633,42 +2745,17 @@ void GraphWidget::paintEvent(QPaintEvent *event)
             p.drawPolygon(makeHex(QPointF(lx + 7, ly + 7), 7));
             p.setPen(isActive ? Qt::white : QColor(220, 220, 220));
             p.setBrush(Qt::NoBrush);
+            p.setFont(lf);
             p.drawText(lx + 18, ly + fm.ascent(), label);
         };
 
-        /* Draw items (each call decrements ly by 16, moving upward) */
-        switch (m_nodeColorMode) {
-            case NODECOLOR_SERVICE:
-                for (const ServiceEntry &se : m_legendServices)
-                    drawLegItem(QString("%1 (%2)").arg(se.name).arg(se.port), se.color, true, se.port);
-                if (m_legendHasUnknown || m_legendServices.isEmpty())
-                    drawLegItem("Other", portServiceColor(0), true, 0);
-                break;
-            case NODECOLOR_ROLE:
-                drawLegItem("Internal",    m_darkTheme ? QColor( 70,130,180) : QColor( 41, 98,163), true);
-                drawLegItem("External",    m_darkTheme ? QColor(220,100, 80) : QColor(180, 55, 35), true);
-                drawLegItem("Broadcast",   m_darkTheme ? QColor(200,160, 64) : QColor(160,110, 10), true);
-                drawLegItem("MAC/Unknown", m_darkTheme ? QColor(160,100,200) : QColor(110, 55,155), true);
-                break;
-            case NODECOLOR_FUNCTION:
-                drawLegItem("Remote (RDP/VNC/Citrix)",    serviceCategoryColor(SC_REMOTE),       true);
-                drawLegItem("Interactive (SSH/Telnet)",   serviceCategoryColor(SC_INTERACTIVE),  true);
-                drawLegItem("Messaging (SIP/XMPP/IRC)",   serviceCategoryColor(SC_MESSAGING),    true);
-                drawLegItem("Filetransfer (SMB/NFS/FTP)", serviceCategoryColor(SC_FILETRANSFER), true);
-                drawLegItem("Other / uncategorised",
-                    m_darkTheme ? QColor(100,100,100) : QColor(150,150,150), true);
-                break;
-            case NODECOLOR_PROTOCOL:
-                drawLegItem("(protocol colours — same as circle view)", QColor(120,120,120), false);
-                break;
-        }
+        for (const NodeLeg &e : entries)
+            drawLegItem(e.label, e.color, e.clickable, e.port);
 
         /* Hint text */
         p.setFont(hf);
-        p.setPen(QColor(140, 140, 140));
-        p.drawText(lx, hint_y,
-                   m_legendFilterColor.isValid() && m_legendFilterIsNode
-                   ? "click again to clear filter" : "Click Protocol to select");
+        p.setPen(QColor(150, 150, 150));
+        p.drawText(lx, hint_y, hintText);
     }
 }
 

@@ -2,6 +2,26 @@
 
 All notable changes to PacketCircle will be documented in this file.
 
+## [0.5.4] - 2026-06-02
+
+UI refresh — the plugin's chrome now matches its Wireshark host and reads as one
+cohesive app. No functional/analysis behaviour changed; this release is visual.
+
+### Changed
+- **Toolbar accent pulled from Wireshark** — Every accent (selected segment, active states, focus rings, menu/legend selection) now uses the host palette's highlight colour (`QPalette::Highlight`), read at runtime, instead of a hardcoded `#0078d4`. PacketCircle automatically matches whatever blue Wireshark uses, on any theme or platform.
+- **Row 1 segmented controls → pill tracks** — The Top / Metric / View / Mode groups are now rendered as recessed "tracks" containing borderless chip buttons (selected chip = accent fill). The ⚙ and ? buttons are round ghost buttons with an accent ring on hover.
+- **Context menus restyled** — All right-click popup menus now share one themed stylesheet: rounded card, inset accent-pill selection (no more full-bleed bar), uppercase-friendly sections and hairline separators. A **light-theme stylesheet was added** — previously menus fell back to the native look in light mode.
+- **Graph-view legends are now cards** — Both the node (bottom-left) and edge (bottom-right) legends sit on rounded dark cards with a styled header (accent dot + uppercase title + hairline). The node legend previously had no background at all (text overlapped the graph) and no title; it now has both, with the title reflecting the active Node mode. Active-filter selection is an accent pill; cards size to fit their content and hint text.
+- **Row 2 actions + filter field** — Action buttons (Filter / Clear / Reload / PDF / Send to NTOP / Send to Malcolm) gained outline icons. Thin dividers group the row (filter · data · integrations). The filter input is a rounded search field with a leading magnifier glyph. **Clear** now also empties the search field and reloads the data, returning the view to its full unfiltered state.
+- **Row 3 graph controls** — Edge / Node / Layout selectors are now rounded "field chips" (uppercase key label fused with the dropdown). Their popups are forced to Qt's `QListView` so macOS honours the dark theming (the native popup ignored stylesheets), styled to match the context menus, and **widened to fit the longest item** so entries like "Service / Port" and "Force-directed" are never truncated. Re-layout gained a ↻ icon; Zoom (− 1:1 +) is now a recessed pill.
+- **Toolbar icons drawn in-process** — Outline icons are rendered with QPainter (no QtSvg dependency added); the `.so`/`.dll` stays free of extra library dependencies.
+- **Version bumped to v0.5.4** — `CMakeLists.txt` `set_module_info` updated to `0 5 4 0`; `PC_VERSION` constant updated to `v.0.5.4`; installers and docs updated from v.0.5.3 to v.0.5.4.
+
+### Fixed
+- **Anomaly Score breakdown: "packets/port" factor showed literal `%.1f`** — The scan-rate factor used a C `printf` specifier (`%.1f`) inside `QString::arg()`, which only understands Qt `%1` placeholders, so the value was never substituted and the popup displayed the literal text "%.1f packets/port — rapid scan rate". Fixed to use `%1` with Qt numeric formatting (`'f'`, 1 decimal).
+
+- AI-Assisted: yes (Claude) — full UI restyle (toolbar pill, palette accent, menus + light theme, legend cards/headers, row 2 icons + search field, row 3 field chips + zoom pill + combo popups), anomaly-score label fix, version bump, installer + doc updates
+
 ## [0.5.3] - 2026-05-21
 
 ### Changed

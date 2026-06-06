@@ -23,7 +23,7 @@ set -e
 
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 PLUGIN_NAME="packetcircle.so"
-LATEST_VERSION="0.5.3"
+LATEST_VERSION="0.5.4"
 LEGACY_VERSION="0.4.7"
 
 RED='\033[0;31m'
@@ -38,7 +38,7 @@ printf "\n"
 printf "${BLUE}╔══════════════════════════════════════════════════╗${NC}\n"
 printf "${BLUE}║   PacketCircle Installer for macOS               ║${NC}\n"
 printf "${BLUE}║   Universal Binary (Intel + Apple Silicon)       ║${NC}\n"
-printf "${BLUE}║   Available: v.0.5.3 (latest), v.0.4.7           ║${NC}\n"
+printf "${BLUE}║   Available: v.0.5.4 (latest), v.0.4.7           ║${NC}\n"
 printf "${BLUE}╚══════════════════════════════════════════════════╝${NC}\n"
 printf "\n"
 

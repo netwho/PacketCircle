@@ -40,6 +40,11 @@
 #include <QScrollArea>
 #include <QVBoxLayout>
 #include <QPushButton>
+#include <QIcon>
+#include <QFrame>
+#include <QAction>
+#include <QListView>
+#include <QFontMetrics>
 #include <QTextEdit>
 #include <QTextBrowser>
 #include <QPdfWriter>
@@ -54,6 +59,7 @@
 #include <QMouseEvent>
 #include <QRegularExpression>
 #include <QApplication>
+#include <QPalette>
 #include <QScreen>
 #include <algorithm>
 #include <QPainter>
@@ -84,7 +90,7 @@
 extern "C" void* extract_capture_file(capture_file *cf, void *user_data);
 
 /* ── Plugin version — single source of truth ───────────────────────────── */
-static constexpr char PC_VERSION[] = "v.0.5.3";
+static constexpr char PC_VERSION[] = "v.0.5.4";
 
 /* ------------------------------------------------------------------ */
 /* Theme detection: uses the same logic as Wireshark's ColorUtils::   */
@@ -95,6 +101,115 @@ static bool isDarkTheme()
 {
     return qApp->palette().windowText().color().lightness() >
            qApp->palette().window().color().lightness();
+}
+
+/* Accent colour pulled live from the host (Wireshark) palette so PacketCircle's
+ * chrome matches whatever blue Wireshark uses for selected rows — on any theme
+ * or platform. Falls back to a Wireshark-ish blue if the palette is unset. */
+static QColor pcAccentColor()
+{
+    QColor accent = qApp->palette().color(QPalette::Highlight);
+    if (!accent.isValid() || (accent.red() == 0 && accent.green() == 0 && accent.blue() == 0))
+        accent = QColor(0x33, 0x7a, 0xCC);
+    return accent;
+}
+
+/* Draw a crisp outline (stroked, no fill) toolbar icon by name. Avoids any
+ * QtSvg dependency — paths mirror the restyle mockup, drawn in a 24-unit space
+ * and scaled to a 16 px logical icon at 2x for retina sharpness. */
+static QIcon pcOutlineIcon(const QString &name, const QColor &color)
+{
+    const int   S   = 16;
+    const qreal dpr = 2.0;
+    QPixmap pm(int(S * dpr), int(S * dpr));
+    pm.setDevicePixelRatio(dpr);
+    pm.fill(Qt::transparent);
+
+    QPainter p(&pm);
+    p.setRenderHint(QPainter::Antialiasing, true);
+    p.scale(S / 24.0, S / 24.0);
+    QPen pen(color, 2.0);
+    pen.setCapStyle(Qt::RoundCap);
+    pen.setJoinStyle(Qt::RoundJoin);
+    p.setPen(pen);
+    p.setBrush(Qt::NoBrush);
+
+    if (name == "filter") {
+        QPainterPath path;
+        path.moveTo(3, 5);  path.lineTo(21, 5); path.lineTo(14, 13);
+        path.lineTo(14, 18); path.lineTo(10, 20); path.lineTo(10, 12);
+        path.closeSubpath();
+        p.drawPath(path);
+    } else if (name == "clear") {
+        p.drawLine(QPointF(6, 6),  QPointF(18, 18));
+        p.drawLine(QPointF(18, 6), QPointF(6, 18));
+    } else if (name == "reload") {
+        QRectF r(4, 4, 16, 16);
+        QPainterPath arc;
+        arc.arcMoveTo(r, 70);
+        arc.arcTo(r, 70, 280);
+        p.drawPath(arc);
+        /* arrow head at the arc start (70 deg) */
+        qreal a = qDegreesToRadians(70.0);
+        QPointF tip(12.0 + 8.0 * qCos(a), 12.0 - 8.0 * qSin(a));
+        p.drawLine(tip, tip + QPointF(-3.5, -1.0));
+        p.drawLine(tip, tip + QPointF(0.5, -4.0));
+    } else if (name == "pdf") {
+        QPainterPath path;
+        path.moveTo(7, 3); path.lineTo(14, 3); path.lineTo(19, 8);
+        path.lineTo(19, 21); path.lineTo(7, 21); path.closeSubpath();
+        p.drawPath(path);
+        QPainterPath fold;
+        fold.moveTo(14, 3); fold.lineTo(14, 8); fold.lineTo(19, 8);
+        p.drawPath(fold);
+    } else if (name == "send") {
+        QPainterPath path;
+        path.moveTo(3, 12); path.lineTo(21, 4); path.lineTo(13, 22);
+        path.lineTo(11, 15); path.closeSubpath();
+        p.drawPath(path);
+    } else if (name == "search") {
+        p.drawEllipse(QPointF(11, 11), 7.0, 7.0);
+        p.drawLine(QPointF(21, 21), QPointF(16.5, 16.5));
+    } else if (name == "help") {
+        p.drawEllipse(QPointF(12, 12), 9.0, 9.0);
+        QPainterPath q;
+        q.moveTo(9, 9.5);
+        q.cubicTo(9, 6.5, 15, 6.5, 14.5, 10);
+        q.cubicTo(14.2, 12, 12, 12, 12, 14.5);
+        p.drawPath(q);
+        p.drawPoint(QPointF(12, 17.5));
+    }
+    p.end();
+    return QIcon(pm);
+}
+
+/* Shared context-menu stylesheet — themed (light/dark) with the palette accent.
+ * Used by every PacketCircle popup menu so they look like one app. */
+static QString pcMenuStyleSheet()
+{
+    const bool dark = isDarkTheme();
+    return QString(
+        "QMenu {"
+        "  background: %1;"
+        "  color: %2;"
+        "  border: 1px solid %3;"
+        "  border-radius: 8px;"
+        "  padding: 5px;"
+        "}"
+        "QMenu::item {"
+        "  padding: 6px 16px;"
+        "  border-radius: 5px;"
+        "  margin: 1px 2px;"
+        "}"
+        "QMenu::item:selected { background: %4; color: white; }"
+        "QMenu::item:disabled { color: %5; }"
+        "QMenu::separator { height: 1px; background: %3; margin: 4px 8px; }"
+    )
+    .arg(dark ? "#2b2b2b" : "#f6f6f6")
+    .arg(dark ? "#e4e4e4" : "#1f1f1f")
+    .arg(dark ? "#4a4a4a" : "#c4c4c4")
+    .arg(pcAccentColor().name())
+    .arg(dark ? "#666"    : "#aaa");
 }
 
 /* ── Tier 3: Analysis result cache ─────────────────────────────────────────
@@ -639,27 +754,20 @@ void MainWindow::createControls()
     m_controlsWidget = new QWidget(this);
     m_controlsWidget->setObjectName("controlsToolbar");
 
-    /* ---- Segment shape rules (shared by both themes) ---- */
+    /* ---- Segmented-control geometry (shared by both themes) ----
+     * Each group sits in a recessed "track" (#segTrack); the buttons are
+     * borderless chips inside it. Colours come from the per-theme styles. */
     static const char *segmentShapeRules =
-        /* Left segment */
-        "#controlsToolbar QPushButton[seg_pos=\"left\"] {"
-        "  border-top-left-radius: 4px;"
-        "  border-bottom-left-radius: 4px;"
-        "  border-top-right-radius: 0;"
-        "  border-bottom-right-radius: 0;"
+        "#controlsToolbar #segTrack {"
+        "  border-radius: 7px;"
         "}"
-        /* Middle segment */
-        "#controlsToolbar QPushButton[seg_pos=\"mid\"] {"
-        "  border-radius: 0;"
-        "  border-left: none;"
-        "}"
-        /* Right segment */
-        "#controlsToolbar QPushButton[seg_pos=\"right\"] {"
-        "  border-top-left-radius: 0;"
-        "  border-bottom-left-radius: 0;"
-        "  border-top-right-radius: 4px;"
-        "  border-bottom-right-radius: 4px;"
-        "  border-left: none;"
+        "#controlsToolbar QPushButton[segmented=\"true\"] {"
+        "  border: none;"
+        "  border-radius: 5px;"
+        "  padding: 4px 12px;"
+        "  font-size: 11px;"
+        "  font-weight: bold;"
+        "  min-height: 22px;"
         "}";
 
     /* ---- Dark theme toolbar ---- */
@@ -670,22 +778,20 @@ void MainWindow::createControls()
         "  border-radius: 4px;"
         "  padding: 4px;"
         "}"
+        "#controlsToolbar #segTrack {"
+        "  background: #232323;"
+        "  border: 1px solid #454545;"
+        "}"
         "#controlsToolbar QPushButton[segmented=\"true\"] {"
-        "  background: #4a4a4a;"
-        "  color: #d0d0d0;"
-        "  border: 1px solid #555;"
-        "  padding: 4px 10px;"
-        "  font-size: 11px;"
-        "  font-weight: bold;"
-        "  min-height: 22px;"
+        "  background: transparent;"
+        "  color: #cfcfcf;"
         "}"
         "#controlsToolbar QPushButton[segmented=\"true\"]:checked {"
         "  background: #0078d4;"
         "  color: white;"
-        "  border-color: #005a9e;"
         "}"
         "#controlsToolbar QPushButton[segmented=\"true\"]:hover {"
-        "  background: #5a5a5a;"
+        "  background: rgba(255,255,255,0.06);"
         "}"
         "#controlsToolbar QPushButton[segmented=\"true\"]:checked:hover {"
         "  background: #1a8ae8;"
@@ -738,22 +844,20 @@ void MainWindow::createControls()
         "  border-radius: 4px;"
         "  padding: 4px;"
         "}"
+        "#controlsToolbar #segTrack {"
+        "  background: #e6e6e6;"
+        "  border: 1px solid #c0c0c0;"
+        "}"
         "#controlsToolbar QPushButton[segmented=\"true\"] {"
-        "  background: #e0e0e0;"
-        "  color: #333;"
-        "  border: 1px solid #aaa;"
-        "  padding: 4px 10px;"
-        "  font-size: 11px;"
-        "  font-weight: bold;"
-        "  min-height: 22px;"
+        "  background: transparent;"
+        "  color: #444;"
         "}"
         "#controlsToolbar QPushButton[segmented=\"true\"]:checked {"
         "  background: #0078d4;"
         "  color: white;"
-        "  border-color: #005a9e;"
         "}"
         "#controlsToolbar QPushButton[segmented=\"true\"]:hover {"
-        "  background: #d0d0d0;"
+        "  background: rgba(0,0,0,0.06);"
         "}"
         "#controlsToolbar QPushButton[segmented=\"true\"]:checked:hover {"
         "  background: #1a8ae8;"
@@ -799,6 +903,80 @@ void MainWindow::createControls()
         "}";
 
     QString style = QString(m_darkTheme ? darkToolbarStyle : lightToolbarStyle) + segmentShapeRules;
+    /* Swap the hardcoded Office-blue tokens for the host (Wireshark) accent so the
+     * toolbar's active segment matches the app. Covers checked bg, checked border,
+     * checked-hover, and the QLineEdit selection/focus colour in both themes. */
+    QColor accent = pcAccentColor();
+    style.replace("#0078d4", accent.name());
+    style.replace("#005a9e", accent.darker(125).name());
+    style.replace("#1a8ae8", accent.lighter(115).name());
+
+    /* ---- Row 2 / Row 3 component styling (themed) ---- */
+    const bool dk = m_darkTheme;
+    QString row23 = QString(
+        /* primary action (Filter) — accent-filled */
+        "#controlsToolbar QPushButton[action=\"true\"][primary=\"true\"] {"
+        "  background: %1; color: white; font-weight: bold; border: none;"
+        "}"
+        "#controlsToolbar QPushButton[action=\"true\"][primary=\"true\"]:hover { background: %2; }"
+        /* search field */
+        "#controlsToolbar QLineEdit#searchField {"
+        "  background: %3; border: 1px solid %4; border-radius: 8px;"
+        "  padding: 4px 8px; color: %5; min-height: 22px;"
+        "}"
+        "#controlsToolbar QLineEdit#searchField:focus { border-color: %1; }"
+        /* thin vertical divider */
+        "#controlsToolbar QFrame#vdiv { background: %4; max-width: 1px; border: none; }"
+        /* field chip (Edge / Node / Layout) */
+        "#controlsToolbar QFrame#fieldChip {"
+        "  background: %6; border: 1px solid %4; border-radius: 7px;"
+        "}"
+        "#controlsToolbar QLabel#fieldKey {"
+        "  color: %7; font-size: 10px; font-weight: bold; padding: 0 7px;"
+        "}"
+        "#controlsToolbar QFrame#fieldChip QComboBox {"
+        "  background: transparent; border: none; border-left: 1px solid %4;"
+        "  padding: 4px 6px 4px 8px; color: %5; font-size: 11px; min-height: 22px;"
+        "}"
+        "#controlsToolbar QFrame#fieldChip QComboBox::drop-down { border: none; width: 18px; }"
+        "#controlsToolbar QComboBox QAbstractItemView {"
+        "  background: %8; color: %5; border: 1px solid %4; border-radius: 6px;"
+        "  selection-background-color: %1; selection-color: white; outline: none;"
+        "  padding: 4px;"
+        "}"
+        "#controlsToolbar QComboBox QAbstractItemView::item {"
+        "  min-height: 22px; padding: 4px 10px; border-radius: 4px;"
+        "}"
+        "#controlsToolbar QComboBox QAbstractItemView::item:selected {"
+        "  background: %1; color: white;"
+        "}"
+        /* re-layout action button */
+        "#controlsToolbar QPushButton#relayoutBtn {"
+        "  background: transparent; color: %5; border: 1px solid %4;"
+        "  border-radius: 7px; padding: 4px 12px; font-size: 11px; min-height: 22px;"
+        "}"
+        "#controlsToolbar QPushButton#relayoutBtn:hover { border-color: %1; color: %9; }"
+        /* zoom pill */
+        "#controlsToolbar QWidget#zoomPill { background: %10; border: 1px solid %4; border-radius: 7px; }"
+        "#controlsToolbar QWidget#zoomPill QPushButton {"
+        "  background: transparent; color: %5; border: none; border-radius: 5px;"
+        "  padding: 3px 9px; font-size: 12px; min-width: 26px;"
+        "}"
+        "#controlsToolbar QWidget#zoomPill QPushButton:hover { background: %11; color: %9; }"
+    )
+    .arg(accent.name())                                       /* %1 accent          */
+    .arg(accent.darker(120).name())                           /* %2 accent hover    */
+    .arg(dk ? "#2a2a2a" : "#ffffff")                          /* %3 search bg       */
+    .arg(dk ? "#4a4a4a" : "#b0b0b0")                          /* %4 border          */
+    .arg(dk ? "#e0e0e0" : "#222222")                          /* %5 text            */
+    .arg(dk ? "#2d2d2d" : "#e0e0e0")                          /* %6 chip bg         */
+    .arg(dk ? "#a0a0a0" : "#666666")                          /* %7 field key       */
+    .arg(dk ? "#2b2b2b" : "#f6f6f6")                          /* %8 popup bg        */
+    .arg(dk ? "#ffffff" : accent.name())                      /* %9 hover text      */
+    .arg(dk ? "#232323" : "#e6e6e6")                          /* %10 zoom track     */
+    .arg(dk ? "rgba(255,255,255,0.06)" : "rgba(0,0,0,0.06)"); /* %11 zoom hover     */
+    style += row23;
+
     m_controlsWidget->setStyleSheet(style);
 
     m_controlsOuterLayout = new QVBoxLayout(m_controlsWidget);
@@ -825,6 +1003,29 @@ void MainWindow::createControls()
         QPushButton *btn = new QPushButton(text, m_controlsWidget);
         btn->setProperty("action", true);
         return btn;
+    };
+
+    /* Helper lambda: thin vertical divider for grouping toolbar clusters. */
+    auto makeVDivider = [this]() -> QFrame* {
+        QFrame *d = new QFrame(m_controlsWidget);
+        d->setObjectName("vdiv");
+        d->setFrameShape(QFrame::VLine);
+        d->setFixedWidth(1);
+        return d;
+    };
+
+    /* Helper lambda: wrap a set of segmented buttons in a recessed "track" so the
+     * group reads as a single pill (matches the restyle mockup). */
+    auto makeSegGroup = [this](std::initializer_list<QPushButton*> btns) -> QWidget* {
+        QWidget *track = new QWidget(m_controlsWidget);
+        track->setObjectName("segTrack");
+        track->setAttribute(Qt::WA_StyledBackground, true);
+        QHBoxLayout *l = new QHBoxLayout(track);
+        l->setContentsMargins(3, 3, 3, 3);
+        l->setSpacing(2);
+        for (QPushButton *b : btns)
+            l->addWidget(b);   /* reparents b into the track */
+        return track;
     };
 
     /* -- Top N segment group -- */
@@ -904,12 +1105,13 @@ void MainWindow::createControls()
             "  font-size: 14px;"
             "}"
             "QPushButton:hover {"
-            "  background: %4;"
+            "  border-color: %4;"
+            "  color: %4;"
             "}")
             .arg(m_darkTheme ? "#4a4a4a" : "#d8d8d8")
             .arg(m_darkTheme ? "#e0e0e0" : "#333")
             .arg(m_darkTheme ? "#666" : "#aaa")
-            .arg(m_darkTheme ? "#5a5a5a" : "#c0c0c0")
+            .arg(pcAccentColor().name())
         );
         return btn;
     };
@@ -928,24 +1130,18 @@ void MainWindow::createControls()
     m_lineThicknessCheckBox->setChecked(false);
     connect(m_lineThicknessCheckBox, &QCheckBox::toggled, this, &MainWindow::onLineThicknessToggled);
 
-    /* Layout Row 1 */
+    /* Layout Row 1 — each segmented group wrapped in a recessed pill track */
     m_controlsRow1->addWidget(topLabel);
-    m_controlsRow1->addWidget(m_top10Btn);
-    m_controlsRow1->addWidget(m_top25Btn);
-    m_controlsRow1->addWidget(m_top50Btn);
+    m_controlsRow1->addWidget(makeSegGroup({m_top10Btn, m_top25Btn, m_top50Btn}));
     m_controlsRow1->addSpacing(8);
     m_controlsRow1->addWidget(metricLabel);
-    m_controlsRow1->addWidget(m_packetsBtn);
-    m_controlsRow1->addWidget(m_bytesBtn);
+    m_controlsRow1->addWidget(makeSegGroup({m_packetsBtn, m_bytesBtn}));
     m_controlsRow1->addSpacing(8);
     m_controlsRow1->addWidget(viewLabel);
-    m_controlsRow1->addWidget(m_circleBtn);
-    m_controlsRow1->addWidget(m_tableBtn);
-    m_controlsRow1->addWidget(m_graphBtn);
+    m_controlsRow1->addWidget(makeSegGroup({m_circleBtn, m_tableBtn, m_graphBtn}));
     m_controlsRow1->addSpacing(8);
     m_controlsRow1->addWidget(modeLabel);
-    m_controlsRow1->addWidget(m_ipBtn);
-    m_controlsRow1->addWidget(m_macBtn);
+    m_controlsRow1->addWidget(makeSegGroup({m_ipBtn, m_macBtn}));
     m_controlsRow1->addSpacing(8);
     m_controlsRow1->addWidget(m_lineThicknessCheckBox);
     m_controlsRow1->addStretch();
@@ -958,19 +1154,32 @@ void MainWindow::createControls()
     m_controlsRow2->setSpacing(6);
     m_controlsRow2->setContentsMargins(0, 0, 0, 0);
 
+    /* Outline icons coloured to match the resting button text (white on the
+     * accent-filled primary). */
+    const QColor iconClr   = m_darkTheme ? QColor(0xC8, 0xC8, 0xC8) : QColor(0x44, 0x44, 0x44);
+    const QSize  iconSz(15, 15);
+
     m_applyFilterBtn = makeActionBtn("Filter");
-    m_applyFilterBtn->setStyleSheet(
-        m_applyFilterBtn->styleSheet() +
-        "QPushButton { font-weight: bold; }"
-    );
+    m_applyFilterBtn->setIcon(pcOutlineIcon("filter", iconClr));
+    m_applyFilterBtn->setIconSize(iconSz);
     m_clearFilterBtn = makeActionBtn("Clear");
+    m_clearFilterBtn->setIcon(pcOutlineIcon("clear", iconClr));
+    m_clearFilterBtn->setIconSize(iconSz);
     m_clearFilterBtn->setToolTip("Clear Wireshark display filter and show all connections");
     m_reloadDataBtn = makeActionBtn("Reload");
+    m_reloadDataBtn->setIcon(pcOutlineIcon("reload", iconClr));
+    m_reloadDataBtn->setIconSize(iconSz);
     m_savePDFBtn = makeActionBtn("PDF");
+    m_savePDFBtn->setIcon(pcOutlineIcon("pdf", iconClr));
+    m_savePDFBtn->setIconSize(iconSz);
     m_savePDFBtn->setToolTip("Save report as PDF with circle visualization and IP pair list");
     m_sendToNtopBtn = makeActionBtn("Send to NTOP");
+    m_sendToNtopBtn->setIcon(pcOutlineIcon("send", iconClr));
+    m_sendToNtopBtn->setIconSize(iconSz);
     m_sendToNtopBtn->setToolTip("Upload current capture to ntopng for analysis");
     m_sendToMalcolmBtn = makeActionBtn("Send to Malcolm");
+    m_sendToMalcolmBtn->setIcon(pcOutlineIcon("send", iconClr));
+    m_sendToMalcolmBtn->setIconSize(iconSz);
     m_sendToMalcolmBtn->setToolTip("Upload current capture to Malcolm / Arkime for deep analysis");
     connect(m_applyFilterBtn, &QPushButton::clicked, this, &MainWindow::onApplyFilterClicked);
     connect(m_clearFilterBtn, &QPushButton::clicked, this, &MainWindow::onClearFilterClicked);
@@ -980,10 +1189,14 @@ void MainWindow::createControls()
     connect(m_sendToMalcolmBtn, &QPushButton::clicked, this, &MainWindow::onSendToMalcolmClicked);
     /* (ntopng right-click config removed — use ⚙ Settings instead) */
 
-    /* Search bar */
+    /* Search bar — styled as a rounded search field with a leading magnifier
+     * and a trailing clickable "?" help glyph (replaces the "— ? for help"
+     * placeholder text). */
     m_searchLineEdit = new QLineEdit(m_controlsWidget);
-    m_searchLineEdit->setPlaceholderText("Partial IP or CIDR (e.g., 192.168.1 or 10.0.0.0/24)");
+    m_searchLineEdit->setObjectName("searchField");
+    m_searchLineEdit->setPlaceholderText("Protocol, IP, CIDR, or port  (e.g. TCP 443)");
     m_searchLineEdit->setMinimumWidth(160);
+    m_searchLineEdit->addAction(pcOutlineIcon("search", iconClr), QLineEdit::LeadingPosition);
 
     /* Autocomplete: all known protocol + category keywords */
     {
@@ -1034,12 +1247,17 @@ void MainWindow::createControls()
         }
     });
 
-    /* Layout Row 2 */
+    /* Layout Row 2 — clusters separated by dividers: filter · data · integrations */
     m_controlsRow2->addWidget(m_applyFilterBtn);
     m_controlsRow2->addWidget(m_clearFilterBtn);
     m_controlsRow2->addSpacing(6);
+    m_controlsRow2->addWidget(makeVDivider());
+    m_controlsRow2->addSpacing(6);
     m_controlsRow2->addWidget(m_reloadDataBtn);
     m_controlsRow2->addWidget(m_savePDFBtn);
+    m_controlsRow2->addSpacing(6);
+    m_controlsRow2->addWidget(makeVDivider());
+    m_controlsRow2->addSpacing(6);
     m_controlsRow2->addWidget(m_sendToNtopBtn);
     m_controlsRow2->addWidget(m_sendToMalcolmBtn);
     m_controlsRow2->addSpacing(12);
@@ -1051,8 +1269,33 @@ void MainWindow::createControls()
     graphRow->setSpacing(6);
     graphRow->setContentsMargins(0, 0, 0, 0);
 
+    /* Helper: fuse an uppercase key label + combo into one rounded "field chip". */
+    auto makeFieldChip = [this](const QString &key, QComboBox *combo) -> QWidget* {
+        QFrame *chip = new QFrame(m_graphControlsRow);
+        chip->setObjectName("fieldChip");
+        QHBoxLayout *l = new QHBoxLayout(chip);
+        l->setContentsMargins(0, 0, 0, 0);
+        l->setSpacing(0);
+        QLabel *k = new QLabel(key, chip);
+        k->setObjectName("fieldKey");
+        l->addWidget(k);
+        l->addWidget(combo);   /* reparents combo into the chip */
+        return chip;
+    };
+
+    /* Helper: wrap the three zoom buttons in a recessed pill (like row 1). */
+    auto makeZoomPill = [this](std::initializer_list<QPushButton*> btns) -> QWidget* {
+        QWidget *pill = new QWidget(m_graphControlsRow);
+        pill->setObjectName("zoomPill");
+        pill->setAttribute(Qt::WA_StyledBackground, true);
+        QHBoxLayout *l = new QHBoxLayout(pill);
+        l->setContentsMargins(3, 3, 3, 3);
+        l->setSpacing(2);
+        for (QPushButton *b : btns) l->addWidget(b);
+        return pill;
+    };
+
     /* Edge color */
-    QLabel *edgeColorLabel = new QLabel("Edge:", m_graphControlsRow);
     m_graphEdgeColorCombo  = new QComboBox(m_graphControlsRow);
     m_graphEdgeColorCombo->addItem("Protocol",      QVariant(0));
     m_graphEdgeColorCombo->addItem("TCP Window",    QVariant(6));
@@ -1072,7 +1315,6 @@ void MainWindow::createControls()
         "  TCP Window: green=ok (>=32KB) / yellow-green=mild (8-32KB) / yellow=moderate (4-8KB) / orange=constrained (<4KB) / red=zero-window stall");
 
     /* Node color */
-    QLabel *nodeColorLabel = new QLabel("Node:", m_graphControlsRow);
     m_graphNodeColorCombo  = new QComboBox(m_graphControlsRow);
     m_graphNodeColorCombo->addItem("Service / Port",  QVariant(0));
     m_graphNodeColorCombo->addItem("Role (Int/Ext)",  QVariant(1));
@@ -1087,7 +1329,6 @@ void MainWindow::createControls()
         "  Protocol: dominant application protocol (same palette as circle view)");
 
     /* Layout */
-    QLabel *layoutLabel = new QLabel("Layout:", m_graphControlsRow);
     m_graphLayoutCombo  = new QComboBox(m_graphControlsRow);
     m_graphLayoutCombo->addItem("Force-directed", QVariant(0));
     m_graphLayoutCombo->addItem("Star",           QVariant(1));
@@ -1116,9 +1357,27 @@ void MainWindow::createControls()
      * is still nullptr. */
     m_graphLayoutCombo->setCurrentIndex(GraphWidget::LAYOUT_STAR);
 
-    QPushButton *relayoutBtn = new QPushButton("\u21BA Re-layout", m_graphControlsRow);
+    /* macOS uses a native combo popup that ignores stylesheets. Force Qt's own
+     * QListView so the dropdown honours the dark themed styling below. Then widen
+     * the popup to fit the longest item so nothing is truncated (the closed combo
+     * stays narrow inside its field chip). */
+    auto styleComboPopup = [](QComboBox *c) {
+        c->setView(new QListView(c));
+        QFontMetrics fm(c->font());
+        int w = 0;
+        for (int i = 0; i < c->count(); ++i)
+            w = qMax(w, fm.horizontalAdvance(c->itemText(i)));
+        c->view()->setMinimumWidth(w + 44);   /* item padding + selection margins */
+    };
+    styleComboPopup(m_graphEdgeColorCombo);
+    styleComboPopup(m_graphNodeColorCombo);
+    styleComboPopup(m_graphLayoutCombo);
+
+    QPushButton *relayoutBtn = new QPushButton("Re-layout", m_graphControlsRow);
+    relayoutBtn->setObjectName("relayoutBtn");
+    relayoutBtn->setIcon(pcOutlineIcon("reload", iconClr));
+    relayoutBtn->setIconSize(QSize(14, 14));
     relayoutBtn->setToolTip("Re-run selected layout from scratch");
-    relayoutBtn->setFixedHeight(24);
 
     connect(m_graphEdgeColorCombo, QOverload<int>::of(&QComboBox::currentIndexChanged),
             this, &MainWindow::onGraphEdgeColorChanged);
@@ -1128,26 +1387,12 @@ void MainWindow::createControls()
             this, &MainWindow::onGraphLayoutChanged);
     connect(relayoutBtn, &QPushButton::clicked, this, &MainWindow::onGraphRelayout);
 
-    graphRow->addWidget(edgeColorLabel);
-    graphRow->addWidget(m_graphEdgeColorCombo);
-    graphRow->addSpacing(8);
-    graphRow->addWidget(nodeColorLabel);
-    graphRow->addWidget(m_graphNodeColorCombo);
-    graphRow->addSpacing(8);
-    graphRow->addWidget(layoutLabel);
-    graphRow->addWidget(m_graphLayoutCombo);
-    graphRow->addSpacing(8);
-    graphRow->addWidget(relayoutBtn);
-    graphRow->addSpacing(12);
-
-    /* Zoom controls */
-    QLabel *zoomLabel = new QLabel("Zoom:", m_graphControlsRow);
+    /* Zoom controls — created here so they can go straight into the pill */
+    QLabel *zoomLabel = new QLabel("ZOOM", m_graphControlsRow);
+    zoomLabel->setObjectName("fieldKey");
     QPushButton *zoomOutBtn   = new QPushButton("\u2212", m_graphControlsRow);  /* − */
     QPushButton *zoomResetBtn = new QPushButton("1:1",    m_graphControlsRow);
     QPushButton *zoomInBtn    = new QPushButton("+",      m_graphControlsRow);
-    zoomOutBtn->setFixedSize(24, 24);
-    zoomInBtn->setFixedSize(24, 24);
-    zoomResetBtn->setFixedHeight(24);
     zoomOutBtn->setToolTip("Zoom out  (or scroll wheel down)");
     zoomInBtn->setToolTip("Zoom in  (or scroll wheel up)");
     zoomResetBtn->setToolTip("Reset zoom to 100%");
@@ -1155,10 +1400,19 @@ void MainWindow::createControls()
     connect(zoomInBtn,    &QPushButton::clicked, this, [this]{ if (m_graphWidget) m_graphWidget->zoomIn(); });
     connect(zoomResetBtn, &QPushButton::clicked, this, [this]{ if (m_graphWidget) m_graphWidget->zoomReset(); });
 
+    /* Layout Row 3 — field chips · divider · re-layout · divider · zoom pill */
+    graphRow->addWidget(makeFieldChip("EDGE",   m_graphEdgeColorCombo));
+    graphRow->addWidget(makeFieldChip("NODE",   m_graphNodeColorCombo));
+    graphRow->addWidget(makeFieldChip("LAYOUT", m_graphLayoutCombo));
+    graphRow->addSpacing(6);
+    graphRow->addWidget(makeVDivider());
+    graphRow->addSpacing(6);
+    graphRow->addWidget(relayoutBtn);
+    graphRow->addSpacing(6);
+    graphRow->addWidget(makeVDivider());
+    graphRow->addSpacing(6);
     graphRow->addWidget(zoomLabel);
-    graphRow->addWidget(zoomOutBtn);
-    graphRow->addWidget(zoomResetBtn);
-    graphRow->addWidget(zoomInBtn);
+    graphRow->addWidget(makeZoomPill({zoomOutBtn, zoomResetBtn, zoomInBtn}));
     graphRow->addStretch();
 
     m_graphControlsRow->setVisible(false);  /* hidden until Graph view is active */
@@ -2471,19 +2725,7 @@ void MainWindow::onTableContextMenu(const QPoint &pos)
 
     /* ── Build menu ── */
     QMenu menu;
-    if (m_darkTheme) {
-        menu.setStyleSheet(
-            "QMenu {"
-            "  background: #2b2b2b;"
-            "  color: #e0e0e0;"
-            "  border: 1px solid #555;"
-            "  padding: 4px;"
-            "}"
-            "QMenu::item { padding: 6px 20px; }"
-            "QMenu::item:selected { background: #0078d4; color: white; }"
-            "QMenu::item:disabled { color: #666; }"
-        );
-    }
+    menu.setStyleSheet(pcMenuStyleSheet());
 
     /* ── Wireshark section ── */
     menu.addSection("Wireshark");
@@ -2709,6 +2951,7 @@ bool MainWindow::eventFilter(QObject *obj, QEvent *event)
 void MainWindow::onPairListContextMenu(const QPoint &pos)
 {
     QMenu menu(m_pairListWidget);
+    menu.setStyleSheet(pcMenuStyleSheet());
     QAction *actAll    = menu.addAction("Select All");
     QAction *actNone   = menu.addAction("Select None");
     QAction *actInvert = menu.addAction("Invert Selection");
@@ -3257,6 +3500,12 @@ void MainWindow::onClearFilterClicked()
 
     /* Apply an empty filter to Wireshark to clear the display filter and show all packets */
     plugin_if_apply_filter("", true);
+
+    /* Also empty the search field (clearing emits textChanged → applySearchFilter(""))
+     * and reload the data so the view returns to its full, unfiltered state. */
+    if (m_searchLineEdit)
+        m_searchLineEdit->clear();
+    onReloadDataClicked();
 }
 
 void MainWindow::onSavePDFClicked()
@@ -9950,16 +10199,7 @@ void ConnectionPopup::showWifiContextMenu(const QPoint &pos)
     QMenu menu;  /* NOT parented to 'this' &mdash; must stay stack-safe when
                    plugin_if_apply_filter re-enters the event loop and
                    triggers our deferred destruction.                    */
-    if (isDarkTheme()) {
-        menu.setStyleSheet(
-            "QMenu {"
-            "  background: #2b2b2b; color: #e0e0e0;"
-            "  border: 1px solid #555; padding: 4px;"
-            "}"
-            "QMenu::item { padding: 6px 20px; }"
-            "QMenu::item:selected { background: #0078d4; color: white; }"
-        );
-    }
+    menu.setStyleSheet(pcMenuStyleSheet());
 
     QAction *filterAction = menu.addAction("Apply Wi-Fi Filter in Wireshark");
 
@@ -10451,16 +10691,7 @@ void ConnectionPopup::onMacTableContextMenu(const QPoint &pos)
     const MacRowData &rd = m_macRowData[row];
 
     QMenu menu;
-    if (isDarkTheme()) {
-        menu.setStyleSheet(
-            "QMenu {"
-            "  background: #2b2b2b; color: #e0e0e0;"
-            "  border: 1px solid #555; padding: 4px;"
-            "}"
-            "QMenu::item { padding: 6px 20px; }"
-            "QMenu::item:selected { background: #0078d4; color: white; }"
-        );
-    }
+    menu.setStyleSheet(pcMenuStyleSheet());
 
     QAction *filterAct = menu.addAction("Apply Filter in Wireshark");
     menu.addSeparator();
@@ -10541,16 +10772,7 @@ void ConnectionPopup::showL2ContextMenu(const QPoint &pos)
     QMenu menu;  /* NOT parented to 'this' &mdash; must stay stack-safe when
                    plugin_if_apply_filter re-enters the event loop and
                    triggers our deferred destruction.                    */
-    if (isDarkTheme()) {
-        menu.setStyleSheet(
-            "QMenu {"
-            "  background: #2b2b2b; color: #e0e0e0;"
-            "  border: 1px solid #555; padding: 4px;"
-            "}"
-            "QMenu::item { padding: 6px 20px; }"
-            "QMenu::item:selected { background: #0078d4; color: white; }"
-        );
-    }
+    menu.setStyleSheet(pcMenuStyleSheet());
 
     QAction *filterAction = menu.addAction("Apply Filter in Wireshark");
     menu.addSeparator();
@@ -10639,27 +10861,7 @@ void ConnectionPopup::showContextMenu(const QPoint &pos)
     QMenu menu;  /* NOT parented to 'this' &mdash; must stay stack-safe when
                    plugin_if_apply_filter re-enters the event loop and
                    triggers our deferred destruction.                    */
-    if (isDarkTheme()) {
-        menu.setStyleSheet(
-            "QMenu {"
-            "  background: #2b2b2b;"
-            "  color: #e0e0e0;"
-            "  border: 1px solid #555;"
-            "  padding: 4px;"
-            "}"
-            "QMenu::item {"
-            "  padding: 6px 20px;"
-            "}"
-            "QMenu::item:selected {"
-            "  background: #0078d4;"
-            "  color: white;"
-            "}"
-            "QMenu::item:disabled {"
-            "  color: #666;"
-            "}"
-        );
-    }
-    /* Light theme: no custom stylesheet — use native platform menu */
+    menu.setStyleSheet(pcMenuStyleSheet());
 
     /* ── Wireshark section ── */
     menu.addSection("Wireshark");

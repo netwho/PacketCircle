@@ -5,7 +5,7 @@
 include(WiresharkPlugin)
 
 # Plugin name and version info (major minor micro extra)
-set_module_info(packetcircle 0 5 3 0)
+set_module_info(packetcircle 0 5 4 0)
 
 # Enable Qt MOC and resource compilation
 SET(CMAKE_AUTOMOC ON)

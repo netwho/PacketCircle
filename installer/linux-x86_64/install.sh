@@ -4,7 +4,7 @@
 # =============================================================================
 #
 # Supports:
-#   - Installing v.0.5.3 (latest) or v.0.4.7 (stable legacy)
+#   - Installing v.0.5.4 (latest) or v.0.4.7 (stable legacy)
 #   - Two flavors: Standard (default) or Experimental (enables Graph View)
 #   - Detecting an already-installed version
 #   - Upgrading, downgrading, and uninstalling
@@ -14,7 +14,7 @@
 #   ~/.local/lib/wireshark/plugins/<version>/epan/
 #
 # Binaries are in version subdirectories next to this script:
-#   v.0.5.3/packetcircle-wsNN.so   (ws40, ws42, ws44, ws46)
+#   v.0.5.4/packetcircle-wsNN.so   (ws40, ws42, ws44, ws46)
 #   v.0.4.7/packetcircle-wsNN.so   (ws40, ws42, ws44, ws46)
 #
 # Usage:
@@ -25,7 +25,7 @@ set -e
 
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 PLUGIN_NAME="packetcircle.so"
-LATEST_VERSION="0.5.3"
+LATEST_VERSION="0.5.4"
 LEGACY_VERSION="0.4.7"
 
 RED='\033[0;31m'
@@ -42,7 +42,7 @@ printf "${BLUE}╔════════════════════�
 printf "${BLUE}║   PacketCircle Installer for Linux               ║${NC}\n"
 printf "${BLUE}║   x86_64 (64-bit Intel/AMD)                      ║${NC}\n"
 printf "${BLUE}║   Supports Wireshark 4.0.x, 4.2.x, 4.4.x, 4.6.x  ║${NC}\n"
-printf "${BLUE}║   Available: v.0.5.3 (latest), v.0.4.7           ║${NC}\n"
+printf "${BLUE}║   Available: v.0.5.4 (latest), v.0.4.7           ║${NC}\n"
 printf "${BLUE}╚══════════════════════════════════════════════════╝${NC}\n"
 printf "\n"
 
