@@ -246,8 +246,12 @@ for CHECK_DIR in \
     "/usr/lib64/wireshark/plugins/$PLUGIN_PATH_ID/epan" \
     "/usr/lib/wireshark/plugins/$PLUGIN_PATH_ID/epan"; do
     if [ -f "$CHECK_DIR/$PLUGIN_NAME" ]; then
+        # Match the standalone version string (e.g. "v.0.5.4"). Older binaries
+        # (<= v0.4.x) embed it as "PacketCircle v.0.4.7"; newer ones store the
+        # "PacketCircle" prefix and the version as separate literals, so anchor
+        # on the "v.N.N.N" token, which is unique in the plugin binary.
         INSTALLED_VERSION=$(strings "$CHECK_DIR/$PLUGIN_NAME" 2>/dev/null \
-            | grep -oE 'PacketCircle v\.[0-9]+\.[0-9]+\.[0-9]+' | head -1 \
+            | grep -oE 'v\.[0-9]+\.[0-9]+\.[0-9]+' | head -1 \
             | grep -oE '[0-9]+\.[0-9]+\.[0-9]+' || true)
         INSTALLED_PATH="$CHECK_DIR/$PLUGIN_NAME"
         if [ -n "$INSTALLED_VERSION" ]; then

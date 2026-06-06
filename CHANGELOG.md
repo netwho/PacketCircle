@@ -19,6 +19,7 @@ cohesive app. No functional/analysis behaviour changed; this release is visual.
 
 ### Fixed
 - **Anomaly Score breakdown: "packets/port" factor showed literal `%.1f`** — The scan-rate factor used a C `printf` specifier (`%.1f`) inside `QString::arg()`, which only understands Qt `%1` placeholders, so the value was never substituted and the popup displayed the literal text "%.1f packets/port — rapid scan rate". Fixed to use `%1` with Qt numeric formatting (`'f'`, 1 decimal).
+- **Installers: "Installed now: unknown version" for v0.5.x plugins** — All three installers (Linux/macOS/Windows) detected the installed plugin version by scanning the binary for the literal `PacketCircle v.X.Y.Z`. Since v0.5.0 the version is composed at runtime (`"PacketCircle %1"` + `PC_VERSION`), so that contiguous string no longer exists and detection silently failed (only legacy v0.4.x binaries matched). Fixed to anchor on the standalone `v.N.N.N` token, which is present in every build.
 
 - AI-Assisted: yes (Claude) — full UI restyle (toolbar pill, palette accent, menus + light theme, legend cards/headers, row 2 icons + search field, row 3 field chips + zoom pill + combo popups), anomaly-score label fix, version bump, installer + doc updates
 

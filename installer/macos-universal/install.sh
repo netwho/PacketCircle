@@ -148,8 +148,10 @@ done
 for dir in "$PERSONAL_PLUGIN_DIR" $EXTRA_PERSONAL_DIRS "$SYSTEM_PLUGIN_DIR"; do
     [ -n "$dir" ] || continue
     [ -f "$dir/$PLUGIN_NAME" ] || continue
+    # Anchor on the standalone "v.N.N.N" token. v0.4.x embeds "PacketCircle v.0.4.7";
+    # v0.5.x stores "PacketCircle" and the version as separate literals.
     INSTALLED_VERSION=$(strings "$dir/$PLUGIN_NAME" 2>/dev/null \
-        | grep -oE 'PacketCircle v\.[0-9]+\.[0-9]+\.[0-9]+' | head -1 \
+        | grep -oE 'v\.[0-9]+\.[0-9]+\.[0-9]+' | head -1 \
         | grep -oE '[0-9]+\.[0-9]+\.[0-9]+')
     INSTALLED_PATH="$dir/$PLUGIN_NAME"
     break

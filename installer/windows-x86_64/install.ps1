@@ -215,7 +215,9 @@ foreach ($dir in (@($PersonalPluginDir, "$env:LOCALAPPDATA\Wireshark\plugins\$Pl
         try {
             $bytes = [System.IO.File]::ReadAllBytes($InstalledPath)
             $text  = [System.Text.Encoding]::ASCII.GetString($bytes)
-            if ($text -match 'PacketCircle v\.(\d+\.\d+\.\d+)') {
+            # Anchor on the standalone "v.N.N.N" token (v0.5.x stores "PacketCircle"
+            # and the version as separate literals; v0.4.x had them contiguous).
+            if ($text -match 'v\.(\d+\.\d+\.\d+)') {
                 $InstalledVersion = $Matches[1]
                 Write-Host "    Embedded version: " -NoNewline; Write-Host "v.$InstalledVersion" -ForegroundColor Cyan
             }
